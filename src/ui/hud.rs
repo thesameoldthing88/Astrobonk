@@ -1,0 +1,436 @@
+//! In-run HUD: timer, currencies, XP/HP bars, weapon & item trays, boss bar,
+//! banners, interact prompt, powerup timers, hurt vignette.
+
+use super::*;
+use crate::content::weapons::WeaponKind;
+use crate::enemies::{Boss, Enemy};
+use crate::interact::InteractPrompt;
+use crate::messages::BannerMsg;
+use crate::run::{RunState, xp_needed};
+use bevy::prelude::*;
+
+#[derive(Component)]
+pub struct HudRoot;
+#[derive(Component)]
+pub struct TimerText;
+#[derive(Component)]
+pub struct KillsText;
+#[derive(Component)]
+pub struct GoldText;
+#[derive(Component)]
+pub struct SilverText;
+#[derive(Component)]
+pub struct LevelText;
+#[derive(Component)]
+pub struct XpFill;
+#[derive(Component)]
+pub struct HpFill;
+#[derive(Component)]
+pub struct HpText;
+#[derive(Component)]
+pub struct WeaponRow;
+#[derive(Component)]
+pub struct BannerText;
+#[derive(Component)]
+pub struct PromptText;
+#[derive(Component)]
+pub struct BossBarWrap;
+#[derive(Component)]
+pub struct BossBarFill;
+#[derive(Component)]
+pub struct BossBarName;
+#[derive(Component)]
+pub struct PowerupText;
+#[derive(Component)]
+pub struct Vignette;
+
+#[derive(Resource, Default)]
+pub struct BannerQueue {
+    pub current: Option<(String, f32)>,
+    pub queue: Vec<String>,
+}
+
+pub fn spawn_hud(mut commands: Commands) {
+    commands
+        .spawn((
+            HudRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(0.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .with_children(|root| {
+            // hurt vignette
+            root.spawn((
+                Vignette,
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(1.0, 0.1, 0.1, 0.0)),
+                Pickable::IGNORE,
+            ));
+
+            // timer, top center
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(10.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((TimerText, txt("10:00", 44.0, Color::WHITE)));
+                });
+
+            // boss bar under the timer
+            root.spawn((
+                BossBarWrap,
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(64.0),
+                    left: Val::Percent(25.0),
+                    width: Val::Percent(50.0),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(2.0),
+                    ..default()
+                },
+                Visibility::Hidden,
+            ))
+                .with_children(|c| {
+                    c.spawn((BossBarName, txt("BOSS", FONT_SMALL, Color::srgb(1.0, 0.5, 0.5))));
+                    c.spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(14.0),
+                            border: UiRect::all(Val::Px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+                        BorderColor::all(Color::srgb(0.6, 0.2, 0.2)),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            BossBarFill,
+                            Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+                            BackgroundColor(Color::srgb(0.9, 0.2, 0.25)),
+                        ));
+                    });
+                });
+
+            // counters, top right
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(12.0),
+                right: Val::Px(16.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::FlexEnd,
+                row_gap: Val::Px(2.0),
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((KillsText, txt("BONKS 0", FONT_MED, Color::srgb(0.9, 0.9, 1.0))));
+                    c.spawn((GoldText, txt("GOLD 0", FONT_MED, Color::srgb(1.0, 0.85, 0.3))));
+                    c.spawn((SilverText, txt("SILVER +0", FONT_MED, Color::srgb(0.75, 0.85, 1.0))));
+                    c.spawn((PowerupText, txt("", FONT_SMALL, Color::srgb(0.85, 0.5, 1.0))));
+                });
+
+            // banner center
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(22.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((BannerText, txt("", 30.0, Color::srgb(1.0, 0.9, 0.4))));
+                });
+
+            // interact prompt
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(150.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((PromptText, txt("", FONT_MED, Color::srgb(0.6, 1.0, 0.8))));
+                });
+
+            // bottom cluster: hp bar, xp bar, weapon row
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(12.0),
+                left: Val::Percent(18.0),
+                width: Val::Percent(64.0),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(6.0),
+                ..default()
+            },))
+                .with_children(|c| {
+                    // weapons tray
+                    c.spawn((
+                        WeaponRow,
+                        Node {
+                            column_gap: Val::Px(6.0),
+                            align_items: AlignItems::Center,
+                            height: Val::Px(34.0),
+                            ..default()
+                        },
+                    ));
+                    // hp
+                    c.spawn((Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(16.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                        BorderColor::all(Color::srgb(0.3, 0.1, 0.1)),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            HpFill,
+                            Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
+                            BackgroundColor(Color::srgb(0.85, 0.25, 0.3)),
+                        ));
+                        bar.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                width: Val::Percent(100.0),
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },
+                        ))
+                        .with_children(|t| {
+                            t.spawn((HpText, txt("100/100", 13.0, Color::WHITE)));
+                        });
+                    });
+                    // xp
+                    c.spawn((Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Px(12.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                        BorderColor::all(Color::srgb(0.1, 0.3, 0.15)),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            XpFill,
+                            Node { width: Val::Percent(0.0), height: Val::Percent(100.0), ..default() },
+                            BackgroundColor(Color::srgb(0.3, 0.95, 0.45)),
+                        ));
+                    });
+                    c.spawn((Node { justify_content: JustifyContent::Center, ..default() },))
+                        .with_children(|t| {
+                            t.spawn((LevelText, txt("LV 1", FONT_MED, Color::srgb(0.5, 1.0, 0.6))));
+                        });
+                });
+        });
+}
+
+pub fn despawn_hud(mut commands: Commands, q: Query<Entity, With<HudRoot>>) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+}
+
+#[allow(clippy::type_complexity)]
+pub fn update_hud(
+    run: Res<RunState>,
+    prompt: Res<InteractPrompt>,
+    mut sets: ParamSet<(
+        Query<&mut Text, With<TimerText>>,
+        Query<&mut Text, With<KillsText>>,
+        Query<&mut Text, With<GoldText>>,
+        Query<&mut Text, With<SilverText>>,
+        Query<&mut Text, With<LevelText>>,
+        Query<&mut Text, With<HpText>>,
+        Query<&mut Text, With<PromptText>>,
+        Query<&mut Text, With<PowerupText>>,
+    )>,
+    mut fills: ParamSet<(
+        Query<&mut Node, With<XpFill>>,
+        Query<&mut Node, With<HpFill>>,
+    )>,
+    mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
+) {
+    if let Ok(mut t) = sets.p0().single_mut() {
+        if run.static_active {
+            let m = (run.static_timer / 60.0) as u32;
+            let s = (run.static_timer % 60.0) as u32;
+            t.0 = format!("THE STATIC {m}:{s:02}");
+        } else {
+            let m = (run.timer / 60.0) as u32;
+            let s = (run.timer % 60.0) as u32;
+            t.0 = format!("{m}:{s:02}");
+        }
+    }
+    if let Ok(mut t) = sets.p1().single_mut() {
+        t.0 = format!("BONKS {}", run.kills);
+    }
+    if let Ok(mut t) = sets.p2().single_mut() {
+        t.0 = format!("GOLD {}", run.gold);
+    }
+    if let Ok(mut t) = sets.p3().single_mut() {
+        t.0 = format!("SILVER +{}", run.silver_run);
+    }
+    if let Ok(mut t) = sets.p4().single_mut() {
+        t.0 = format!("LV {}", run.level);
+    }
+    if let Ok(mut t) = sets.p5().single_mut() {
+        t.0 = format!("{:.0}/{:.0}", run.hp.max(0.0), run.stats.max_hp);
+    }
+    if let Ok(mut t) = sets.p6().single_mut() {
+        t.0 = prompt.0.clone().unwrap_or_default();
+    }
+    if let Ok(mut t) = sets.p7().single_mut() {
+        let s: Vec<String> = run
+            .powerups
+            .iter()
+            .map(|(k, secs)| format!("{:?} {:.0}s", k, secs))
+            .collect();
+        t.0 = s.join("  ");
+    }
+    if let Ok(mut n) = fills.p0().single_mut() {
+        n.width = Val::Percent((run.xp / xp_needed(run.level).max(0.001) * 100.0).clamp(0.0, 100.0));
+    }
+    if let Ok(mut n) = fills.p1().single_mut() {
+        n.width = Val::Percent((run.hp / run.stats.max_hp * 100.0).clamp(0.0, 100.0));
+    }
+    if let Ok(mut bg) = vignette.single_mut() {
+        bg.0 = Color::srgba(1.0, 0.1, 0.1, (run.iframes * 0.55).clamp(0.0, 0.4));
+    }
+}
+
+/// Rebuild the weapon tray when loadout changes.
+pub fn update_weapon_row(
+    mut commands: Commands,
+    run: Res<RunState>,
+    mut cache: Local<Vec<(WeaponKind, u32)>>,
+    q_row: Query<Entity, With<WeaponRow>>,
+) {
+    let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
+    if *cache == current {
+        return;
+    }
+    *cache = current.clone();
+    let Ok(row) = q_row.single() else { return };
+    commands.entity(row).despawn_related::<Children>();
+    commands.entity(row).with_children(|c| {
+        for (kind, level) in current {
+            let def = kind.def();
+            c.spawn((
+                Node {
+                    width: Val::Px(60.0),
+                    height: Val::Px(30.0),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(4.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.8)),
+                BorderColor::all(def.color),
+            ))
+            .with_children(|slot| {
+                let tag: String = def.name.chars().take(3).collect();
+                slot.spawn(txt(format!("{} {}", tag.to_uppercase(), level), 13.0, def.color));
+            });
+        }
+        // item chips
+        for (item, count) in run.items.iter() {
+            let d = item.def();
+            c.spawn((
+                Node {
+                    padding: UiRect::axes(Val::Px(5.0), Val::Px(2.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.7)),
+                BorderColor::all(d.rarity.color()),
+            ))
+            .with_children(|chip| {
+                let tag: String = d.name.chars().take(2).collect();
+                chip.spawn(txt(format!("{tag}{count}"), 11.0, d.rarity.color()));
+            });
+        }
+    });
+}
+
+pub fn update_boss_bar(
+    q_boss: Query<(&Enemy, &Boss)>,
+    mut wrap: Query<&mut Visibility, With<BossBarWrap>>,
+    mut fill: Query<&mut Node, With<BossBarFill>>,
+    mut name: Query<&mut Text, With<BossBarName>>,
+) {
+    let Ok(mut vis) = wrap.single_mut() else { return };
+    // show the beefiest live boss
+    let mut best: Option<(f32, f32, &'static str)> = None;
+    for (e, b) in q_boss.iter() {
+        let d = b.kind.def();
+        if best.map(|(_, m, _)| e.max_hp > m).unwrap_or(true) {
+            best = Some((e.hp, e.max_hp, d.name));
+        }
+    }
+    match best {
+        Some((hp, max, n)) => {
+            *vis = Visibility::Visible;
+            if let Ok(mut f) = fill.single_mut() {
+                f.width = Val::Percent((hp / max * 100.0).clamp(0.0, 100.0));
+            }
+            if let Ok(mut t) = name.single_mut() {
+                t.0 = n.to_string();
+            }
+        }
+        None => {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
+
+/// Banner queue: one line at a time, 2.6 s each.
+pub fn update_banners(
+    time: Res<Time<Real>>,
+    mut queue: ResMut<BannerQueue>,
+    mut reader: MessageReader<BannerMsg>,
+    mut q: Query<(&mut Text, &mut TextColor), With<BannerText>>,
+) {
+    for msg in reader.read() {
+        queue.queue.push(msg.0.clone());
+    }
+    let dt = time.delta_secs();
+    if let Some((_, t)) = queue.current.as_mut() {
+        *t -= dt;
+        if *t <= 0.0 {
+            queue.current = None;
+        }
+    }
+    if queue.current.is_none() && !queue.queue.is_empty() {
+        queue.current = Some((queue.queue.remove(0), 2.6));
+    }
+    if let Ok((mut text, mut color)) = q.single_mut() {
+        match &queue.current {
+            Some((s, t)) => {
+                text.0 = s.clone();
+                color.0 = Color::srgba(1.0, 0.9, 0.4, (*t / 0.5).clamp(0.0, 1.0));
+            }
+            None => {
+                text.0 = String::new();
+            }
+        }
+    }
+}
