@@ -79,7 +79,8 @@ pub struct RunState {
     pub static_timer: f32,
     pub teleporter_open: bool,
     pub frenzy_timer: f32,
-    pub fast_move: bool, // player is above base run speed (for Nova's passive)
+    pub fast_move: bool,     // player is above base run speed (for Nova/Aurora)
+    pub reticle_timer: f32,  // cycles 0..1.5 for Reticle's focus pulse
     pub powerups: Vec<(PowerupKind, f32)>,
     pub microwave_used: bool,
     pub chest_opens: u32,
@@ -128,6 +129,7 @@ impl RunState {
             teleporter_open: false,
             frenzy_timer: 0.0,
             fast_move: false,
+            reticle_timer: 0.0,
             powerups: Vec::new(),
             microwave_used: false,
             chest_opens: 0,
@@ -218,6 +220,24 @@ impl RunState {
             d *= 1.4;
         }
         d
+    }
+
+    /// Effective crit chance — Dr. Reticle's focus pulse guarantees a crit briefly each cycle.
+    pub fn crit_chance(&self) -> f32 {
+        let mut c = self.stats.crit_chance;
+        if self.character == AstronautKind::Reticle && self.reticle_timer < 0.35 {
+            c += 1.0;
+        }
+        c
+    }
+
+    /// Aura-radius multiplier — Aurora Prime's fields swell while she's sprinting.
+    pub fn aura_scale(&self) -> f32 {
+        if self.character == AstronautKind::Aurora && self.fast_move {
+            1.35
+        } else {
+            1.0
+        }
     }
 
     /// Armor after hero mechanics — Old Ironclad's plating doubles when badly hurt.

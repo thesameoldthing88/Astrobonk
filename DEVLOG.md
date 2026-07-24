@@ -1,5 +1,16 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2d: hero mechanic-passives, batch 2 (roster complete)
+- Final three flat heroes now play by mechanic:
+  - **Dr. Reticle** — +10% crit + a guaranteed-crit "focus pulse" every ~1.5s (run.reticle_timer
+    ticked in upkeep; new run.crit_chance() getter; all 8 combat roll_crit sites routed through it).
+  - **Lady Fortuna** — +30% luck + level-up refreshes are ALWAYS FREE (choice_input skips the
+    charge for her; button shows "FREE").
+  - **Aurora Prime** — +20% size + auras swell +35% while sprinting (run.aura_scale() applied in
+    weapon_fire aura branch + aura_follow visual).
+- All 12 heroes now have a real signature (6 built + Nova/Gristle/Ironclad + these 3).
+- Smoke green for all three. Committed prior checkpoint at 62af260; this batch uncommitted.
+
 ## 2026-07-24 — Session 2c: hero mechanic-passives (Tier 3 #8, first batch)
 - Three flat-stat recruits now play differently, not just with different numbers:
   - **Slipstream Nova** — +15% move, and weapons barely cool down while she's above base

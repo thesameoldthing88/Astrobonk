@@ -216,6 +216,8 @@ pub fn weapon_fire(
     let atk_speed = run.attack_speed();
     let dmg_mult = run.damage_mult();
     let stats = run.stats.clone();
+    let crit_ch = run.crit_chance(); // captured before the &mut weapons loop (Reticle pulse)
+    let aura_sc = run.aura_scale(); // Aurora's fields swell while sprinting
 
     // Reconcile drone + aura entities with owned weapons.
     let mut want_drones: HashMap<WeaponKind, (usize, f32, f32, f32)> = HashMap::new();
@@ -236,6 +238,7 @@ pub fn weapon_fire(
                 continue;
             }
             Behavior::Aura { radius, slow } => {
+                let radius = radius * aura_sc;
                 want_auras.push(wi.kind);
                 wi.cd -= dt * atk_speed;
                 if wi.cd <= 0.0 {
@@ -243,7 +246,7 @@ pub fn weapon_fire(
                     let r = radius * size;
                     for (e, tf, en) in enemies.iter() {
                         if tf.translation.distance_squared(ptf.translation) < r * r {
-                            let (cm, crit) = roll_crit(stats.crit_chance, stats.crit_damage, &mut rng);
+                            let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                             let elite = if en.elite { stats.elite_damage } else { 1.0 };
                             hits.write(HitMsg {
                                 target: e,
@@ -289,7 +292,7 @@ pub fn weapon_fire(
                     }
                     let vt = (v - up * v.dot(up)).normalize_or_zero();
                     if arc_deg >= 360.0 || vt.dot(aim) > cos_half {
-                        let (cm, crit) = roll_crit(stats.crit_chance, stats.crit_damage, &mut rng);
+                        let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                         let elite = if en.elite { stats.elite_damage } else { 1.0 };
                         hits.write(HitMsg {
                             target: e,
@@ -423,7 +426,7 @@ pub fn weapon_fire(
                 }
                 let mut prev = origin;
                 for (e, pos) in &chain {
-                    let (cm, crit) = roll_crit(stats.crit_chance, stats.crit_damage, &mut rng);
+                    let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                     let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
                     hits.write(HitMsg { target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
                     // zap segment visual
@@ -645,7 +648,7 @@ pub fn projectile_move(
                     exploded = true;
                     break;
                 }
-                let (cm, crit) = roll_crit(run.stats.crit_chance, run.stats.crit_damage, &mut rng);
+                let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                 let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                 hits.write(HitMsg {
                     target: te,
@@ -685,7 +688,7 @@ fn explode(
     for (te, tpos) in hash.near(pos, aoe + 1.0) {
         let Ok(en) = enemies.get(te) else { continue };
         if tpos.distance_squared(pos) < (aoe + en.scale * 0.5) * (aoe + en.scale * 0.5) {
-            let (cm, crit) = roll_crit(run.stats.crit_chance, run.stats.crit_damage, rng);
+            let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, rng);
             let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
             let kdir = (tpos - pos).normalize_or_zero();
             hits.write(HitMsg { target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0 });
@@ -730,7 +733,7 @@ pub fn drone_update(
                 let Ok(en) = enemies.get(te) else { continue };
                 let reach = 0.8 + en.scale * 0.5;
                 if tpos.distance_squared(tf.translation) < reach * reach {
-                    let (cm, crit) = roll_crit(run.stats.crit_chance, run.stats.crit_damage, &mut rng);
+                    let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                     hits.write(HitMsg {
                         target: te,
@@ -788,7 +791,7 @@ pub fn beam_update(
                 }
                 let perp = (v - beam.heading * along - up * v.dot(up)).length();
                 if perp < beam.width + en.scale * 0.5 {
-                    let (cm, crit) = roll_crit(run.stats.crit_chance, run.stats.crit_damage, &mut rng);
+                    let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                     hits.write(HitMsg { target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO });
                 }
@@ -800,15 +803,17 @@ pub fn beam_update(
 /// Aura visuals follow the player and pulse; cryo slow applied on hit below.
 pub fn aura_follow(
     time: Res<Time>,
+    run: Res<RunState>,
     q_player: Query<&Transform, (With<Player>, Without<AuraVis>)>,
     mut q: Query<(&AuraVis, &mut Transform), Without<Player>>,
 ) {
     let Ok(ptf) = q_player.single() else { return };
     let t = time.elapsed_secs();
+    let aura_sc = run.aura_scale();
     for (a, mut tf) in &mut q {
         if let Behavior::Aura { radius, .. } = a.weapon.def().behavior {
             tf.translation = ptf.translation;
-            tf.scale = Vec3::splat(radius * (1.0 + (t * 3.0).sin() * 0.04));
+            tf.scale = Vec3::splat(radius * aura_sc * (1.0 + (t * 3.0).sin() * 0.04));
         }
     }
 }

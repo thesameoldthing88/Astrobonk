@@ -488,6 +488,7 @@ pub fn player_upkeep(time: Res<Time>, mut run: ResMut<RunState>) {
     if dt <= 0.0 {
         return;
     }
+    run.reticle_timer = (run.reticle_timer + dt) % 1.5;
     if run.hp > 0.0 {
         let regen = run.stats.regen / 60.0;
         run.hp = (run.hp + regen * dt).min(run.stats.max_hp);

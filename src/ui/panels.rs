@@ -113,7 +113,12 @@ pub fn sync_choice_panel(
                     .with_children(|row| {
                         row.spawn((RefreshBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 0.7, 1.0))))
                             .with_children(|b| {
-                                b.spawn(txt(format!("[R]EFRESH ({})", run.refreshes), FONT_SMALL, Color::WHITE));
+                                let rlabel = if run.character == crate::content::characters::AstronautKind::Fortuna {
+                                    "[R]EFRESH (FREE)".to_string()
+                                } else {
+                                    format!("[R]EFRESH ({})", run.refreshes)
+                                };
+                                b.spawn(txt(rlabel, FONT_SMALL, Color::WHITE));
                             });
                         row.spawn((BanishBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
                             .with_children(|b| {
@@ -180,8 +185,12 @@ pub fn choice_input(
     }
 
     if panel.is_levelup {
-        if do_refresh && run.refreshes > 0 {
-            run.refreshes -= 1;
+        // Lady Fortuna rerolls for free — everyone else spends a charge.
+        let fortuna = run.character == crate::content::characters::AstronautKind::Fortuna;
+        if do_refresh && (fortuna || run.refreshes > 0) {
+            if !fortuna {
+                run.refreshes -= 1;
+            }
             let mut rng = rand::thread_rng();
             panel.options = roll_upgrades(&run, &save, &mut rng);
             panel.banishing = false;
