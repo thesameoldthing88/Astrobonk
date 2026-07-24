@@ -53,7 +53,9 @@ pub fn despawn_stage(mut commands: Commands, q: Query<Entity, With<StageScoped>>
 
 /// Build the icosphere terrain mesh with per-vertex displacement + biome vertex colors.
 fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
-    let (mut verts, faces) = icosphere(6);
+    // subdiv 7 gives ~4× the terrain resolution of the old mesh — crisper mountains,
+    // sharper crater rims. Collision stays analytic, so this is purely visual.
+    let (mut verts, faces) = icosphere(7);
     let mut positions = Vec::with_capacity(verts.len());
     let mut colors = Vec::with_capacity(verts.len());
 
@@ -92,59 +94,7 @@ fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
     )
 }
 
-/// Icosphere: returns (vertices on unit sphere, triangle indices).
-fn icosphere(subdiv: u32) -> (Vec<Vec3>, Vec<u32>) {
-    let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
-    let mut verts: Vec<Vec3> = [
-        (-1.0, t, 0.0),
-        (1.0, t, 0.0),
-        (-1.0, -t, 0.0),
-        (1.0, -t, 0.0),
-        (0.0, -1.0, t),
-        (0.0, 1.0, t),
-        (0.0, -1.0, -t),
-        (0.0, 1.0, -t),
-        (t, 0.0, -1.0),
-        (t, 0.0, 1.0),
-        (-t, 0.0, -1.0),
-        (-t, 0.0, 1.0),
-    ]
-    .iter()
-    .map(|&(x, y, z)| Vec3::new(x, y, z).normalize())
-    .collect();
-
-    let mut faces: Vec<[u32; 3]> = vec![
-        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
-    ];
-
-    use std::collections::HashMap;
-    for _ in 0..subdiv {
-        let mut cache: HashMap<(u32, u32), u32> = HashMap::new();
-        let mut midpoint = |a: u32, b: u32, verts: &mut Vec<Vec3>| -> u32 {
-            let key = (a.min(b), a.max(b));
-            *cache.entry(key).or_insert_with(|| {
-                let m = ((verts[a as usize] + verts[b as usize]) / 2.0).normalize();
-                verts.push(m);
-                (verts.len() - 1) as u32
-            })
-        };
-        let mut next = Vec::with_capacity(faces.len() * 4);
-        for [a, b, c] in faces {
-            let ab = midpoint(a, b, &mut verts);
-            let bc = midpoint(b, c, &mut verts);
-            let ca = midpoint(c, a, &mut verts);
-            next.push([a, ab, ca]);
-            next.push([b, bc, ab]);
-            next.push([c, ca, bc]);
-            next.push([ab, bc, ca]);
-        }
-        faces = next;
-    }
-    (verts, faces.into_iter().flatten().collect())
-}
+use crate::meshkit::icosphere;
 
 /// Spawn terrain, props, sky, lights for the current stage.
 pub fn spawn_stage(
@@ -171,26 +121,33 @@ pub fn spawn_stage(
         StageScoped,
     ));
 
-    // Rocks: three shared variants, scattered + surface-aligned.
+    // Rocks: six angular variants (faceted, chunkier displacement), scattered.
     let rock_mat = materials.add(StandardMaterial {
         base_color: def.ground_low,
         perceptual_roughness: 1.0,
         ..default()
     });
-    let rock_meshes: Vec<Handle<Mesh>> = (0..3)
-        .map(|i| {
-            let (mut v, f) = icosphere(1);
-            for p in v.iter_mut() {
-                let n = sphere::hills(p.normalize(), 100 + i * 13 + planet.terrain.seed);
-                *p *= 1.0 + 0.35 * n;
-            }
-            let positions: Vec<[f32; 3]> = v.iter().map(|p| [p.x, p.y, p.z]).collect();
-            let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-            m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-            m.insert_indices(Indices::U32(f));
-            m.compute_smooth_normals();
-            meshes.add(m)
-        })
+    let rock_dark = materials.add(StandardMaterial {
+        base_color: def.ground_low.darker(0.08),
+        perceptual_roughness: 1.0,
+        ..default()
+    });
+    let make_rock = |meshes: &mut Assets<Mesh>, seed: u32, amp: f32, subdiv: u32| -> Handle<Mesh> {
+        let (mut v, f) = icosphere(subdiv);
+        for p in v.iter_mut() {
+            let n = sphere::hills(p.normalize(), seed);
+            let n2 = sphere::hills(p.normalize() * 2.3, seed + 7);
+            *p *= 1.0 + amp * n + amp * 0.5 * n2;
+        }
+        let positions: Vec<[f32; 3]> = v.iter().map(|p| [p.x, p.y, p.z]).collect();
+        let mut m = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        m.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        m.insert_indices(Indices::U32(f));
+        m.compute_smooth_normals();
+        meshes.add(m)
+    };
+    let rock_meshes: Vec<Handle<Mesh>> = (0..6)
+        .map(|i| make_rock(meshes, 100 + i * 13 + planet.terrain.seed, 0.45, if i % 2 == 0 { 1 } else { 0 }))
         .collect();
     for dir in sphere::fib_sphere(def.rocks) {
         let jitter = Vec3::new(
@@ -199,12 +156,31 @@ pub fn spawn_stage(
             rng.gen_range(-0.3..0.3),
         );
         let dir = (dir + jitter).normalize();
-        let scale = rng.gen_range(0.5..2.6);
-        let pos = planet.surface_point(dir) - dir * scale * 0.25;
+        let scale = rng.gen_range(0.4..2.4) * Vec3::new(rng.gen_range(0.8..1.3), rng.gen_range(0.6..1.1), rng.gen_range(0.8..1.3));
+        let pos = planet.surface_point(dir) - dir * scale.y * 0.25;
         let fwd = sphere::tangent_frame(dir).0;
         commands.spawn((
-            Mesh3d(rock_meshes[rng.gen_range(0..3)].clone()),
-            MeshMaterial3d(rock_mat.clone()),
+            Mesh3d(rock_meshes[rng.gen_range(0..6)].clone()),
+            MeshMaterial3d(if rng.gen_bool(0.3) { rock_dark.clone() } else { rock_mat.clone() }),
+            Transform::from_translation(pos)
+                .with_rotation(sphere::frame_quat(dir, fwd) * Quat::from_rotation_y(rng.gen_range(0.0..6.28)))
+                .with_scale(scale),
+            StageScoped,
+        ));
+    }
+
+    // Boulders: a few big angular landmarks that break up the horizon.
+    let boulder_meshes: Vec<Handle<Mesh>> = (0..3)
+        .map(|i| make_rock(meshes, 400 + i * 17 + planet.terrain.seed, 0.6, 1))
+        .collect();
+    for _ in 0..(def.rocks / 20).max(4) {
+        let dir = random_dir(&mut rng);
+        let scale = rng.gen_range(3.0..6.0);
+        let pos = planet.surface_point(dir) - dir * scale * 0.3;
+        let fwd = sphere::tangent_frame(dir).0;
+        commands.spawn((
+            Mesh3d(boulder_meshes[rng.gen_range(0..3)].clone()),
+            MeshMaterial3d(rock_dark.clone()),
             Transform::from_translation(pos)
                 .with_rotation(sphere::frame_quat(dir, fwd) * Quat::from_rotation_y(rng.gen_range(0.0..6.28)))
                 .with_scale(Vec3::splat(scale)),
@@ -233,6 +209,80 @@ pub fn spawn_stage(
                 .with_scale(Vec3::splat(scale)),
             StageScoped,
         ));
+    }
+
+    // Wrecks: crashed landers half-sunk in the surface — some are your own dead prints.
+    {
+        use crate::meshkit::{at, MeshData};
+        let wreck_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.55, 0.55, 0.60),
+            perceptual_roughness: 0.6,
+            metallic: 0.5,
+            ..default()
+        });
+        let mut w = MeshData::new();
+        w.add_box(Vec3::new(1.3, 0.8, 1.1), at(Vec3::new(0.0, 0.35, 0.0)), Color::WHITE);
+        w.add_cylinder(0.42, 0.5, 8, at(Vec3::new(0.0, -0.05, 0.0)), Color::srgb(0.7, 0.7, 0.75)); // engine bell
+        for s in [-1.0, 1.0] {
+            w.add_cylinder(0.08, 1.0, 5, Transform::from_translation(Vec3::new(0.7 * s, 0.1, 0.5)).with_rotation(Quat::from_rotation_z(0.5 * s)), Color::srgb(0.5, 0.5, 0.55)); // bent leg
+        }
+        w.add_box(Vec3::new(0.9, 0.05, 0.7), at(Vec3::new(0.3, 0.75, -0.2)), Color::srgb(0.4, 0.4, 0.45)); // torn panel
+        let wreck_mesh = meshes.add(w.build());
+        for _ in 0..def.rocks / 45 + 3 {
+            let dir = random_dir(&mut rng);
+            let scale = rng.gen_range(1.4..2.4);
+            let pos = planet.surface_point(dir) - dir * scale * 0.4; // half-sunk
+            let fwd = sphere::tangent_frame(dir).0;
+            commands.spawn((
+                Mesh3d(wreck_mesh.clone()),
+                MeshMaterial3d(wreck_mat.clone()),
+                Transform::from_translation(pos)
+                    .with_rotation(sphere::frame_quat(dir, fwd) * Quat::from_rotation_x(rng.gen_range(-0.5..0.5)) * Quat::from_rotation_z(rng.gen_range(-0.4..0.4)))
+                    .with_scale(Vec3::splat(scale)),
+                StageScoped,
+            ));
+        }
+    }
+
+    // Radio beacons: mast + dish + a blinking light — lore landmarks, night guides.
+    {
+        use crate::meshkit::{at, MeshData};
+        let beacon_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(0.6, 0.62, 0.68),
+            perceptual_roughness: 0.5,
+            metallic: 0.6,
+            ..default()
+        });
+        let light_mat = materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.35, 0.3),
+            emissive: LinearRgba::rgb(3.0, 0.4, 0.3),
+            unlit: true,
+            ..default()
+        });
+        let mut b = MeshData::new();
+        b.add_box(Vec3::new(0.5, 0.2, 0.5), at(Vec3::new(0.0, 0.1, 0.0)), Color::WHITE); // base
+        b.add_cylinder(0.06, 1.8, 6, at(Vec3::new(0.0, 1.0, 0.0)), Color::WHITE); // mast
+        b.add_ellipsoid(Vec3::new(0.35, 0.1, 0.35), 1, Transform::from_translation(Vec3::new(0.0, 1.9, 0.0)).with_rotation(Quat::from_rotation_x(0.5)), Color::srgb(0.8, 0.8, 0.85)); // dish
+        let beacon_mesh = meshes.add(b.build());
+        let light_mesh = meshes.add(Mesh::from(Sphere::new(0.09)));
+        for _ in 0..def.crystals / 8 + 4 {
+            let dir = random_dir(&mut rng);
+            let pos = planet.surface_point(dir);
+            let fwd = sphere::tangent_frame(dir).0;
+            let rot = sphere::frame_quat(dir, fwd);
+            commands.spawn((
+                Mesh3d(beacon_mesh.clone()),
+                MeshMaterial3d(beacon_mat.clone()),
+                Transform::from_translation(pos).with_rotation(rot),
+                StageScoped,
+            ));
+            commands.spawn((
+                Mesh3d(light_mesh.clone()),
+                MeshMaterial3d(light_mat.clone()),
+                Transform::from_translation(pos + dir * 2.0),
+                StageScoped,
+            ));
+        }
     }
 
     // Flora: per-world plant archetypes built from shared primitive parts.

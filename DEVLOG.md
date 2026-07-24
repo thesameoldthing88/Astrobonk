@@ -1,5 +1,23 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-13 — Session 1e: visual quality pass — detailed models + richer terrain
+- **New `meshkit.rs` mesh compositor** — bakes multiple primitives (box/sphere/ellipsoid/
+  cylinder/cone/capsule) into ONE mesh with per-vertex color multipliers, so a detailed
+  model still renders as a single instanced draw call. Moved the shared `icosphere` here.
+- **Enemies** — every kind rebuilt from parts (head/limbs/plates/accents) instead of a
+  bald primitive: Shambler gets arms+legs+visor, Bruiser gets shoulder plates + fists,
+  UFO gets a dome + underside light ring, Lobber a mortar barrel + legs, etc. Vertex
+  colors keep one readable signal color + dark accents. Still 1 mesh/1 material per kind.
+- **Astronaut** — full suit mesh (torso, chest panel, shoulders, 2 arms, 2 legs, boots) +
+  richer backpack (main + 2 O2 tanks); helmet/visor/tool/flashlight kept separate.
+- **Bosses** — imposing generic mesh (plated shoulders, horns, back spikes, fists).
+- **Terrain** — planet mesh subdiv 6→7 (4× resolution, crisper mountains/craters); 3 finer
+  noise octaves added to the height field (small amplitude, movement-safe).
+- **Props** — rocks now 6 angular variants w/ double-noise + non-uniform scale + a darker
+  material mix; added big **boulders**, and lore props: crashed-lander **wrecks**
+  (half-sunk, some are your dead prints) and radio **beacons** (mast + dish + blinking light).
+- Validated: headless SMOKE OK + an 8s windowed run confirms all new meshes render.
+
 ## 2026-07-13 — Session 1d: content batch — roster 6→12 heroes, arsenal 10→16 weapons
 - **6 new heroes** (all start unlocked for now; quest-gating is a follow-up): Dr. Reticle
   (+20% crit), Slipstream Nova (+20% move), Old Ironclad (+90 HP), Lady Fortuna (+30%

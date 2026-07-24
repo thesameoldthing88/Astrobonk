@@ -7,6 +7,7 @@ mod enemies;
 mod fx;
 mod headless;
 mod interact;
+mod meshkit;
 mod messages;
 mod pickups;
 mod planet;

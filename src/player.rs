@@ -89,29 +89,29 @@ pub fn spawn_player(
             StageScoped,
         ))
         .with_children(|p| {
-            // body
+            // full suit (torso, chest panel, shoulders, arms, legs, boots) as one mesh
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Capsule3d::new(PLAYER_RADIUS, 0.75)))),
+                Mesh3d(meshes.add(astronaut_suit_mesh())),
                 MeshMaterial3d(suit.clone()),
                 Transform::from_xyz(0.0, 0.0, 0.0),
             ));
             // helmet
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Sphere::new(0.34)))),
+                Mesh3d(meshes.add(Mesh::from(Sphere::new(0.3)))),
                 MeshMaterial3d(suit),
-                Transform::from_xyz(0.0, 0.72, 0.0),
+                Transform::from_xyz(0.0, 0.7, 0.0),
             ));
             // visor
             p.spawn((
                 Mesh3d(meshes.add(Mesh::from(Sphere::new(0.24)))),
                 MeshMaterial3d(visor),
-                Transform::from_xyz(0.0, 0.74, -0.18).with_scale(Vec3::new(1.0, 0.8, 0.6)),
+                Transform::from_xyz(0.0, 0.72, -0.16).with_scale(Vec3::new(1.05, 0.85, 0.7)),
             ));
-            // backpack
+            // backpack (main + two life-support tanks)
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.5, 0.62, 0.3)))),
+                Mesh3d(meshes.add(backpack_mesh())),
                 MeshMaterial3d(pack),
-                Transform::from_xyz(0.0, 0.15, 0.42),
+                Transform::from_xyz(0.0, 0.18, 0.0),
             ));
             // hand tool (whatever weapon is equipped, this is its silhouette)
             let tool_mat = materials.add(StandardMaterial {
@@ -153,6 +153,49 @@ pub fn spawn_player(
                     .with_rotation(Quat::from_rotation_x(-0.10)),
             ));
         });
+}
+
+/// A chunky astronaut suit baked into one mesh (suit material multiplies the vertex
+/// colors: WHITE = suit tint, darker = joints/boots/panel).
+fn astronaut_suit_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let body = Color::WHITE;
+    let joint = Color::srgb(0.5, 0.5, 0.56);
+    let dark = Color::srgb(0.30, 0.30, 0.36);
+    let mut m = crate::meshkit::MeshData::new();
+    // torso + lower torso
+    m.add_box(Vec3::new(0.5, 0.55, 0.34), at(Vec3::new(0.0, 0.2, 0.0)), body);
+    m.add_box(Vec3::new(0.42, 0.32, 0.3), at(Vec3::new(0.0, -0.12, 0.0)), body);
+    // chest control panel
+    m.add_box(Vec3::new(0.26, 0.2, 0.05), at(Vec3::new(0.0, 0.24, -0.19)), dark);
+    // neck
+    m.add_cylinder(0.11, 0.14, 8, at(Vec3::new(0.0, 0.52, 0.0)), joint);
+    for s in [-1.0, 1.0] {
+        // shoulder
+        m.add_sphere(0.16, 1, at(Vec3::new(0.31 * s, 0.42, 0.0)), joint);
+        // upper arm + forearm + glove
+        m.add_cylinder(0.1, 0.36, 8, Transform::from_translation(Vec3::new(0.34 * s, 0.14, 0.0)).with_rotation(Quat::from_rotation_z(0.15 * s)), body);
+        m.add_cylinder(0.09, 0.34, 8, at(Vec3::new(0.38 * s, -0.18, 0.0)), body);
+        m.add_sphere(0.11, 1, at(Vec3::new(0.4 * s, -0.4, 0.0)), joint);
+        // thigh + shin + boot
+        m.add_cylinder(0.13, 0.36, 8, at(Vec3::new(0.15 * s, -0.45, 0.0)), body);
+        m.add_cylinder(0.11, 0.32, 8, at(Vec3::new(0.15 * s, -0.76, 0.0)), body);
+        m.add_box(Vec3::new(0.2, 0.13, 0.32), at(Vec3::new(0.15 * s, -0.9, -0.06)), dark);
+    }
+    m.build()
+}
+
+/// Backpack: main box + two life-support tanks.
+fn backpack_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let shell = Color::WHITE;
+    let tank = Color::srgb(0.7, 0.72, 0.78);
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_box(Vec3::new(0.42, 0.52, 0.24), at(Vec3::new(0.0, 0.0, 0.34)), shell);
+    for s in [-1.0, 1.0] {
+        m.add_cylinder(0.09, 0.5, 8, at(Vec3::new(0.13 * s, 0.0, 0.44)), tank);
+    }
+    m.build()
 }
 
 /// WASD + jump + slide, in the camera's tangent frame.

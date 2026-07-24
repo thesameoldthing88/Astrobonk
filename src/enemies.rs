@@ -159,6 +159,105 @@ impl Default for Director {
     }
 }
 
+/// Body parts show the material color (WHITE multiplier); accents are darker.
+const BODY: Color = Color::WHITE;
+const DARK: Color = Color::srgb(0.34, 0.34, 0.40);
+const MID: Color = Color::srgb(0.68, 0.68, 0.74);
+
+/// Compose a detailed single mesh per enemy kind (still one instanced draw call).
+fn enemy_mesh(kind: EnemyKind) -> Mesh {
+    use crate::meshkit::at;
+    use EnemyKind::*;
+    let mut m = crate::meshkit::MeshData::new();
+    match kind {
+        Shambler => {
+            m.add_capsule(0.32, 0.5, at(Vec3::new(0.0, 0.05, 0.0)), BODY);
+            m.add_sphere(0.25, 1, at(Vec3::new(0.0, 0.52, 0.0)), BODY);
+            m.add_box(Vec3::new(0.28, 0.14, 0.08), at(Vec3::new(0.0, 0.52, -0.2)), DARK); // visor
+            for s in [-1.0, 1.0] {
+                m.add_cylinder(0.09, 0.42, 6, Transform::from_translation(Vec3::new(0.34 * s, 0.08, 0.0)).with_rotation(Quat::from_rotation_z(0.5 * s)), MID); // arm
+                m.add_cylinder(0.11, 0.42, 6, at(Vec3::new(0.15 * s, -0.42, 0.0)), MID); // leg
+            }
+        }
+        Sprinter => {
+            m.add_cone(0.32, 0.95, 8, at(Vec3::new(0.0, 0.0, 0.0)), BODY);
+            m.add_sphere(0.17, 1, at(Vec3::new(0.0, 0.5, 0.0)), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(Vec3::new(0.05, 0.5, 0.22), Transform::from_translation(Vec3::new(0.22 * s, 0.05, 0.15)).with_rotation(Quat::from_rotation_y(0.6 * s)), DARK); // swept fin
+            }
+        }
+        Bruiser => {
+            m.add_box(Vec3::new(0.78, 0.9, 0.66), at(Vec3::new(0.0, 0.02, 0.0)), BODY);
+            m.add_sphere(0.2, 1, at(Vec3::new(0.0, 0.56, 0.0)), DARK); // small head
+            for s in [-1.0, 1.0] {
+                m.add_box(Vec3::new(0.28, 0.26, 0.5), at(Vec3::new(0.5 * s, 0.34, 0.0)), MID); // shoulder plate
+                m.add_sphere(0.27, 1, at(Vec3::new(0.62 * s, -0.12, 0.0)), BODY); // fist
+            }
+        }
+        Spitter => {
+            m.add_ellipsoid(Vec3::new(0.5, 0.44, 0.5), 1, at(Vec3::ZERO), BODY);
+            m.add_cylinder(0.22, 0.12, 8, Transform::from_translation(Vec3::new(0.0, -0.02, -0.42)).with_rotation(Quat::from_rotation_x(1.57)), DARK); // mouth
+            for s in [-1.0, 1.0] {
+                m.add_sphere(0.2, 1, at(Vec3::new(0.24 * s, 0.28, 0.28)), MID); // back sac
+            }
+        }
+        Ufo => {
+            m.add_ellipsoid(Vec3::new(0.62, 0.2, 0.62), 1, at(Vec3::ZERO), BODY);
+            m.add_ellipsoid(Vec3::new(0.3, 0.28, 0.3), 1, at(Vec3::new(0.0, 0.2, 0.0)), MID); // dome
+            m.add_cylinder(0.5, 0.06, 12, at(Vec3::new(0.0, -0.14, 0.0)), DARK); // underside ring
+            for i in 0..3 {
+                let a = i as f32 / 3.0 * std::f32::consts::TAU;
+                m.add_sphere(0.07, 0, at(Vec3::new(a.cos() * 0.42, -0.16, a.sin() * 0.42)), DARK); // lights
+            }
+        }
+        Burrower => {
+            m.add_cone(0.4, 0.5, 6, at(Vec3::new(0.0, -0.28, 0.0)), MID);
+            m.add_cone(0.3, 0.45, 6, at(Vec3::new(0.0, 0.05, 0.0)), BODY);
+            m.add_cone(0.19, 0.45, 6, at(Vec3::new(0.0, 0.42, 0.0)), DARK); // drill tip
+        }
+        Beamer => {
+            m.add_cone(0.28, 1.4, 5, at(Vec3::new(0.0, 0.0, 0.0)), BODY); // main crystal
+            m.add_sphere(0.15, 1, at(Vec3::new(0.0, 0.12, 0.0)), DARK); // core
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.12, 0.7, 4, Transform::from_translation(Vec3::new(0.2 * s, -0.15, 0.0)).with_rotation(Quat::from_rotation_z(0.5 * s)), MID); // shard
+            }
+        }
+        Lobber => {
+            m.add_ellipsoid(Vec3::new(0.58, 0.4, 0.58), 1, at(Vec3::new(0.0, -0.1, 0.0)), BODY); // dome
+            m.add_cylinder(0.16, 0.7, 8, Transform::from_translation(Vec3::new(0.0, 0.18, 0.12)).with_rotation(Quat::from_rotation_x(-0.6)), DARK); // barrel
+            for i in 0..3 {
+                let a = i as f32 / 3.0 * std::f32::consts::TAU;
+                m.add_cylinder(0.07, 0.4, 5, Transform::from_translation(Vec3::new(a.cos() * 0.4, -0.35, a.sin() * 0.4)).with_rotation(Quat::from_rotation_z(a.cos() * 0.3)), MID); // leg
+            }
+        }
+        Ghost => {
+            m.add_cone(0.42, 1.1, 8, at(Vec3::new(0.0, 0.0, 0.0)), BODY);
+            m.add_sphere(0.22, 1, at(Vec3::new(0.0, 0.48, 0.0)), BODY);
+            m.add_box(Vec3::new(0.24, 0.12, 0.08), at(Vec3::new(0.0, 0.48, -0.18)), DARK); // visor
+        }
+    }
+    m.build()
+}
+
+/// A hulking generic boss silhouette: heavy body, plated shoulders, horned head,
+/// back spikes. Low-count so detail is free. (Per-boss unique meshes are future work.)
+fn boss_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_ellipsoid(Vec3::new(0.75, 0.85, 0.7), 2, at(Vec3::new(0.0, 0.0, 0.0)), BODY); // torso
+    m.add_sphere(0.34, 1, at(Vec3::new(0.0, 0.75, 0.0)), DARK); // head
+    for s in [-1.0, 1.0] {
+        m.add_box(Vec3::new(0.34, 0.34, 0.6), at(Vec3::new(0.62 * s, 0.5, 0.0)), MID); // shoulder plate
+        m.add_cone(0.14, 0.5, 5, Transform::from_translation(Vec3::new(0.18 * s, 1.0, 0.0)).with_rotation(Quat::from_rotation_z(0.3 * s)), MID); // horn
+        m.add_sphere(0.3, 1, at(Vec3::new(0.7 * s, -0.2, 0.0)), BODY); // fist
+    }
+    for i in 0..5 {
+        let x = (i as f32 / 4.0 - 0.5) * 0.7;
+        m.add_cone(0.1, 0.4, 4, at(Vec3::new(x, 0.3, 0.55)), DARK); // back spikes
+    }
+    m.build()
+}
+
 pub fn setup_enemy_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -178,18 +277,7 @@ pub fn setup_enemy_assets(
         EnemyKind::Ghost,
     ] {
         let def = kind.def();
-        let mesh = match kind {
-            EnemyKind::Shambler => Mesh::from(Capsule3d::new(0.42, 0.5)),
-            EnemyKind::Sprinter => Mesh::from(Cone::new(0.38, 1.0)),
-            EnemyKind::Bruiser => Mesh::from(Cuboid::new(0.95, 1.1, 0.8)),
-            EnemyKind::Spitter => Mesh::from(Sphere::new(0.5)),
-            EnemyKind::Ufo => Mesh::from(Sphere::new(0.62)),
-            EnemyKind::Burrower => Mesh::from(Capsule3d::new(0.38, 0.7)),
-            EnemyKind::Beamer => Mesh::from(Cone::new(0.32, 1.7)),
-            EnemyKind::Lobber => Mesh::from(Cylinder::new(0.62, 0.65)),
-            EnemyKind::Ghost => Mesh::from(Cone::new(0.45, 1.2)),
-        };
-        mesh_map.insert(kind, meshes.add(mesh));
+        mesh_map.insert(kind, meshes.add(enemy_mesh(kind)));
         let ghost = kind == EnemyKind::Ghost;
         mat_map.insert(
             kind,
@@ -405,7 +493,7 @@ pub fn spawn_boss(
     let dir = sphere::offset_dir(player_dir, heading, 30.0, planet.radius);
     let hp = def.hp * (1.0 + difficulty);
     let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
-    let mesh = meshes.add(Mesh::from(Capsule3d::new(0.6, 0.9)));
+    let mesh = meshes.add(boss_mesh());
     commands.spawn((
         Enemy {
             kind: EnemyKind::Bruiser,

@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 
 /// Fixed pseudo-random unit vectors + frequencies for the hill field (deterministic).
-const HILL_WAVES: [(Vec3, f32, f32); 10] = [
+const HILL_WAVES: [(Vec3, f32, f32); 13] = [
     (Vec3::new(0.267, 0.535, 0.802), 3.0, 0.0),
     (Vec3::new(-0.577, 0.577, 0.577), 4.0, 1.3),
     (Vec3::new(0.707, -0.707, 0.0), 5.0, 2.1),
@@ -16,6 +16,10 @@ const HILL_WAVES: [(Vec3, f32, f32); 10] = [
     (Vec3::new(0.9, 0.1, -0.424), 13.0, 2.8),
     (Vec3::new(-0.141, 0.99, 0.0), 17.0, 1.9),
     (Vec3::new(0.5, -0.5, -0.707), 21.0, 0.4),
+    // finer detail octaves (small amplitude → visual crinkle, gentle on movement)
+    (Vec3::new(-0.667, -0.333, 0.667), 27.0, 3.7),
+    (Vec3::new(0.333, -0.667, -0.667), 34.0, 5.5),
+    (Vec3::new(-0.408, 0.816, -0.408), 43.0, 1.1),
 ];
 
 /// Smooth height field in [-1, 1] over the unit sphere. `seed` de-correlates planets.
