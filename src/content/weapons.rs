@@ -419,7 +419,7 @@ impl WeaponKind {
                 kind: *self,
                 name: "Sonic Whoopee",
                 desc: "A brown-note pulse that shoves the horde back",
-                damage: 10.0,
+                damage: 13.0,
                 cooldown: 1.15,
                 projectiles: 1,
                 behavior: MeleeArc { arc_deg: 210.0, range: 4.0 },

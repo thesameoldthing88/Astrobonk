@@ -38,6 +38,8 @@ pub struct QuestsBtn;
 #[derive(Component)]
 pub struct QuitBtn;
 #[derive(Component)]
+pub struct SettingsBtn;
+#[derive(Component)]
 pub struct SidePanel;
 #[derive(Component)]
 pub struct TomePlus(pub TomeKind);
@@ -91,6 +93,10 @@ pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
                     .with_children(|b| {
                         b.spawn(txt("QUESTS", FONT_MED, Color::WHITE));
                     });
+                row.spawn((SettingsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
+                    .with_children(|b| {
+                        b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
+                    });
                 row.spawn((QuitBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.4, 0.4))))
                     .with_children(|b| {
                         b.spawn(txt("QUIT", FONT_MED, Color::WHITE));
@@ -125,10 +131,12 @@ pub fn main_menu_input(
     tomes: Query<&Interaction, (Changed<Interaction>, With<TomesBtn>)>,
     quests: Query<&Interaction, (Changed<Interaction>, With<QuestsBtn>)>,
     quit: Query<&Interaction, (Changed<Interaction>, With<QuitBtn>)>,
+    settings_btn: Query<&Interaction, (Changed<Interaction>, With<SettingsBtn>)>,
     plus: Query<(&Interaction, &TomePlus), Changed<Interaction>>,
     toggles: Query<(&Interaction, &TomeToggle), Changed<Interaction>>,
     mut tab: ResMut<MenuTab>,
     mut save: ResMut<MetaSave>,
+    mut settings_open: ResMut<crate::ui::settings::SettingsOpen>,
     mut next: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -138,6 +146,13 @@ pub fn main_menu_input(
     for i in &launch {
         if *i == Interaction::Pressed {
             next.set(AppState::CharSelect);
+            sfx.write(SfxMsg(Sfx::Click));
+            return;
+        }
+    }
+    for i in &settings_btn {
+        if *i == Interaction::Pressed {
+            settings_open.0 = true;
             sfx.write(SfxMsg(Sfx::Click));
             return;
         }

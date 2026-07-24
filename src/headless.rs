@@ -168,6 +168,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
         .init_resource::<crate::interact::InteractPrompt>()
         .init_resource::<crate::interact::ChestPanel>()
         .init_resource::<crate::interact::ShopPanel>()
+        .init_resource::<crate::comet::Comet>()
         .init_resource::<ButtonInput<KeyCode>>()
         .insert_resource(save)
         .insert_resource(run)
@@ -184,6 +185,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
                 crate::enemies::rebuild_hash,
                 crate::enemies::director_spawn,
                 crate::enemies::enemy_move,
+                crate::enemies::craterpillar_update,
                 crate::enemies::burrower_emerge,
                 crate::enemies::enemy_contact,
                 crate::enemies::spitter_attack,
@@ -208,6 +210,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
                 crate::pickups::pickup_update,
                 crate::director::run_clock,
                 crate::director::levelup_trigger,
+                crate::comet::comet_system,
             )
                 .chain()
                 .run_if(crate::playing),
@@ -244,10 +247,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
     let run = world.resource::<RunState>().clone();
     let enemies = world.query_filtered::<(), With<Enemy>>().iter(world).count();
     let phase = *world.resource::<RunPhase>();
+    let comet_fires = world.resource::<crate::comet::Comet>().fires;
 
     println!("--- SMOKE SUMMARY ---");
     println!(
-        "phase={phase:?} level={} kills={} gold={} hp={:.0}/{:.0} timer={:.0} enemies={} boss_spawned={} boss_dead={}",
+        "phase={phase:?} level={} kills={} gold={} hp={:.0}/{:.0} timer={:.0} enemies={} comets={comet_fires} boss_spawned={} boss_dead={}",
         run.level, run.kills, run.gold, run.hp, run.stats.max_hp, run.timer, enemies, run.boss_spawned, run.boss_dead
     );
 

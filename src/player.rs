@@ -31,13 +31,15 @@ pub struct PlayerRig; // camera
 
 #[derive(Resource)]
 pub struct CamRig {
-    pub yaw: f32,
+    /// Persistent world-space forward (tangent to the sphere). Carried along as the
+    /// player moves so a fixed aim stays fixed — no per-frame tangent-frame drift/flip.
+    pub forward: Vec3,
     pub pitch: f32,
 }
 
 impl Default for CamRig {
     fn default() -> Self {
-        Self { yaw: 0.0, pitch: 0.55 }
+        Self { forward: Vec3::NEG_Z, pitch: 0.55 }
     }
 }
 
@@ -210,9 +212,15 @@ pub fn player_input(
     let Ok(mut p) = q.single_mut() else { return };
     let dt = time.delta_secs();
 
-    let (t, b) = sphere::tangent_frame(p.dir);
-    let fwd = (t * rig.yaw.cos() + b * rig.yaw.sin()).normalize();
-    let right = fwd.cross(p.dir).normalize();
+    // Use the camera's persistent forward (reprojected onto the current tangent plane)
+    // so movement always matches where the camera looks.
+    let up = p.dir;
+    let mut fwd = rig.forward - up * rig.forward.dot(up);
+    if fwd.length_squared() < 1e-6 {
+        fwd = sphere::tangent_frame(up).0;
+    }
+    let fwd = fwd.normalize();
+    let right = fwd.cross(up).normalize();
 
     let mut wish = Vec3::ZERO;
     if keys.pressed(KeyCode::KeyW) {
@@ -351,51 +359,63 @@ pub fn camera_rig(
     shake: Res<Shake>,
     planet: Res<CurrentPlanet>,
     phase: Res<RunPhase>,
+    save: Res<crate::save::MetaSave>,
     q_player: Query<(&Player, &Transform), Without<PlayerRig>>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
 ) {
     let Ok((p, ptf)) = q_player.single() else { return };
     let Ok(mut cam) = q_cam.single_mut() else { return };
 
-    if *phase == RunPhase::Playing {
-        // positive yaw turns left on the sphere frame, so mouse-right must subtract
-        rig.yaw -= mouse.delta.x * CAM_SENS;
-        rig.pitch = (rig.pitch + mouse.delta.y * CAM_SENS).clamp(0.12, 1.25);
-    }
-
     let up = p.dir;
-    let (t, b) = sphere::tangent_frame(up);
-    let flat = (t * rig.yaw.cos() + b * rig.yaw.sin()).normalize();
+
+    // Parallel-transport the persistent forward onto the current tangent plane
+    // (as the player moves, `up` changes; keep `forward` tangent without twisting it).
+    let mut fwd = rig.forward - up * rig.forward.dot(up);
+    if fwd.length_squared() < 1e-6 {
+        fwd = sphere::tangent_frame(up).0;
+    }
+    fwd = fwd.normalize();
+
+    // Mouse turns the persistent forward directly — no per-frame basis, no pole flip.
+    let sens = CAM_SENS * save.sensitivity;
+    if *phase == RunPhase::Playing {
+        fwd = Quat::from_axis_angle(up, -mouse.delta.x * sens) * fwd;
+        fwd = (fwd - up * fwd.dot(up)).normalize();
+        rig.pitch = (rig.pitch + mouse.delta.y * sens).clamp(0.12, 1.25);
+    }
+    rig.forward = fwd;
 
     let dist = CAM_DISTANCE;
-    let back = -flat * (dist * rig.pitch.cos());
+    let back = -fwd * (dist * rig.pitch.cos());
     let lift = up * (dist * rig.pitch.sin() + CAM_HEIGHT * 0.4);
 
-    let target_pos = ptf.translation + back + lift;
-    let look_at = ptf.translation + up * 1.2 + flat * 2.0;
+    // Clamp the TARGET above terrain (pre-lerp) so ground clearance is smoothed by the
+    // easing instead of popping the final position.
+    let mut target_pos = ptf.translation + back + lift;
+    let tdir = target_pos.normalize_or_zero();
+    if tdir != Vec3::ZERO {
+        let min_r = planet.surface(tdir) + 1.2;
+        if target_pos.length() < min_r {
+            target_pos = tdir * min_r;
+        }
+    }
 
     let k = 1.0 - (-CAM_STIFFNESS * time.delta_secs()).exp();
-    let mut pos = cam.translation.lerp(target_pos, k);
-
-    // keep the camera out of the ground (mountains included)
-    let cam_dir = pos.normalize_or_zero();
-    let min_r = planet.surface(cam_dir) + 1.2;
-    if pos.length() < min_r {
-        pos = cam_dir * min_r;
-    }
+    let pos = cam.translation.lerp(target_pos, k);
 
     // Aim from the UNSHAKEN position so shake never becomes rotational jitter,
     // and never re-aim across a degenerate (near-zero) look vector.
     cam.translation = pos;
+    let look_at = ptf.translation + up * 1.2 + fwd * 2.0;
     if (look_at - pos).length_squared() > 0.25 {
         cam.look_at(look_at, up);
     }
 
-    // positional-only screenshake, applied after aiming
-    let tr = shake.trauma * shake.trauma;
+    // positional-only screenshake, applied after aiming (scaled by the settings slider)
+    let tr = shake.trauma * shake.trauma * save.shake_scale;
     if tr > 0.001 {
         let t = (time.elapsed_secs() % 60.0) * 33.0;
-        cam.translation += (t.sin() * 0.12 + (t * 1.7).cos() * 0.09) * tr * flat.cross(up)
+        cam.translation += (t.sin() * 0.12 + (t * 1.7).cos() * 0.09) * tr * fwd.cross(up)
             + ((t * 1.3).cos() * 0.10) * tr * up;
     }
 }

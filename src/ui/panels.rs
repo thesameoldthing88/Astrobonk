@@ -39,6 +39,8 @@ pub struct PauseRoot;
 pub struct ResumeBtn;
 #[derive(Component)]
 pub struct AbandonBtn;
+#[derive(Component)]
+pub struct PauseSettingsBtn;
 
 /// (Re)build the choice panel whenever its contents change.
 pub fn sync_choice_panel(
@@ -479,10 +481,22 @@ pub fn pause_panel(
     keys: Res<ButtonInput<KeyCode>>,
     mut phase: ResMut<RunPhase>,
     mut run: ResMut<RunState>,
+    mut settings_open: ResMut<crate::ui::settings::SettingsOpen>,
     q_root: Query<Entity, With<PauseRoot>>,
     resume: Query<&Interaction, (Changed<Interaction>, With<ResumeBtn>)>,
     abandon: Query<&Interaction, (Changed<Interaction>, With<AbandonBtn>)>,
+    psettings: Query<&Interaction, (Changed<Interaction>, With<PauseSettingsBtn>)>,
 ) {
+    // While the settings overlay is up, it owns input (incl. ESC) — don't also resume.
+    if settings_open.0 {
+        return;
+    }
+    for i in &psettings {
+        if *i == Interaction::Pressed {
+            settings_open.0 = true;
+            return;
+        }
+    }
     match *phase {
         RunPhase::Playing => {
             if keys.just_pressed(KeyCode::Escape) {
@@ -517,6 +531,10 @@ pub fn pause_panel(
                         root.spawn((ResumeBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
                             .with_children(|b| {
                                 b.spawn(txt("[ESC] RESUME", FONT_MED, Color::WHITE));
+                            });
+                        root.spawn((PauseSettingsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
+                            .with_children(|b| {
+                                b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
                             });
                         root.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
                             .with_children(|b| {

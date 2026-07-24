@@ -40,6 +40,26 @@ pub struct Boss {
     pub burst_timer: f32,
 }
 
+/// The Craterpillar's head records the ground it has crossed so its body can
+/// follow — a worm that literally laps the tiny planet.
+#[derive(Component)]
+pub struct CraterpillarHead {
+    pub trail: std::collections::VecDeque<Vec3>, // recent head directions, front = newest
+}
+
+/// One body chunk following the head's trail at a fixed stride behind it.
+#[derive(Component)]
+pub struct CraterpillarSegment {
+    pub head: Entity,
+    pub idx: usize,
+    pub damage: f32,
+    pub scale: f32,
+}
+
+const WORM_SEGMENTS: usize = 12;
+const WORM_STRIDE: usize = 2; // trail points between segments
+const WORM_TRAIL_STEP: f32 = 0.55; // meters between recorded trail points
+
 #[derive(Component)]
 pub struct Spitter {
     pub cd: f32,
@@ -109,6 +129,9 @@ pub struct EnemyAssets {
     pub elite_mat: Handle<StandardMaterial>,
     pub flash_mat: Handle<StandardMaterial>,
     pub boss_mat: Handle<StandardMaterial>,
+    pub worm_head_mesh: Handle<Mesh>,
+    pub worm_seg_mesh: Handle<Mesh>,
+    pub worm_mat: Handle<StandardMaterial>,
     pub proj_mesh: Handle<Mesh>,
     pub proj_mat: Handle<StandardMaterial>,
     pub ring_mesh: Handle<Mesh>,
@@ -239,6 +262,32 @@ fn enemy_mesh(kind: EnemyKind) -> Mesh {
     m.build()
 }
 
+/// The Craterpillar's armored head: mandibles, ridge plates, dark eye sockets.
+fn worm_head_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_ellipsoid(Vec3::new(0.8, 0.75, 0.95), 2, at(Vec3::ZERO), BODY); // head
+    m.add_box(Vec3::new(0.5, 0.18, 0.5), at(Vec3::new(0.0, 0.55, 0.05)), MID); // crest plate
+    for s in [-1.0, 1.0] {
+        m.add_cone(0.16, 0.7, 5, Transform::from_translation(Vec3::new(0.4 * s, -0.2, -0.7)).with_rotation(Quat::from_rotation_x(1.4) * Quat::from_rotation_z(0.3 * s)), DARK); // mandible
+        m.add_sphere(0.13, 1, at(Vec3::new(0.32 * s, 0.15, -0.62)), DARK); // eye socket
+        m.add_box(Vec3::new(0.14, 0.3, 0.5), at(Vec3::new(0.66 * s, 0.1, 0.1)), MID); // cheek plate
+    }
+    m.build()
+}
+
+/// One armored body chunk of the Craterpillar.
+fn worm_seg_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_sphere(0.7, 1, at(Vec3::ZERO), BODY);
+    m.add_box(Vec3::new(0.42, 0.28, 0.7), at(Vec3::new(0.0, 0.5, 0.0)), MID); // dorsal ridge
+    for s in [-1.0, 1.0] {
+        m.add_cone(0.1, 0.4, 4, Transform::from_translation(Vec3::new(0.6 * s, 0.15, 0.0)).with_rotation(Quat::from_rotation_z(1.4 * s)), DARK); // side spike
+    }
+    m.build()
+}
+
 /// A hulking generic boss silhouette: heavy body, plated shoulders, horned head,
 /// back spikes. Low-count so detail is free. (Per-boss unique meshes are future work.)
 fn boss_mesh() -> Mesh {
@@ -314,6 +363,15 @@ pub fn setup_enemy_assets(
             base_color: Color::srgb(0.55, 0.2, 0.6),
             emissive: LinearRgba::rgb(0.8, 0.15, 0.9),
             perceptual_roughness: 0.4,
+            ..default()
+        }),
+        worm_head_mesh: meshes.add(worm_head_mesh()),
+        worm_seg_mesh: meshes.add(worm_seg_mesh()),
+        worm_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.52, 0.54, 0.60),
+            emissive: LinearRgba::rgb(0.06, 0.06, 0.09),
+            perceptual_roughness: 0.55,
+            metallic: 0.25,
             ..default()
         }),
         proj_mesh: meshes.add(Mesh::from(Sphere::new(0.28))),
@@ -422,8 +480,9 @@ pub fn director_spawn(
     let rate = if run.static_active {
         10.0 + run.static_timer * 0.15
     } else {
+        // gentler opening so a level-1 player can learn; ramp still bites by mid-game.
         let t = run.elapsed / 60.0;
-        (1.5 + t * 2.2) * (1.0 + run.stats.difficulty)
+        (1.0 + t * 2.1) * (1.0 + run.stats.difficulty)
     };
     director.spawn_bank += rate * dt;
     director.tick += dt;
@@ -493,32 +552,142 @@ pub fn spawn_boss(
     let dir = sphere::offset_dir(player_dir, heading, 30.0, planet.radius);
     let hp = def.hp * (1.0 + difficulty);
     let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
-    let mesh = meshes.add(boss_mesh());
-    commands.spawn((
-        Enemy {
-            kind: EnemyKind::Bruiser,
-            dir,
-            hover: 0.0,
-            speed: def.speed,
-            damage: def.damage * (1.0 + difficulty * 0.5),
-            xp: 50.0,
-            hp,
-            max_hp: hp,
-            elite: true,
-            contact_cd: 0.0,
-            slow: 0.0,
-            knock: Vec3::ZERO,
-            flash: 0.0,
-            scale: def.scale,
-            wobble: 0.0,
-        },
-        Boss { kind, attack_timer: 4.0, burst_timer: 7.0 },
-        Mesh3d(mesh),
-        MeshMaterial3d(assets.boss_mat.clone()),
-        BaseMat(assets.boss_mat.clone()),
-        Transform::from_translation(pos).with_scale(Vec3::splat(def.scale)),
-        StageScoped,
-    ));
+    let is_worm = kind == BossKind::Craterpillar;
+    let (mesh, mat) = if is_worm {
+        (assets.worm_head_mesh.clone(), assets.worm_mat.clone())
+    } else {
+        (meshes.add(boss_mesh()), assets.boss_mat.clone())
+    };
+    let contact_dmg = def.damage * (1.0 + difficulty * 0.5);
+    let head = commands
+        .spawn((
+            Enemy {
+                kind: EnemyKind::Bruiser,
+                dir,
+                hover: 0.0,
+                speed: def.speed,
+                damage: contact_dmg,
+                xp: 50.0,
+                hp,
+                max_hp: hp,
+                elite: true,
+                contact_cd: 0.0,
+                slow: 0.0,
+                knock: Vec3::ZERO,
+                flash: 0.0,
+                scale: def.scale,
+                wobble: 0.0,
+            },
+            Boss { kind, attack_timer: 4.0, burst_timer: 7.0 },
+            Mesh3d(mesh),
+            MeshMaterial3d(mat.clone()),
+            BaseMat(mat),
+            Transform::from_translation(pos).with_scale(Vec3::splat(def.scale)),
+            StageScoped,
+        ))
+        .id();
+
+    if is_worm {
+        commands
+            .entity(head)
+            .insert(CraterpillarHead { trail: std::collections::VecDeque::new() });
+        // Body chunks trail behind, tapering toward the tail.
+        for i in 0..WORM_SEGMENTS {
+            let seg_scale = def.scale * (0.85 - 0.03 * i as f32).max(0.4);
+            commands.spawn((
+                CraterpillarSegment { head, idx: i, damage: contact_dmg * 0.7, scale: seg_scale },
+                Mesh3d(assets.worm_seg_mesh.clone()),
+                MeshMaterial3d(assets.worm_mat.clone()),
+                Transform::from_translation(pos).with_scale(Vec3::splat(seg_scale)),
+                StageScoped,
+            ));
+        }
+    }
+}
+
+/// DEV: press B during play to summon the current planet's stage boss immediately
+/// (so the Craterpillar is testable without surviving 8+ minutes). Remove before ship.
+pub fn debug_spawn_boss(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Res<EnemyAssets>,
+    planet: Res<CurrentPlanet>,
+    mut run: ResMut<RunState>,
+    q_player: Query<&Player>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
+) {
+    if !keys.just_pressed(KeyCode::KeyB) {
+        return;
+    }
+    let Ok(p) = q_player.single() else { return };
+    let kind = match planet.kind {
+        crate::content::planets::PlanetKind::Moon => BossKind::Craterpillar,
+        _ => BossKind::Anubot,
+    };
+    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, run.stats.difficulty);
+    run.boss_spawned = true;
+    banners.write(crate::messages::BannerMsg(format!("[DEV] {} SUMMONED", kind.def().name)));
+}
+
+/// Records the Craterpillar head's path and threads its body segments along it;
+/// segments deal contact damage and vanish when the head dies.
+#[allow(clippy::type_complexity)]
+pub fn craterpillar_update(
+    mut commands: Commands,
+    planet: Res<CurrentPlanet>,
+    run: Res<RunState>,
+    q_player: Query<&Transform, (With<Player>, Without<CraterpillarSegment>, Without<CraterpillarHead>)>,
+    mut set: ParamSet<(
+        Query<(Entity, &Transform, &mut CraterpillarHead)>,
+        Query<(Entity, &CraterpillarSegment, &mut Transform)>,
+    )>,
+    mut writer: MessageWriter<PlayerHitMsg>,
+) {
+    use std::collections::HashMap;
+    // 1) extend each head's trail (distance-based so it's framerate-independent)
+    let mut snapshots: HashMap<Entity, Vec<Vec3>> = HashMap::new();
+    for (e, tf, mut head) in &mut set.p0() {
+        let d = tf.translation.normalize_or_zero();
+        let need = head.trail.front().map(|f| f.distance(d) * planet.radius > WORM_TRAIL_STEP).unwrap_or(true);
+        if need && d != Vec3::ZERO {
+            head.trail.push_front(d);
+        }
+        let cap = WORM_SEGMENTS * WORM_STRIDE + 4;
+        while head.trail.len() > cap {
+            head.trail.pop_back();
+        }
+        snapshots.insert(e, head.trail.iter().copied().collect());
+    }
+
+    // 2) place segments along their head's trail + contact damage
+    let ptf = q_player.single().ok().map(|t| t.translation);
+    for (se, seg, mut stf) in &mut set.p1() {
+        let Some(trail) = snapshots.get(&seg.head) else {
+            commands.entity(se).despawn(); // head is gone → worm dies
+            continue;
+        };
+        if trail.is_empty() {
+            continue;
+        }
+        let i = (seg.idx * WORM_STRIDE).min(trail.len() - 1);
+        let dir = trail[i];
+        let pos = planet.surface_point(dir) + dir * seg.scale * 0.6;
+        stf.translation = pos;
+        // orient along the trail toward the next-newer point
+        let ahead = trail[i.saturating_sub(1)];
+        let fwd = (planet.surface_point(ahead) - pos).normalize_or_zero();
+        stf.rotation = sphere::frame_quat(dir, if fwd == Vec3::ZERO { sphere::tangent_frame(dir).0 } else { fwd });
+
+        if run.iframes <= 0.0 {
+            if let Some(pp) = ptf {
+                let reach = seg.scale * 0.6 + PLAYER_RADIUS + 0.25;
+                if pos.distance_squared(pp) < reach * reach {
+                    writer.write(PlayerHitMsg { amount: seg.damage, from: pos, attacker: None });
+                }
+            }
+        }
+    }
 }
 
 /// Steering + separation + transform write for every enemy.

@@ -48,5 +48,12 @@ pub const DAMAGE_NUMBER_POOL: usize = 64;
 
 pub const INTERACT_RANGE: f32 = 3.0;
 
+// Comet Combo — the signature scored lap-kill.
+pub const WAKE_RADIUS: f32 = 14.0; // enemies this close (and behind you) join the tail
+pub const COMET_MIN_TAIL: u32 = 8; // tail must reach this to start charging
+pub const COMET_CHARGE_GOAL: f32 = 900.0; // charge = Σ(tail_count · speed · dt)
+pub const COMET_RADIUS: f32 = 22.0; // cash-out detonation radius
+pub const COMET_GRACE: f32 = 0.7; // seconds the tail can dip before the combo breaks
+
 pub const SAVE_DIR: &str = "astrobonk";
 pub const SAVE_FILE: &str = "save.json";

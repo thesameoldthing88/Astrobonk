@@ -23,6 +23,8 @@ pub struct WeaponAssets {
     pub sweep_mesh: Handle<Mesh>,
     pub aura_mesh: Handle<Mesh>,
     pub mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
+    /// Faint see-through variants for the aura sphere so it doesn't blind the player.
+    pub aura_mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
 }
 
 pub fn setup_weapon_assets(
@@ -31,6 +33,7 @@ pub fn setup_weapon_assets(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let mut mats = HashMap::new();
+    let mut aura_mats = HashMap::new();
     for kind in [
         WeaponKind::Wrench,
         WeaponKind::LaserPistol,
@@ -76,6 +79,19 @@ pub fn setup_weapon_assets(
                 ..default()
             }),
         );
+        // A faint, see-through version for the aura bubble that surrounds the player.
+        aura_mats.insert(
+            kind,
+            materials.add(StandardMaterial {
+                base_color: c.with_alpha(0.12),
+                emissive: c.to_linear() * 0.6,
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                double_sided: true,
+                cull_mode: None,
+                ..default()
+            }),
+        );
     }
     commands.insert_resource(WeaponAssets {
         proj_mesh: meshes.add(Mesh::from(Sphere::new(0.22))),
@@ -84,6 +100,7 @@ pub fn setup_weapon_assets(
         sweep_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 0.12, 1.0))),
         aura_mesh: meshes.add(Mesh::from(Sphere::new(1.0))),
         mats,
+        aura_mats,
     })
 }
 
@@ -515,7 +532,7 @@ pub fn weapon_fire(
                 commands.spawn((
                     AuraVis { weapon: kind },
                     Mesh3d(assets.aura_mesh.clone()),
-                    MeshMaterial3d(assets.mats[&kind].clone()),
+                    MeshMaterial3d(assets.aura_mats[&kind].clone()),
                     Transform::from_translation(ptf.translation).with_scale(Vec3::splat(radius)),
                     StageScoped,
                 ));

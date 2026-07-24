@@ -2,6 +2,7 @@ pub mod hud;
 pub mod menus;
 pub mod numbers;
 pub mod panels;
+pub mod settings;
 
 use bevy::prelude::*;
 

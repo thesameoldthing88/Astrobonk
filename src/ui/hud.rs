@@ -43,6 +43,8 @@ pub struct BossBarName;
 pub struct PowerupText;
 #[derive(Component)]
 pub struct Vignette;
+#[derive(Component)]
+pub struct CometText;
 
 #[derive(Resource, Default)]
 pub struct BannerQueue {
@@ -88,6 +90,18 @@ pub fn spawn_hud(mut commands: Commands) {
             },))
                 .with_children(|c| {
                     c.spawn((TimerText, txt("10:00", 44.0, Color::WHITE)));
+                });
+
+            // comet combo readout, just under the timer
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(52.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((CometText, txt("", FONT_MED, Color::srgb(1.0, 0.8, 0.3))));
                 });
 
             // boss bar under the timer
@@ -369,6 +383,27 @@ pub fn update_weapon_row(
             });
         }
     });
+}
+
+/// Comet combo indicator: a growing tail counter + a charge meter drawn in text bars.
+pub fn update_comet_hud(
+    comet: Res<crate::comet::Comet>,
+    mut q: Query<(&mut Text, &mut TextColor), With<CometText>>,
+) {
+    let Ok((mut text, mut color)) = q.single_mut() else { return };
+    if comet.flash > 0.0 {
+        text.0 = "\u{2604} COMET!".into();
+        color.0 = Color::srgb(1.0, 0.9, 0.4);
+    } else if comet.active {
+        let filled = (comet.progress() * 12.0).round() as usize;
+        let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(12 - filled);
+        text.0 = format!("\u{2604} x{}  {bar}", comet.count);
+        // warm up from amber to white-hot as the charge fills
+        let t = comet.progress();
+        color.0 = Color::srgb(1.0, 0.8 + 0.2 * t, 0.3 + 0.5 * t);
+    } else {
+        text.0 = String::new();
+    }
 }
 
 pub fn update_boss_bar(

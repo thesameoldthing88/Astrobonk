@@ -1,5 +1,6 @@
 mod audio;
 mod combat;
+mod comet;
 mod config;
 mod content;
 mod director;
@@ -9,6 +10,7 @@ mod headless;
 mod interact;
 mod meshkit;
 mod messages;
+mod music;
 mod pickups;
 mod planet;
 mod player;
@@ -82,6 +84,8 @@ fn main() {
         .init_resource::<interact::InteractPrompt>()
         .init_resource::<interact::ChestPanel>()
         .init_resource::<interact::ShopPanel>()
+        .init_resource::<comet::Comet>()
+        .init_resource::<ui::settings::SettingsOpen>()
         .init_resource::<ui::menus::Selected>()
         .init_resource::<ui::menus::MenuTab>()
         .init_resource::<ui::hud::BannerQueue>()
@@ -101,6 +105,7 @@ fn main() {
                 combat::setup_weapon_assets,
                 pickups::setup_pickup_assets,
                 audio::build_sfx_bank,
+                music::build_music_bank,
                 ui::numbers::spawn_number_pool,
                 boot,
             ),
@@ -112,10 +117,10 @@ fn main() {
         .add_systems(OnExit(AppState::CharSelect), ui::menus::despawn_menu)
         .add_systems(OnEnter(AppState::PlanetSelect), ui::menus::spawn_planet_select)
         .add_systems(OnExit(AppState::PlanetSelect), ui::menus::despawn_menu)
-        .add_systems(OnEnter(AppState::InRun), (enter_run, ui::hud::spawn_hud))
+        .add_systems(OnEnter(AppState::InRun), (enter_run, ui::hud::spawn_hud, music::start_music))
         .add_systems(
             OnExit(AppState::InRun),
-            (planet::despawn_stage, ui::hud::despawn_hud, clear_panels),
+            (planet::despawn_stage, ui::hud::despawn_hud, clear_panels, music::stop_music),
         )
         .add_systems(
             OnEnter(AppState::Results),
@@ -134,6 +139,7 @@ fn main() {
                 enemies::rebuild_hash,
                 enemies::director_spawn,
                 enemies::enemy_move,
+                enemies::craterpillar_update,
                 enemies::burrower_emerge,
                 enemies::enemy_contact,
                 enemies::spitter_attack,
@@ -161,6 +167,8 @@ fn main() {
                 pickups::pickup_update,
                 director::run_clock,
                 director::levelup_trigger,
+                enemies::debug_spawn_boss,
+                comet::comet_system,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
@@ -197,6 +205,7 @@ fn main() {
                 ui::hud::update_hud,
                 ui::hud::update_weapon_row,
                 ui::hud::update_boss_bar,
+                ui::hud::update_comet_hud,
                 ui::hud::update_banners,
                 ui::panels::sync_choice_panel,
                 ui::panels::choice_input,
@@ -225,6 +234,9 @@ fn main() {
                 fx::hitstop_system,
                 fx::phase_time_control,
                 audio::play_sfx,
+                music::update_music.run_if(in_state(AppState::InRun)),
+                // runs after pause_panel so a single ESC closes settings without also resuming
+                ui::settings::settings_panel.after(ui::panels::pause_panel),
                 ui::button_hover,
             ),
         )
@@ -264,7 +276,9 @@ fn enter_run(
     save: Res<save::MetaSave>,
     mut director_res: ResMut<enemies::Director>,
     mut phase: ResMut<run::RunPhase>,
+    mut comet_res: ResMut<comet::Comet>,
 ) {
+    *comet_res = comet::Comet::default();
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);

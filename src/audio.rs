@@ -173,7 +173,7 @@ pub fn play_sfx(
                 AudioPlayer(handle.clone()),
                 PlaybackSettings {
                     mode: PlaybackMode::Despawn,
-                    volume: Volume::Linear(save.volume),
+                    volume: Volume::Linear(save.volume * save.sfx_volume),
                     ..default()
                 },
             ));

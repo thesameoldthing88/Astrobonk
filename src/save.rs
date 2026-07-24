@@ -29,6 +29,7 @@ pub struct Counters {
 }
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
+#[serde(default)] // missing fields (e.g. from older saves) fall back to Default — never wipe progress
 pub struct MetaSave {
     pub silver: u64,
     pub tome_levels: HashMap<TomeKind, u32>,
@@ -40,6 +41,11 @@ pub struct MetaSave {
     pub quests_done: HashSet<QuestKind>,
     pub counters: Counters,
     pub volume: f32,
+    // --- settings ---
+    pub music_volume: f32,
+    pub sfx_volume: f32,
+    pub sensitivity: f32, // camera-sensitivity multiplier
+    pub shake_scale: f32, // screenshake intensity multiplier
 }
 
 impl Default for MetaSave {
@@ -82,6 +88,10 @@ impl Default for MetaSave {
             quests_done: HashSet::new(),
             counters: Counters::default(),
             volume: 0.7,
+            music_volume: 1.0,
+            sfx_volume: 1.0,
+            sensitivity: 1.0,
+            shake_scale: 1.0,
         }
     }
 }
