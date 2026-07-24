@@ -291,6 +291,10 @@ pub fn chest_panel(
                     card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
                     let stats: Vec<String> = d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
                     card.spawn(txt(stats.join(", "), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
+                    let cat = crate::run::catalyst_line(item);
+                    if !cat.is_empty() {
+                        card.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
+                    }
                 });
                 root.spawn((Node { column_gap: Val::Px(10.0), ..default() },))
                     .with_children(|row| {
@@ -405,6 +409,10 @@ pub fn shop_panel(
                                 c.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
                                 c.spawn(txt(d.name, FONT_MED, Color::WHITE));
                                 c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                let cat = crate::run::catalyst_line(*item);
+                                if !cat.is_empty() {
+                                    c.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
+                                }
                                 if *sold {
                                     c.spawn(txt("SOLD", FONT_MED, Color::srgb(0.6, 0.4, 0.4)));
                                 }

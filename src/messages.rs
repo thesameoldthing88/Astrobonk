@@ -67,6 +67,9 @@ pub enum Sfx {
     Pot,
     Teleport,
     Shrine,
+    Slide,
+    Bhop,
+    Comet,
 }
 
 #[derive(Message)]

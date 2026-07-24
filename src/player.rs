@@ -202,14 +202,17 @@ fn backpack_mesh() -> Mesh {
 
 /// WASD + jump + slide, in the camera's tangent frame.
 pub fn player_input(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     rig: Res<CamRig>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
-    mut q: Query<&mut Player>,
+    particles: Option<Res<crate::fx::ParticleAssets>>,
+    mut sfx: MessageWriter<crate::messages::SfxMsg>,
+    mut q: Query<(&mut Player, &Transform)>,
 ) {
-    let Ok(mut p) = q.single_mut() else { return };
+    let Ok((mut p, ptf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
 
     // Use the camera's persistent forward (reprojected onto the current tangent plane)
@@ -267,6 +270,24 @@ pub fn player_input(
     if keys.just_pressed(KeyCode::Space) {
         let can_ground = p.grounded || p.coyote > 0.0;
         if can_ground || p.jumps_used < max_jumps {
+            // successful bunny-hop: jumped inside the landing window with speed kept
+            if can_ground
+                && p.land_timer <= BHOP_WINDOW
+                && p.vel_t.length() > PLAYER_RUN_SPEED * speed_mult * 1.05
+            {
+                sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Bhop));
+                if let Some(pa) = &particles {
+                    crate::fx::burst(
+                        &mut commands,
+                        pa,
+                        ptf.translation - p.dir * 0.7,
+                        p.dir,
+                        crate::fx::Pcolor::Cyan,
+                        4,
+                        2.5,
+                    );
+                }
+            }
             p.vel_r = PLAYER_JUMP_VEL * run.stats.jump_height.sqrt();
             if !can_ground {
                 p.jumps_used += 1;
@@ -289,6 +310,19 @@ pub fn player_input(
         p.vel_t = boost_dir * max_speed.max(p.vel_t.length()).max(PLAYER_RUN_SPEED * speed_mult * SLIDE_BOOST);
         if let Passive::SlideFrenzy { secs, .. } = run.character.def().passive {
             run.frenzy_timer = secs;
+        }
+        // feel: whoosh + a kick of dust at the feet
+        sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Slide));
+        if let Some(pa) = &particles {
+            crate::fx::burst(
+                &mut commands,
+                pa,
+                ptf.translation - p.dir * 0.7,
+                p.dir,
+                crate::fx::Pcolor::White,
+                6,
+                3.0,
+            );
         }
     }
 
@@ -319,6 +353,8 @@ pub fn player_physics(
     p.coyote = (p.coyote - dt).max(0.0);
     p.land_timer += dt;
     run.frenzy_timer = (run.frenzy_timer - dt).max(0.0);
+    // above base run speed? (Nova's "no cooldown while sprinting")
+    run.fast_move = p.vel_t.length() > PLAYER_RUN_SPEED * run.move_speed_mult() * 1.08;
 
     // gravity
     p.vel_r -= PLAYER_GRAVITY * dt;
@@ -362,9 +398,20 @@ pub fn camera_rig(
     save: Res<crate::save::MetaSave>,
     q_player: Query<(&Player, &Transform), Without<PlayerRig>>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
+    mut q_proj: Query<&mut Projection, With<PlayerRig>>,
 ) {
     let Ok((p, ptf)) = q_player.single() else { return };
     let Ok(mut cam) = q_cam.single_mut() else { return };
+
+    // FOV punch while sliding — speed you can feel
+    if let Ok(mut proj) = q_proj.single_mut() {
+        if let Projection::Perspective(pp) = &mut *proj {
+            let base = std::f32::consts::FRAC_PI_4;
+            let target = if p.slide_timer > 0.0 { base * 1.09 } else { base };
+            let k = 1.0 - (-10.0 * time.delta_secs()).exp();
+            pp.fov += (target - pp.fov) * k;
+        }
+    }
 
     let up = p.dir;
 

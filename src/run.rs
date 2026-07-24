@@ -79,6 +79,7 @@ pub struct RunState {
     pub static_timer: f32,
     pub teleporter_open: bool,
     pub frenzy_timer: f32,
+    pub fast_move: bool, // player is above base run speed (for Nova's passive)
     pub powerups: Vec<(PowerupKind, f32)>,
     pub microwave_used: bool,
     pub chest_opens: u32,
@@ -126,6 +127,7 @@ impl RunState {
             static_timer: 0.0,
             teleporter_open: false,
             frenzy_timer: 0.0,
+            fast_move: false,
             powerups: Vec::new(),
             microwave_used: false,
             chest_opens: 0,
@@ -191,13 +193,17 @@ impl RunState {
         self.hp = (self.stats.max_hp * hp_frac).clamp(0.0, self.stats.max_hp);
     }
 
-    /// Effective attack speed including Yuki frenzy + powerups.
+    /// Effective attack speed including Yuki frenzy, powerups, and hero mechanic-passives.
     pub fn attack_speed(&self) -> f32 {
         let mut a = self.stats.attack_speed;
         if self.frenzy_timer > 0.0 {
             if let Passive::SlideFrenzy { bonus, .. } = self.character.def().passive {
                 a += bonus;
             }
+        }
+        // Slipstream Nova: weapons barely cool down while she's sprinting.
+        if self.character == AstronautKind::Nova && self.fast_move {
+            a += 1.3;
         }
         a.max(0.1)
     }
@@ -207,7 +213,20 @@ impl RunState {
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Damage2x) {
             d *= 2.0;
         }
+        // Sgt. Gristle: cornered and furious — big damage below half HP.
+        if self.character == AstronautKind::Gristle && self.hp < self.stats.max_hp * 0.5 {
+            d *= 1.4;
+        }
         d
+    }
+
+    /// Armor after hero mechanics — Old Ironclad's plating doubles when badly hurt.
+    pub fn effective_armor_fraction(&self) -> f32 {
+        let mut armor = self.stats.armor.max(0.0);
+        if self.character == AstronautKind::Ironclad && self.hp < self.stats.max_hp * 0.3 {
+            armor *= 2.0;
+        }
+        armor / (armor + 100.0)
     }
 
     pub fn move_speed_mult(&self) -> f32 {
@@ -315,10 +334,38 @@ impl UpgradeOption {
 
     pub fn body(&self, run: &RunState) -> String {
         match self {
-            UpgradeOption::NewWeapon(w) => w.def().desc.to_string(),
+            UpgradeOption::NewWeapon(w) => {
+                let d = w.def();
+                match (d.evolves_to, d.evo_item) {
+                    (Some(evo), Some(item)) => format!(
+                        "{}\nEvolves: {} (with {})",
+                        d.desc,
+                        evo.def().name,
+                        item.def().name
+                    ),
+                    _ => d.desc.to_string(),
+                }
+            }
             UpgradeOption::WeaponUp(w) => {
                 let lvl = run.weapons.iter().find(|i| i.kind == *w).map(|i| i.level).unwrap_or(0);
-                format!("Level {} -> {}\n{}", lvl, lvl + 1, w.def().desc)
+                let d = w.def();
+                let mut s = format!("Level {} -> {}\n{}", lvl, lvl + 1, d.desc);
+                if let (Some(evo), Some(item)) = (d.evolves_to, d.evo_item) {
+                    if run.has_item(item) {
+                        s.push_str(&format!(
+                            "\nEvolves: {} at Lv{} (catalyst owned!)",
+                            evo.def().name,
+                            crate::config::MAX_WEAPON_LEVEL
+                        ));
+                    } else {
+                        s.push_str(&format!(
+                            "\nEvolves: {} (with {})",
+                            evo.def().name,
+                            item.def().name
+                        ));
+                    }
+                }
+                s
             }
             UpgradeOption::Evolve(w) => w
                 .def()
@@ -329,16 +376,34 @@ impl UpgradeOption {
                 let d = i.def();
                 let stats: Vec<String> =
                     d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                format!("{}\n{}", d.desc, stats.join(", "))
+                format!("{}\n{}{}", d.desc, stats.join(", "), catalyst_line(*i))
             }
             UpgradeOption::ItemUp(i) => {
                 let d = i.def();
                 let stats: Vec<String> =
                     d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                format!("{} ({}/{})\n{}", d.desc, run.item_count(*i), d.max_stacks, stats.join(", "))
+                format!(
+                    "{} ({}/{})\n{}{}",
+                    d.desc,
+                    run.item_count(*i),
+                    d.max_stacks,
+                    stats.join(", "),
+                    catalyst_line(*i)
+                )
             }
             UpgradeOption::GoldPile(_) => "Cold hard currency".into(),
         }
+    }
+}
+
+/// "Evo catalyst: Wrench" line for item cards (empty if the item evolves nothing).
+pub fn catalyst_line(item: ItemKind) -> String {
+    let weapons = WeaponKind::catalyst_for(item);
+    if weapons.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = weapons.iter().map(|w| w.def().name).collect();
+        format!("\nEvo catalyst: {}", names.join(", "))
     }
 }
 

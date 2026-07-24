@@ -189,6 +189,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::enemies::enemy_move,
                 crate::enemies::craterpillar_update,
                 crate::enemies::anubot_beam_system,
+                crate::enemies::boss_phase_system,
                 crate::enemies::burrower_emerge,
                 crate::enemies::enemy_contact,
                 crate::enemies::spitter_attack,

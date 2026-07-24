@@ -47,6 +47,9 @@ pub struct Vignette;
 pub struct CometText;
 #[derive(Component)]
 pub struct DustOverlay;
+/// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
+#[derive(Component)]
+pub struct EdgeMarker;
 
 #[derive(Resource, Default)]
 pub struct BannerQueue {
@@ -81,6 +84,27 @@ pub fn spawn_hud(mut commands: Commands) {
                 BackgroundColor(Color::srgba(1.0, 0.1, 0.1, 0.0)),
                 Pickable::IGNORE,
             ));
+            // off-screen indicator pool: colored squares that hug the screen edge,
+            // pointing at bosses / chests / shrines / the teleporter over the horizon
+            for _ in 0..24 {
+                root.spawn((
+                    EdgeMarker,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(-100.0),
+                        top: Val::Px(-100.0),
+                        width: Val::Px(12.0),
+                        height: Val::Px(12.0),
+                        border: UiRect::all(Val::Px(2.0)),
+                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::NONE),
+                    BorderColor::all(Color::NONE),
+                    Pickable::IGNORE,
+                ));
+            }
+
             // dust-storm haze (Mars) — fades in while you're inside the storm
             root.spawn((
                 DustOverlay,
@@ -397,6 +421,96 @@ pub fn update_weapon_row(
             });
         }
     });
+}
+
+/// Point edge markers at important things beyond the screen/horizon: bosses (red),
+/// the teleporter (green), chests (gold), the Shady Guy (purple), charge shrines
+/// (cyan), the cage (brown). On a sphere most objectives are below the horizon —
+/// this is how you navigate to them.
+#[allow(clippy::type_complexity)]
+pub fn update_edge_markers(
+    camera: Query<(&Camera, &GlobalTransform), With<crate::player::PlayerRig>>,
+    q_boss: Query<&Transform, With<crate::enemies::Boss>>,
+    q_inter: Query<(&Transform, &crate::interact::Interactable)>,
+    q_charge: Query<(&Transform, &crate::interact::ChargeShrine)>,
+    mut markers: Query<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<EdgeMarker>>,
+) {
+    use crate::interact::InteractKind;
+    let Ok((cam, cam_tf)) = camera.single() else { return };
+    let Some(size) = cam.logical_viewport_size() else { return };
+    let center = size / 2.0;
+    let margin = 34.0;
+
+    // collect targets: (world pos, color, marker px size), priority order
+    let mut targets: Vec<(Vec3, Color, f32)> = Vec::new();
+    for tf in &q_boss {
+        targets.push((tf.translation, Color::srgb(1.0, 0.25, 0.2), 16.0));
+    }
+    for (tf, inter) in &q_inter {
+        if inter.used {
+            continue;
+        }
+        let (color, px) = match inter.kind {
+            InteractKind::Teleporter => (Color::srgb(0.3, 1.0, 0.8), 16.0),
+            InteractKind::Chest => (Color::srgb(1.0, 0.8, 0.25), 11.0),
+            InteractKind::ShadyGuy => (Color::srgb(0.75, 0.5, 1.0), 11.0),
+            InteractKind::Cage => (Color::srgb(0.75, 0.55, 0.35), 12.0),
+            _ => continue, // shrines/moai/microwave handled below or skipped to limit noise
+        };
+        targets.push((tf.translation, color, px));
+    }
+    for (tf, shrine) in &q_charge {
+        if !shrine.done {
+            targets.push((tf.translation, Color::srgb(0.4, 1.0, 0.95), 11.0));
+        }
+    }
+
+    let inv = cam_tf.affine().inverse();
+    let mut it = markers.iter_mut();
+    for (world, color, px) in targets.into_iter().take(24) {
+        let Some((mut node, mut bg, mut border)) = it.next() else { break };
+
+        // on-screen and in front? then no marker needed
+        let mut visible_on_screen = false;
+        if let Ok(v) = cam.world_to_viewport(cam_tf, world) {
+            if v.x >= 0.0 && v.y >= 0.0 && v.x <= size.x && v.y <= size.y {
+                visible_on_screen = true;
+            }
+        }
+        if visible_on_screen {
+            node.left = Val::Px(-100.0);
+            node.top = Val::Px(-100.0);
+            continue;
+        }
+
+        // view-space direction → screen-edge position
+        let local = inv.transform_point3(world);
+        let mut d = Vec2::new(local.x, -local.y); // screen: +x right, +y down
+        if local.z > 0.0 {
+            d = -d; // target is behind the camera — flip so the arrow still points at it
+        }
+        if d.length_squared() < 1e-6 {
+            d = Vec2::Y;
+        }
+        let d = d.normalize();
+        let half = center - Vec2::splat(margin);
+        let scale_x = if d.x.abs() > 1e-4 { half.x / d.x.abs() } else { f32::MAX };
+        let scale_y = if d.y.abs() > 1e-4 { half.y / d.y.abs() } else { f32::MAX };
+        let pos = center + d * scale_x.min(scale_y);
+
+        node.left = Val::Px(pos.x - px / 2.0);
+        node.top = Val::Px(pos.y - px / 2.0);
+        node.width = Val::Px(px);
+        node.height = Val::Px(px);
+        bg.0 = color.with_alpha(0.85);
+        *border = BorderColor::all(Color::srgba(0.0, 0.0, 0.0, 0.6));
+    }
+    // park the unused markers
+    for (mut node, mut bg, _) in it {
+        node.left = Val::Px(-100.0);
+        node.top = Val::Px(-100.0);
+        bg.0 = Color::NONE;
+    }
 }
 
 /// Fade the dust haze in/out based on whether the player is inside the Mars storm.

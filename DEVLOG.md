@@ -1,5 +1,47 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2c: hero mechanic-passives (Tier 3 #8, first batch)
+- Three flat-stat recruits now play differently, not just with different numbers:
+  - **Slipstream Nova** — +15% move, and weapons barely cool down while she's above base
+    speed (+1.3 attack speed via a new `run.fast_move` flag set in player_physics). The USP
+    hero: keep sprinting to keep firing.
+  - **Sgt. Gristle** — +15% dmg, and +40% MORE while below half HP (dynamic in damage_mult).
+  - **Old Ironclad** — +90 HP, and armor DOUBLES below 30% HP (new effective_armor_fraction,
+    used in apply_player_hits).
+- Implemented as conditional layers in the effective-stat getters (attack_speed/damage_mult/
+  effective_armor_fraction) rather than static recompute — clean, no per-frame recompute.
+- All three smoke green. (Reticle/Fortuna/Aurora still flat for now — next batch.)
+- NOTE: Q&C + boss phases + this are all UNCOMMITTED — awaiting user "commit it".
+
+## 2026-07-24 — Session 2b: BOSS PHASES (Tier 2 #7)
+- Bosses now escalate on HP thresholds (66% / 33%) via `Boss.phase` + `boss_phase_system`:
+  each phase-up ENRAGES (speed ×1.28, damage ×1.22, faster attacks), fires a named banner
+  (Craterpillar: BURROW BLOOM → HELMET CHOIR; Anubot: SANDSTORM COURT → FINAL JUDGMENT) +
+  roar + shake, and erupts an **encirclement ring of adds** around the player (8→14, elites
+  in P3). The fight visibly changes shape as you win.
+- Anubot's Verdict Beam reads the phase: faster sweep, shorter telegraph, longer live
+  window, shorter rest as he enrages.
+- Both fast-boss smokes green, no query conflict (boss_phase_system &mut Enemy+&mut Boss
+  disjoint from the read-only beam/other systems). Phase transitions validated in-game
+  (bot too weak to threshold a boss).
+
+## 2026-07-24 — Session 2a: QUALITY & CLARITY pass (lead's punch list, tier 1+2)
+- **Evolution discovery:** weapon cards now show their evolution + catalyst item
+  ("Evolves: MEGA WRENCH (with Protein Paste)" / "(catalyst owned!)"); item cards, chest
+  reveals, and Shady Guy stock show "Evo catalyst: <weapons>" (new WeaponKind::catalyst_for
+  + run::catalyst_line). The build-chase is finally legible in-game.
+- **Off-screen edge markers:** 24-slot pool of colored squares hugging the screen edge,
+  pointing at bosses (red), teleporter (green), chests (gold), Shady Guy (purple), charge
+  shrines (cyan), the cage (brown). View-space projection w/ behind-camera flip; hidden
+  when target is on-screen. On a sphere everything lives below the horizon — now findable.
+- **Movement feedback:** slide = whoosh SFX + dust kick + ~9% FOV punch (smoothed);
+  successful bunny-hop = "kept it!" chirp + cyan sparkle. New Sfx::Slide/Bhop.
+- **Comet juice:** dedicated Sfx::Comet boom-sweep on cash-out (no more borrowed evolve
+  sting), rising quarter-charge ticks, and a gold particle tail while the combo is alive.
+- **Damage-number merging:** hits within 1.6m fold into one running sum (crit gold wins,
+  font grows with the number, life refreshes while feeding). Swarm fights readable.
+- Validated: Moon + Mars-boss smokes green, windowed render check alive.
+
 ## 2026-07-13 — Session 1m: JUDGE ANUBOT — Mars gets a unique boss
 - Mars's stage boss is no longer the generic hulk. **Judge Anubot** = a jackal-headed
   rover-god (tracked chassis, riser neck, elongated jackal head + snout + pointed ears,

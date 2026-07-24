@@ -942,7 +942,7 @@ pub fn apply_player_hits(
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        let mut amount = msg.amount * (1.0 - run.stats.armor_fraction());
+        let mut amount = msg.amount * (1.0 - run.effective_armor_fraction());
         // shield first
         if run.shield > 0.0 {
             let absorbed = run.shield.min(amount);

@@ -134,6 +134,21 @@ pub fn build_sfx_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSo
     tone(&mut b, Wave::Sine, 990.0, 1020.0, 0.18, 0.2, 0.06);
     add(Sfx::Shrine, std::mem::take(&mut b));
 
+    // slide: dusty whoosh
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.20, 0.22, 0.0);
+    tone(&mut b, Wave::Sine, 320.0, 140.0, 0.18, 0.15, 0.0);
+    add(Sfx::Slide, std::mem::take(&mut b));
+
+    // bhop: quick uplift chirp — "kept it!"
+    tone(&mut b, Wave::Square, 520.0, 940.0, 0.09, 0.28, 0.0);
+    add(Sfx::Bhop, std::mem::take(&mut b));
+
+    // comet cash-out: big boom-sweep, the signature payoff
+    tone(&mut b, Wave::Saw, 220.0, 55.0, 0.5, 0.45, 0.0);
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.35, 0.3, 0.0);
+    tone(&mut b, Wave::Sine, 880.0, 1760.0, 0.4, 0.2, 0.05);
+    add(Sfx::Comet, std::mem::take(&mut b));
+
     commands.insert_resource(SfxBank { map });
 }
 

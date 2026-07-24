@@ -38,6 +38,7 @@ pub struct Boss {
     pub kind: BossKind,
     pub attack_timer: f32,
     pub burst_timer: f32,
+    pub phase: u8, // 0 = P1 (>66% HP), 1 = P2 (33-66%), 2 = P3 (<33%)
 }
 
 /// The Craterpillar's head records the ground it has crossed so its body can
@@ -651,7 +652,7 @@ pub fn spawn_boss(
                 scale: def.scale,
                 wobble: 0.0,
             },
-            Boss { kind, attack_timer: 4.0, burst_timer: 7.0 },
+            Boss { kind, attack_timer: 4.0, burst_timer: 7.0, phase: 0 },
             Mesh3d(mesh),
             MeshMaterial3d(mat.clone()),
             BaseMat(mat),
@@ -690,6 +691,76 @@ pub fn spawn_boss(
     }
 }
 
+/// Bosses escalate as their HP drops: at 66% and 33% they ENRAGE (faster, hit harder,
+/// attack more often) and erupt a ring of adds around the player — the Craterpillar's
+/// "burrow bloom" and Anubot's "sandstorm court". Reads as the fight changing shape.
+#[allow(clippy::too_many_arguments)]
+pub fn boss_phase_system(
+    mut commands: Commands,
+    assets: Res<EnemyAssets>,
+    planet: Res<CurrentPlanet>,
+    run: Res<RunState>,
+    mut shake: ResMut<Shake>,
+    q_player: Query<&Player>,
+    mut q_boss: Query<(&mut Enemy, &mut Boss)>,
+    mut banners: MessageWriter<BannerMsg>,
+    mut sfx: MessageWriter<SfxMsg>,
+) {
+    let Ok(player) = q_player.single() else { return };
+    let mut rng = rand::thread_rng();
+    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.stats.difficulty);
+
+    for (mut enemy, mut boss) in &mut q_boss {
+        if enemy.hp <= 0.0 || enemy.max_hp <= 0.0 {
+            continue;
+        }
+        let frac = enemy.hp / enemy.max_hp;
+        let want = if frac < 0.33 { 2 } else if frac < 0.66 { 1 } else { 0 };
+        if want <= boss.phase {
+            continue;
+        }
+        boss.phase = want;
+
+        // enrage
+        enemy.speed *= 1.28;
+        enemy.damage *= 1.22;
+        boss.attack_timer = boss.attack_timer.min(1.5);
+        boss.burst_timer = boss.burst_timer.min(2.0);
+
+        // announce + juice
+        let name = boss.kind.def().name;
+        let label = match want {
+            1 => match boss.kind {
+                BossKind::Craterpillar => "BURROW BLOOM",
+                BossKind::Anubot => "SANDSTORM COURT",
+                _ => "ENRAGED",
+            },
+            _ => match boss.kind {
+                BossKind::Craterpillar => "HELMET CHOIR",
+                BossKind::Anubot => "FINAL JUDGMENT",
+                _ => "ENRAGED",
+            },
+        };
+        banners.write(BannerMsg(format!("{name} — {label}!")));
+        sfx.write(SfxMsg(Sfx::BossRoar));
+        shake.add(0.55);
+
+        // encirclement burst: a ring of adds crests the horizon around the player
+        let ring = 8 + want as usize * 3;
+        let (t, b) = sphere::tangent_frame(player.dir);
+        for i in 0..ring {
+            let a = i as f32 / ring as f32 * std::f32::consts::TAU + rng.gen_range(-0.2..0.2);
+            let heading = t * a.cos() + b * a.sin();
+            let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
+            let dir = sphere::offset_dir(player.dir, heading, arc, planet.radius);
+            let mix = EnemyKind::mix(run.elapsed.max(300.0));
+            let kind = mix[rng.gen_range(0..mix.len())];
+            let elite = want == 2 && rng.gen_bool(0.25);
+            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, &mut rng);
+        }
+    }
+}
+
 /// Judge Anubot's Verdict Beam — a lighthouse railbeam that telegraphs, then sweeps the
 /// surface. Idle → charge (dim, slow rotate) → fire (bright, faster, damaging) → idle.
 #[allow(clippy::type_complexity)]
@@ -698,7 +769,7 @@ pub fn anubot_beam_system(
     assets: Res<EnemyAssets>,
     run: Res<RunState>,
     q_player: Query<&Transform, (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
-    mut q_boss: Query<(Entity, &Transform, &Enemy, &mut AnubotBeam)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam)>,
     mut q_vis: Query<
         (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
         (Without<AnubotBeam>, Without<Player>),
@@ -712,27 +783,28 @@ pub fn anubot_beam_system(
     let ppos = q_player.single().ok().map(|t| t.translation);
     // pass 1: advance each beam, apply damage, snapshot for the visuals
     let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
-    for (e, tf, enemy, mut beam) in &mut q_boss {
+    for (e, tf, enemy, boss, mut beam) in &mut q_boss {
         beam.timer -= dt;
-        // rotate: slow while charging (telegraph), fast while firing
+        let ph = boss.phase as f32;
+        // rotate: slow while charging (telegraph), fast while firing; faster each phase
         let spin = match beam.state {
             1 => 0.5,
-            2 => 1.15,
+            2 => 1.15 * (1.0 + 0.3 * ph),
             _ => 0.25,
         };
         beam.angle = (beam.angle + spin * dt) % std::f32::consts::TAU;
         if beam.timer <= 0.0 {
             beam.state = match beam.state {
                 0 => {
-                    beam.timer = 1.3;
+                    beam.timer = 1.3 - 0.3 * ph; // shorter telegraph as he enrages
                     1
                 }
                 1 => {
-                    beam.timer = 3.0;
+                    beam.timer = 3.0 + 0.6 * ph; // longer sweep
                     2
                 }
                 _ => {
-                    beam.timer = 2.6;
+                    beam.timer = (2.6 - 0.7 * ph).max(0.8); // shorter rest
                     0
                 }
             };

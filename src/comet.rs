@@ -50,6 +50,7 @@ pub fn comet_system(
         return;
     }
     comet.flash = (comet.flash - dt).max(0.0);
+    let prev_progress = comet.progress();
     let Ok((p, ptf)) = q_player.single() else { return };
     let ppos = ptf.translation;
     let move_dir = p.vel_t.normalize_or_zero();
@@ -77,6 +78,19 @@ pub fn comet_system(
         comet.peak = comet.peak.max(count);
         comet.charge += count as f32 * speed * dt;
 
+        // rising audio ticks at each quarter of the charge
+        for q in [0.25, 0.5, 0.75] {
+            if prev_progress < q && comet.progress() >= q {
+                sfx.write(SfxMsg(Sfx::Coin));
+            }
+        }
+        // the comet's glowing tail while the combo is alive
+        if let Some(pa) = &particles {
+            if (time.elapsed_secs() * 14.0).fract() < 14.0 * dt {
+                fx::burst(&mut commands, pa, ppos - move_dir * 0.8, p.dir, Pcolor::Gold, 1, 1.6);
+            }
+        }
+
         if comet.charge >= COMET_CHARGE_GOAL {
             // ---- CASH OUT ----
             let peak = comet.peak;
@@ -95,7 +109,7 @@ pub fn comet_system(
             shake.add(0.8);
             hitstop.timer = 0.22;
             banners.write(BannerMsg(format!("\u{2604} COMET x{peak}!")));
-            sfx.write(SfxMsg(Sfx::Evolve));
+            sfx.write(SfxMsg(Sfx::Comet));
             if let Some(pa) = &particles {
                 fx::burst(&mut commands, pa, ppos, p.dir, Pcolor::Gold, 44, 13.0);
             }

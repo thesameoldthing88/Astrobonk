@@ -507,4 +507,12 @@ impl WeaponKind {
     pub fn is_evolution(&self) -> bool {
         self.def().evolves_to.is_none() && self.def().evo_item.is_none() && !Self::BASE.contains(self)
     }
+
+    /// Which base weapons use `item` as their evolution catalyst (for item-card hints).
+    pub fn catalyst_for(item: ItemKind) -> Vec<WeaponKind> {
+        Self::BASE
+            .into_iter()
+            .filter(|w| w.def().evo_item == Some(item))
+            .collect()
+    }
 }
