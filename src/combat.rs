@@ -52,6 +52,18 @@ pub fn setup_weapon_assets(
         WeaponKind::StormCore,
         WeaponKind::MirvPod,
         WeaponKind::AbsoluteZero,
+        WeaponKind::MeatballComet,
+        WeaponKind::StaticCling,
+        WeaponKind::RicochetDisc,
+        WeaponKind::SonicWhoopee,
+        WeaponKind::CosmonautsBell,
+        WeaponKind::YoYo,
+        WeaponKind::RaguRain,
+        WeaponKind::FullDischarge,
+        WeaponKind::Omnidisc,
+        WeaponKind::BrownNote,
+        WeaponKind::Angelus,
+        WeaponKind::SwordYo,
     ] {
         let c = kind.def().color;
         mats.insert(

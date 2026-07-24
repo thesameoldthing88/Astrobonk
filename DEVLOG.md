@@ -1,5 +1,22 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-13 — Session 1d: content batch — roster 6→12 heroes, arsenal 10→16 weapons
+- **6 new heroes** (all start unlocked for now; quest-gating is a follow-up): Dr. Reticle
+  (+20% crit), Slipstream Nova (+20% move), Old Ironclad (+90 HP), Lady Fortuna (+30%
+  luck, +2 refreshes), Aurora Prime (+25% size, sig Static Cling), Sgt. Gristle (+25%
+  dmg, sig Sonic Whoopee). Added flat-stat Passive variants (CritChance/MoveSpeed/MaxHp/
+  Luck/Size) — the GDD's mechanic-bending passives (poison, low-HP rage, no-cooldown-
+  while-moving) stay on the backlog as new-system work.
+- **6 new weapons + 6 evolutions** mapped onto existing behaviors so they ship today:
+  Meatball Comet→Ragù Rain (Rocket), Static Cling→Full Discharge (Aura), Ricochet
+  Disc→Omnidisc (Chain), Sonic Whoopee→Brown Note (MeleeArc), Cosmonaut's Bell→Angelus
+  (Aura), Yo-Yo of Damocles→Sword-Yo (Orbit). All added to the level-up pool.
+- Wired: material map (combat.rs), default unlocks (save.rs), passive→stat (run.rs).
+- **Save migration on load** folds newly-default-unlocked heroes/weapons into existing
+  saves so returning players get the new content without a wipe.
+- Headless `--hero <name>` flag added; smoke-tested aurora/gristle/reticle/nova → all
+  SMOKE OK (Reticle's crit build notably out-killed the field).
+
 ## 2026-07-13 — Session 1c: the GDD (creativity-to-a-billion pass)
 - Authored **GDD.md** — the canonical design bible. Built via a 14-specialist design
   workflow + a creative-director critique pass, then synthesized into one voice.

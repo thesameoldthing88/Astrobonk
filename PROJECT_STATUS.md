@@ -24,15 +24,16 @@ Full research digest + design: see `DESIGN.md`.
   stage boss (1:30) with slam telegraphs + radial bursts, THE STATIC after 0:00.
   Ranged kinds (Spitter lob / UFO zap / Beamer aim-line railbolt / Lobber mortar AoE)
   use standoff AI: close to preferred range, then circle-strafe or back off
-- Combat: 10 weapons + 10 evolutions (melee arc, shots, seekers, boomerang, beam,
-  orbit drones, chain lightning, rockets, freeze aura), crits/overcrit, knockback,
-  lifesteal, thorns, damage numbers, hit-flash, gem/gold/food/powerup drops, gem merging
+- Combat: **16 weapons + 16 evolutions** (melee arc, shots, seekers, boomerang, beam,
+  orbit drones/yo-yo, chain lightning/disc, rockets/meatball, auras/bell), crits/overcrit,
+  knockback, lifesteal, thorns, damage numbers, hit-flash, gem/gold/food/powerup drops, merging
 - Run loop: XP → 4-card level-ups (rarities, Refresh/Banish/Skip), evolution cards,
   chests (pay-after-reveal), Shady Guy shop, charge/greed/magnet shrines, Moai,
   Microwave duplication, cage (Chimp-O unlock), pots + silver pots, teleporter →
   multi-stage chains (Moon T1/T2/T3 → Mars → Dark Moon), results banking
-- Meta: silver, 16 quests (auto-grant unlock rewards), 6 astronauts, tome shop
-  (8 tomes, loadout slots), planet/tier gating, save at `%APPDATA%/astrobonk/save.json`
+- Meta: silver, 16 quests (auto-grant unlock rewards), **12 astronauts** (6 founders +
+  6 batch-1 recruits: Reticle/Nova/Ironclad/Fortuna/Aurora/Gristle), tome shop (8 tomes,
+  loadout slots), planet/tier gating, save at `%APPDATA%/astrobonk/save.json` (auto-migrates)
 - Menus: main (tomes/quests panels), char select, planet+tier select, results, pause
 - Juice: screenshake, hitstop, particles, banners, boss bar, synthesized SFX
 

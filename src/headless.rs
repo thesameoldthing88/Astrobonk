@@ -120,8 +120,12 @@ fn bot_watchdog(run: Res<RunState>, q_enemies: Query<(), With<Enemy>>, mut ticks
     }
 }
 
-pub fn run_headless(ticks: u64, fast_boss: bool) {
-    println!("ASTROBONK headless smoke: {ticks} ticks @33ms{}", if fast_boss { " (fast-boss)" } else { "" });
+pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
+    println!(
+        "ASTROBONK headless smoke: {ticks} ticks @33ms{} hero={}",
+        if fast_boss { " (fast-boss)" } else { "" },
+        hero.def().name
+    );
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins.set(ScheduleRunnerPlugin::run_once()),
@@ -141,7 +145,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool) {
         save.tome_levels.insert(crate::content::tomes::TomeKind::Damage, 20);
         save.tome_levels.insert(crate::content::tomes::TomeKind::Health, 20);
     }
-    let mut run = RunState::new(AstronautKind::Buzz, PlanetKind::Moon, 1, &save);
+    let mut run = RunState::new(hero, PlanetKind::Moon, 1, &save);
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
         run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers

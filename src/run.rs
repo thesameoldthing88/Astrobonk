@@ -139,6 +139,10 @@ impl RunState {
         s.recompute_stats(save);
         s.hp = s.stats.max_hp;
         s.shield = s.stats.shield;
+        // Lady Fortuna gambles harder — extra level-up rerolls.
+        if character == AstronautKind::Fortuna {
+            s.refreshes += 2;
+        }
         s
     }
 
@@ -164,6 +168,11 @@ impl RunState {
             Passive::ExtraJumps(n) => st.apply(StatKind::ExtraJumps, n as f32),
             Passive::GoldGain(v) => st.apply(StatKind::GoldGain, v),
             Passive::SlideFrenzy { .. } => {}
+            Passive::CritChance(v) => st.apply(StatKind::CritChance, v),
+            Passive::MoveSpeed(v) => st.apply(StatKind::MoveSpeed, v),
+            Passive::MaxHp(v) => st.apply(StatKind::MaxHp, v),
+            Passive::Luck(v) => st.apply(StatKind::Luck, v),
+            Passive::Size(v) => st.apply(StatKind::Size, v),
         }
         // Items
         for (item, count) in &self.items {

@@ -44,7 +44,13 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--headless") {
         let ticks: u64 = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(1500);
         let fast_boss = args.iter().any(|a| a == "--fast-boss");
-        headless::run_headless(ticks, fast_boss);
+        let hero = args
+            .iter()
+            .position(|a| a == "--hero")
+            .and_then(|p| args.get(p + 1))
+            .and_then(|s| content::characters::AstronautKind::from_name(s))
+            .unwrap_or(content::characters::AstronautKind::Buzz);
+        headless::run_headless(ticks, fast_boss, hero);
         return;
     }
 

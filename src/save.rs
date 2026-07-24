@@ -59,6 +59,13 @@ impl Default for MetaSave {
             WeaponKind::Kunai,
             WeaponKind::Boomerang,
             WeaponKind::MiningLaser,
+            // Batch-1 weapons available in the level-up pool from the start.
+            WeaponKind::MeatballComet,
+            WeaponKind::StaticCling,
+            WeaponKind::RicochetDisc,
+            WeaponKind::SonicWhoopee,
+            WeaponKind::CosmonautsBell,
+            WeaponKind::YoYo,
         ] {
             unlocked_weapons.insert(w);
         }
@@ -89,12 +96,26 @@ fn save_path() -> PathBuf {
 impl MetaSave {
     pub fn load() -> Self {
         let path = save_path();
-        match std::fs::read_to_string(&path) {
+        let mut s = match std::fs::read_to_string(&path) {
             Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
                 warn!("save corrupt ({e}), starting fresh");
                 Self::default()
             }),
             Err(_) => Self::default(),
+        };
+        s.migrate();
+        s
+    }
+
+    /// Fold in content that ships unlocked-by-default so existing saves gain
+    /// newly added starter heroes/weapons without wiping progress.
+    fn migrate(&mut self) {
+        let fresh = Self::default();
+        for c in &fresh.unlocked_chars {
+            self.unlocked_chars.insert(*c);
+        }
+        for w in &fresh.unlocked_weapons {
+            self.unlocked_weapons.insert(*w);
         }
     }
 
