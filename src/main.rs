@@ -5,6 +5,7 @@ mod config;
 mod content;
 mod director;
 mod enemies;
+mod events_world;
 mod fx;
 mod headless;
 mod interact;
@@ -53,7 +54,12 @@ fn main() {
             .and_then(|p| args.get(p + 1))
             .and_then(|s| content::characters::AstronautKind::from_name(s))
             .unwrap_or(content::characters::AstronautKind::Buzz);
-        headless::run_headless(ticks, fast_boss, hero);
+        let planet = match args.iter().position(|a| a == "--planet").and_then(|p| args.get(p + 1)).map(|s| s.as_str()) {
+            Some("mars") => content::planets::PlanetKind::Mars,
+            Some("darkmoon") => content::planets::PlanetKind::DarkMoon,
+            _ => content::planets::PlanetKind::Moon,
+        };
+        headless::run_headless(ticks, fast_boss, hero, planet);
         return;
     }
 
@@ -85,6 +91,7 @@ fn main() {
         .init_resource::<interact::ChestPanel>()
         .init_resource::<interact::ShopPanel>()
         .init_resource::<comet::Comet>()
+        .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
         .init_resource::<ui::menus::Selected>()
         .init_resource::<ui::menus::MenuTab>()
@@ -140,6 +147,7 @@ fn main() {
                 enemies::director_spawn,
                 enemies::enemy_move,
                 enemies::craterpillar_update,
+                enemies::anubot_beam_system,
                 enemies::burrower_emerge,
                 enemies::enemy_contact,
                 enemies::spitter_attack,
@@ -169,6 +177,7 @@ fn main() {
                 director::levelup_trigger,
                 enemies::debug_spawn_boss,
                 comet::comet_system,
+                events_world::dust_storm_system,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
@@ -206,6 +215,7 @@ fn main() {
                 ui::hud::update_weapon_row,
                 ui::hud::update_boss_bar,
                 ui::hud::update_comet_hud,
+                ui::hud::update_dust_overlay,
                 ui::hud::update_banners,
                 ui::panels::sync_choice_panel,
                 ui::panels::choice_input,

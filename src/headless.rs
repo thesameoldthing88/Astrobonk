@@ -120,11 +120,12 @@ fn bot_watchdog(run: Res<RunState>, q_enemies: Query<(), With<Enemy>>, mut ticks
     }
 }
 
-pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
+pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kind: PlanetKind) {
     println!(
-        "ASTROBONK headless smoke: {ticks} ticks @33ms{} hero={}",
+        "ASTROBONK headless smoke: {ticks} ticks @33ms{} hero={} planet={:?}",
         if fast_boss { " (fast-boss)" } else { "" },
-        hero.def().name
+        hero.def().name,
+        planet_kind
     );
     let mut app = App::new();
     app.add_plugins((
@@ -145,7 +146,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
         save.tome_levels.insert(crate::content::tomes::TomeKind::Damage, 20);
         save.tome_levels.insert(crate::content::tomes::TomeKind::Health, 20);
     }
-    let mut run = RunState::new(hero, PlanetKind::Moon, 1, &save);
+    let mut run = RunState::new(hero, planet_kind, 1, &save);
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
         run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
@@ -169,6 +170,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
         .init_resource::<crate::interact::ChestPanel>()
         .init_resource::<crate::interact::ShopPanel>()
         .init_resource::<crate::comet::Comet>()
+        .init_resource::<crate::events_world::DustStorm>()
         .init_resource::<ButtonInput<KeyCode>>()
         .insert_resource(save)
         .insert_resource(run)
@@ -186,6 +188,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
                 crate::enemies::director_spawn,
                 crate::enemies::enemy_move,
                 crate::enemies::craterpillar_update,
+                crate::enemies::anubot_beam_system,
                 crate::enemies::burrower_emerge,
                 crate::enemies::enemy_contact,
                 crate::enemies::spitter_attack,
@@ -211,6 +214,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
                 crate::director::run_clock,
                 crate::director::levelup_trigger,
                 crate::comet::comet_system,
+                crate::events_world::dust_storm_system,
             )
                 .chain()
                 .run_if(crate::playing),
@@ -248,10 +252,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind) {
     let enemies = world.query_filtered::<(), With<Enemy>>().iter(world).count();
     let phase = *world.resource::<RunPhase>();
     let comet_fires = world.resource::<crate::comet::Comet>().fires;
+    let storm = world.resource::<crate::events_world::DustStorm>();
+    let storm_state = format!("spawned={} active={}", storm.spawned_vis, storm.active);
 
     println!("--- SMOKE SUMMARY ---");
     println!(
-        "phase={phase:?} level={} kills={} gold={} hp={:.0}/{:.0} timer={:.0} enemies={} comets={comet_fires} boss_spawned={} boss_dead={}",
+        "phase={phase:?} level={} kills={} gold={} hp={:.0}/{:.0} timer={:.0} enemies={} comets={comet_fires} storm[{storm_state}] boss_spawned={} boss_dead={}",
         run.level, run.kills, run.gold, run.hp, run.stats.max_hp, run.timer, enemies, run.boss_spawned, run.boss_dead
     );
 

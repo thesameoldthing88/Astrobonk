@@ -60,6 +60,28 @@ const WORM_SEGMENTS: usize = 12;
 const WORM_STRIDE: usize = 2; // trail points between segments
 const WORM_TRAIL_STEP: f32 = 0.55; // meters between recorded trail points
 
+/// Judge Anubot's signature: a rotating "Verdict Beam" lighthouse sweep.
+#[derive(Component)]
+pub struct AnubotBeam {
+    pub angle: f32,   // current sweep angle around the boss's up-axis
+    pub state: u8,    // 0 idle, 1 charging (telegraph), 2 firing
+    pub timer: f32,   // time left in the current state
+}
+
+impl Default for AnubotBeam {
+    fn default() -> Self {
+        Self { angle: 0.0, state: 0, timer: 2.5 }
+    }
+}
+
+#[derive(Component)]
+pub struct AnubotBeamVis {
+    pub boss: Entity,
+}
+
+const BEAM_LENGTH: f32 = 34.0;
+const BEAM_WIDTH: f32 = 2.4;
+
 #[derive(Component)]
 pub struct Spitter {
     pub cd: f32,
@@ -132,6 +154,11 @@ pub struct EnemyAssets {
     pub worm_head_mesh: Handle<Mesh>,
     pub worm_seg_mesh: Handle<Mesh>,
     pub worm_mat: Handle<StandardMaterial>,
+    pub anubot_mesh: Handle<Mesh>,
+    pub anubot_mat: Handle<StandardMaterial>,
+    pub beam_mesh: Handle<Mesh>,
+    pub beam_charge_mat: Handle<StandardMaterial>,
+    pub beam_fire_mat: Handle<StandardMaterial>,
     pub proj_mesh: Handle<Mesh>,
     pub proj_mat: Handle<StandardMaterial>,
     pub ring_mesh: Handle<Mesh>,
@@ -288,6 +315,27 @@ fn worm_seg_mesh() -> Mesh {
     m.build()
 }
 
+/// Judge Anubot — a jackal-headed rover-god: tracked rover body, riser neck, an
+/// elongated jackal head with a snout and tall pointed ears, glowing eyes.
+fn anubot_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let mut m = crate::meshkit::MeshData::new();
+    // rover chassis + treads
+    m.add_box(Vec3::new(1.3, 0.55, 1.5), at(Vec3::new(0.0, 0.0, 0.0)), BODY);
+    for s in [-1.0, 1.0] {
+        m.add_box(Vec3::new(0.34, 0.42, 1.65), at(Vec3::new(0.72 * s, -0.18, 0.0)), DARK); // tread
+    }
+    // riser + jackal head
+    m.add_box(Vec3::new(0.5, 0.7, 0.5), at(Vec3::new(0.0, 0.55, -0.35)), MID); // neck
+    m.add_box(Vec3::new(0.55, 0.55, 0.85), at(Vec3::new(0.0, 1.0, -0.55)), BODY); // head
+    m.add_box(Vec3::new(0.34, 0.34, 0.5), at(Vec3::new(0.0, 0.9, -1.05)), MID); // snout
+    for s in [-1.0, 1.0] {
+        m.add_cone(0.13, 0.7, 4, at(Vec3::new(0.2 * s, 1.5, -0.4)), DARK); // pointed ear
+        m.add_sphere(0.08, 1, at(Vec3::new(0.16 * s, 1.05, -0.92)), DARK); // eye socket
+    }
+    m.build()
+}
+
 /// A hulking generic boss silhouette: heavy body, plated shoulders, horned head,
 /// back spikes. Low-count so detail is free. (Per-boss unique meshes are future work.)
 fn boss_mesh() -> Mesh {
@@ -372,6 +420,28 @@ pub fn setup_enemy_assets(
             emissive: LinearRgba::rgb(0.06, 0.06, 0.09),
             perceptual_roughness: 0.55,
             metallic: 0.25,
+            ..default()
+        }),
+        anubot_mesh: meshes.add(anubot_mesh()),
+        anubot_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(0.85, 0.66, 0.28), // sandstone gold
+            emissive: LinearRgba::rgb(0.10, 0.07, 0.02),
+            perceptual_roughness: 0.5,
+            metallic: 0.35,
+            ..default()
+        }),
+        beam_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
+        beam_charge_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.7, 0.2, 0.35),
+            emissive: LinearRgba::rgb(1.2, 0.7, 0.1),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        beam_fire_mat: materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.3, 0.15),
+            emissive: LinearRgba::rgb(4.0, 0.8, 0.2),
+            unlit: true,
             ..default()
         }),
         proj_mesh: meshes.add(Mesh::from(Sphere::new(0.28))),
@@ -553,8 +623,11 @@ pub fn spawn_boss(
     let hp = def.hp * (1.0 + difficulty);
     let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
     let is_worm = kind == BossKind::Craterpillar;
+    let is_anubot = kind == BossKind::Anubot;
     let (mesh, mat) = if is_worm {
         (assets.worm_head_mesh.clone(), assets.worm_mat.clone())
+    } else if is_anubot {
+        (assets.anubot_mesh.clone(), assets.anubot_mat.clone())
     } else {
         (meshes.add(boss_mesh()), assets.boss_mat.clone())
     };
@@ -601,6 +674,113 @@ pub fn spawn_boss(
                 Transform::from_translation(pos).with_scale(Vec3::splat(seg_scale)),
                 StageScoped,
             ));
+        }
+    }
+
+    if is_anubot {
+        commands.entity(head).insert(AnubotBeam::default());
+        commands.spawn((
+            AnubotBeamVis { boss: head },
+            Mesh3d(assets.beam_mesh.clone()),
+            MeshMaterial3d(assets.beam_charge_mat.clone()),
+            Transform::from_translation(pos),
+            Visibility::Hidden,
+            StageScoped,
+        ));
+    }
+}
+
+/// Judge Anubot's Verdict Beam — a lighthouse railbeam that telegraphs, then sweeps the
+/// surface. Idle → charge (dim, slow rotate) → fire (bright, faster, damaging) → idle.
+#[allow(clippy::type_complexity)]
+pub fn anubot_beam_system(
+    time: Res<Time>,
+    assets: Res<EnemyAssets>,
+    run: Res<RunState>,
+    q_player: Query<&Transform, (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &mut AnubotBeam)>,
+    mut q_vis: Query<
+        (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
+        (Without<AnubotBeam>, Without<Player>),
+    >,
+    mut writer: MessageWriter<PlayerHitMsg>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let ppos = q_player.single().ok().map(|t| t.translation);
+    // pass 1: advance each beam, apply damage, snapshot for the visuals
+    let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
+    for (e, tf, enemy, mut beam) in &mut q_boss {
+        beam.timer -= dt;
+        // rotate: slow while charging (telegraph), fast while firing
+        let spin = match beam.state {
+            1 => 0.5,
+            2 => 1.15,
+            _ => 0.25,
+        };
+        beam.angle = (beam.angle + spin * dt) % std::f32::consts::TAU;
+        if beam.timer <= 0.0 {
+            beam.state = match beam.state {
+                0 => {
+                    beam.timer = 1.3;
+                    1
+                }
+                1 => {
+                    beam.timer = 3.0;
+                    2
+                }
+                _ => {
+                    beam.timer = 2.6;
+                    0
+                }
+            };
+        }
+        let up = tf.translation.normalize_or_zero();
+        let base = sphere::tangent_frame(up).0;
+        let heading = (Quat::from_axis_angle(up, beam.angle) * base).normalize_or_zero();
+
+        // damage while firing
+        if beam.state == 2 {
+            if let Some(pp) = ppos {
+                if run.iframes <= 0.0 {
+                    let v = pp - tf.translation;
+                    let along = v.dot(heading);
+                    let perp = (v - heading * along - up * v.dot(up)).length();
+                    if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
+                        writer.write(PlayerHitMsg {
+                            amount: enemy.damage * 1.2,
+                            from: tf.translation,
+                            attacker: None,
+                        });
+                    }
+                }
+            }
+        }
+        snap.insert(e, (tf.translation, heading, beam.state, up.dot(Vec3::Y)));
+        let _ = up;
+    }
+
+    // pass 2: place / colour / show the beam visuals
+    for (vis, mut tf, mut visibility, mut mat) in &mut q_vis {
+        let Some((bpos, heading, state, _)) = snap.get(&vis.boss).copied() else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        if state == 0 {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
+        *visibility = Visibility::Visible;
+        let up = bpos.normalize_or_zero();
+        let width = if state == 2 { BEAM_WIDTH * 2.0 } else { BEAM_WIDTH * 0.6 };
+        tf.translation = bpos + heading * (BEAM_LENGTH * 0.5) + up * 0.8;
+        tf.rotation = sphere::frame_quat(up, heading);
+        tf.scale = Vec3::new(width, 0.3, BEAM_LENGTH);
+        let want = if state == 2 { &assets.beam_fire_mat } else { &assets.beam_charge_mat };
+        if mat.0 != *want {
+            mat.0 = want.clone();
         }
     }
 }
@@ -861,12 +1041,13 @@ pub fn spitter_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
+    storm: Res<crate::events_world::DustStorm>,
     q_player: Query<&Player>,
     mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
+    if dt <= 0.0 || storm.player_inside {
+        return; // hidden in the dust storm — ranged enemies can't see you
     }
     let Ok(player) = q_player.single() else { return };
     for (e, mut s, tf) in &mut q {
@@ -905,12 +1086,23 @@ pub fn beamer_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
+    storm: Res<crate::events_world::DustStorm>,
     q_player: Query<(&Player, &Transform), Without<Enemy>>,
     mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
     mut q_lines: Query<(Entity, &AimLine, &mut Transform), (Without<Enemy>, Without<Player>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
+        return;
+    }
+    // Lost the target in the dust — drop every aim line and hold fire.
+    if storm.player_inside {
+        for (le, _, _) in &q_lines {
+            commands.entity(le).despawn();
+        }
+        for (_, _, mut b, _) in &mut q {
+            b.charging = 0.0;
+        }
         return;
     }
     let Ok((player, ptf)) = q_player.single() else { return };
@@ -994,12 +1186,13 @@ pub fn lobber_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
+    storm: Res<crate::events_world::DustStorm>,
     q_player: Query<&Player>,
     mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
+    if dt <= 0.0 || storm.player_inside {
+        return; // can't range you through the dust
     }
     let Ok(player) = q_player.single() else { return };
     for (e, mut l, tf) in &mut q {

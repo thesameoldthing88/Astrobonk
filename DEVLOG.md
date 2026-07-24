@@ -1,5 +1,33 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-13 — Session 1m: JUDGE ANUBOT — Mars gets a unique boss
+- Mars's stage boss is no longer the generic hulk. **Judge Anubot** = a jackal-headed
+  rover-god (tracked chassis, riser neck, elongated jackal head + snout + pointed ears,
+  glowing eyes) with a signature mechanic: the **VERDICT BEAM** — a rotating lighthouse
+  railbeam. Idle → charge (dim, slow-rotating telegraph) → fire (bright, faster sweep,
+  damaging) → idle. Dodge by reading the rotation and using terrain/distance. Runs on top
+  of the existing boss slam/burst for a busy, distinct fight.
+- New AnubotBeam + AnubotBeamVis components, anubot_beam_system (3 Transform queries made
+  disjoint with explicit Without filters — no B0001), unique anubot_mesh + beam mats.
+- spawn_boss now branches: worm (Craterpillar) / beam-god (Anubot) / generic hulk.
+- Validated: `--headless --planet mars --fast-boss` spawns Anubot + runs the beam, no panic.
+- Two worlds now genuinely differ: Moon (worm boss, craters, Earthrise) vs Mars (beam boss,
+  dust storm, artillery mix). The "content variety" thesis is proven on a second rock.
+
+## 2026-07-13 — Session 1l: MARS becomes a real world — the migrating dust storm
+- Director's call (user-approved): stop polishing the Moon, prove world #2 feels different.
+  Committed the whole Moon slice first (e8bd263).
+- New `events_world.rs` planetary-event system. First event: Mars **MIGRATING DUST STORM** —
+  a storm-cell that wanders the surface on a cycle (arrives ~10s, ~26s active, ~20s gap),
+  drifting along a great circle. A translucent dust dome marks it; a screen haze fades in
+  while you're inside. **Inside it, ranged enemies can't see you** — Spitters/UFOs/Lobbers
+  hold fire and Beamers drop their aim lines. A mobile stealth bubble to ride or flee.
+- Wired the storm-blind check into spitter/beamer/lobber attack systems; DustStorm resource
+  required, so added it to headless too (+ the system) and a `--planet` smoke flag.
+- Dev: Mars unlocked in default + migrate so it's selectable for playtesting.
+- Validated: `--headless --planet mars` shows storm spawned+active, no panic; Moon unregressed.
+- NEXT for Mars identity: a unique Anubot boss + maybe dust-devils; then more worlds.
+
 ## 2026-07-13 — Session 1k: balance pass v1 (weapon audit + opening pacing)
 - Weapon DPS audit (all 16, level-1 single-target): arsenal is HEALTHY — single-target
   hitters (~13-17) trade crowd coverage; aura/chain/spread weapons (~10-12) trade raw DPS.

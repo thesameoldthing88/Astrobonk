@@ -45,6 +45,8 @@ pub struct PowerupText;
 pub struct Vignette;
 #[derive(Component)]
 pub struct CometText;
+#[derive(Component)]
+pub struct DustOverlay;
 
 #[derive(Resource, Default)]
 pub struct BannerQueue {
@@ -77,6 +79,18 @@ pub fn spawn_hud(mut commands: Commands) {
                     ..default()
                 },
                 BackgroundColor(Color::srgba(1.0, 0.1, 0.1, 0.0)),
+                Pickable::IGNORE,
+            ));
+            // dust-storm haze (Mars) — fades in while you're inside the storm
+            root.spawn((
+                DustOverlay,
+                Node {
+                    position_type: PositionType::Absolute,
+                    width: Val::Percent(100.0),
+                    height: Val::Percent(100.0),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.72, 0.48, 0.30, 0.0)),
                 Pickable::IGNORE,
             ));
 
@@ -383,6 +397,21 @@ pub fn update_weapon_row(
             });
         }
     });
+}
+
+/// Fade the dust haze in/out based on whether the player is inside the Mars storm.
+pub fn update_dust_overlay(
+    time: Res<Time<Real>>,
+    storm: Res<crate::events_world::DustStorm>,
+    mut q: Query<&mut BackgroundColor, With<DustOverlay>>,
+    mut cur: Local<f32>,
+) {
+    let target = if storm.player_inside { 0.4 } else { 0.0 };
+    let k = 1.0 - (-4.0 * time.delta_secs()).exp();
+    *cur += (target - *cur) * k;
+    if let Ok(mut bg) = q.single_mut() {
+        bg.0 = Color::srgba(0.72, 0.48, 0.30, *cur);
+    }
 }
 
 /// Comet combo indicator: a growing tail counter + a charge meter drawn in text bars.

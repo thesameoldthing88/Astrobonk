@@ -77,6 +77,7 @@ impl Default for MetaSave {
         }
         let mut unlocked_planets = HashSet::new();
         unlocked_planets.insert(PlanetKind::Moon);
+        unlocked_planets.insert(PlanetKind::Mars); // dev: Mars selectable for playtesting
         Self {
             silver: 0,
             tome_levels: HashMap::new(),
@@ -126,6 +127,9 @@ impl MetaSave {
         }
         for w in &fresh.unlocked_weapons {
             self.unlocked_weapons.insert(*w);
+        }
+        for p in &fresh.unlocked_planets {
+            self.unlocked_planets.insert(*p);
         }
     }
 
