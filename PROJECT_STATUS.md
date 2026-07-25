@@ -69,16 +69,37 @@ either pulls Bevy 0.19 and you get two engines in one binary.
   1.0/1.75/2.4/3.0, and the run ends only when EVERY player is down.
   Repro: `--headless --coop2` (was: clock frozen, 0 kills → now level 6, 113 kills).
 
+- **Enemy streaming — crowd lane** (Stage 4, `netenemy.rs`). Quantized, interest-managed
+  batch stream: 6 bytes per enemy (position = great-circle offset from the receiving
+  client's own astronaut, two u16 over ±128 m = 3.9 mm steps). Facing/wobble/stride are
+  derived client-side, not sent. Measured live: 84 of 90 mobile enemies streamed, client
+  draws 87 proxies, **4.6 KB/s**, zero sequence gaps.
+- **Run-state replication** (Stage 5). Seed, planet chain, clock and counters at 4 Hz, so
+  both machines build the *same* world. A client waits for the seed before entering the
+  run. Verified by a prop-layout checksum matching exactly on both sides.
+
+**MEASURED, and it corrects an intuition worth not re-learning:** run
+`--headless --enemydist`. Excluding pots (which piggyback on `Enemy` with `speed == 0`),
+essentially the ENTIRE mobile horde sits within 80 m of a player — they spawn at 42–58 m
+and steer inward. There is no far-side horde to cull, so the close horizon buys much less
+than it looks like it should. Interest management pays off through each client only needing
+the horde near *itself*, not through distance culling per se.
+
 **Known gaps (each deliberately left SAFE, not broken):**
 - A peer gets no level-up card panel — they accrue levels and `pending_levelups` from
   shared XP, but picking a card needs a client↔host round trip. Nothing auto-picks.
 - A peer cannot use interactables (chest/shop/shrine/teleporter). `interact_system` is at
   Bevy's exact 16-system-param cap, so the prompt/action split that would allow it does not
   fit; a peer pressing E is a no-op.
-- **A client still runs its own full local horde**, unreplicated, so its enemies/loot/clock
-  diverge from the host. This is deliberate for now: gating enemy systems off on the client
-  would leave it looking at an EMPTY planet until enemy streaming exists. Fix the streaming
-  first, then gate.
+- **A client still runs its own local horde ALONGSIDE the streamed one** — you would
+  currently see both. Stage 4 is deliberately additive. Still needed before "the switch"
+  that turns the client's private simulation off: the boss/hazard lanes (bosses can't ride
+  the crowd record — `spawn_boss` hardcodes a kind, and HUD edge markers need bosses
+  streamed from anywhere on the planet, uncalled) and the pickups lane (or the joiner never
+  gains XP). Gating before those exist leaves the joiner on an empty planet.
+- The host simulates a peer's build as a **fresh level-1 sheet** — card picks never travel
+  upward, so a joiner would deal level-1 damage all run. Needs a small client→host
+  PlayerBuildMsg.
 - A remote player standing in a dust storm is not yet hidden from ranged enemies
   (`DustStorm.player_inside` is local-only); needs a per-astronaut `InStorm` marker.
 
