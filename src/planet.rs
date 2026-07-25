@@ -6,7 +6,8 @@ use crate::sphere::{self, Terrain};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use rand::Rng;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 
 /// Everything spawned for a stage carries this for cleanup.
 #[derive(Component)]
@@ -102,9 +103,11 @@ pub fn spawn_stage(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
+    seed: u64,
 ) {
     let def = planet.kind.def();
-    let mut rng = rand::thread_rng();
+    // deterministic prop scatter from the run seed (terrain was already seed-driven)
+    let mut rng = StdRng::seed_from_u64(seed ^ 0xA11CE ^ planet.terrain.seed as u64);
 
     // Terrain
     let mesh = meshes.add(planet_mesh(&def, &planet.terrain));

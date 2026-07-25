@@ -19,11 +19,12 @@ pub struct Selected {
     pub character: AstronautKind,
     pub planet: PlanetKind,
     pub tier: u32,
+    pub daily: bool,
 }
 
 impl Default for Selected {
     fn default() -> Self {
-        Self { character: AstronautKind::Buzz, planet: PlanetKind::Moon, tier: 1 }
+        Self { character: AstronautKind::Buzz, planet: PlanetKind::Moon, tier: 1, daily: false }
     }
 }
 
@@ -39,6 +40,20 @@ pub struct QuestsBtn;
 pub struct QuitBtn;
 #[derive(Component)]
 pub struct SettingsBtn;
+#[derive(Component)]
+pub struct DailyBtn;
+
+/// One enum-tagged component for all main-menu buttons — keeps the input system under
+/// Bevy's 16-param cap (one query instead of six).
+#[derive(Component, Clone, Copy, PartialEq)]
+pub enum MenuBtn {
+    Launch,
+    Daily,
+    Tomes,
+    Quests,
+    Settings,
+    Quit,
+}
 #[derive(Component)]
 pub struct SidePanel;
 #[derive(Component)]
@@ -80,24 +95,34 @@ pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
             let buttons: [(&str, fn() -> ()); 0] = [];
             let _ = buttons;
 
-            root.spawn((LaunchBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
+            root.spawn((LaunchBtn, MenuBtn::Launch, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
                 .with_children(|b| {
                     b.spawn(txt("LAUNCH", FONT_BIG, Color::WHITE));
                 });
+
+            // Daily seeded planet — same tiny world for everyone today.
+            let day = crate::run::today();
+            let dname = crate::run::daily_name(crate::run::daily_seed(day));
+            let dbest = if save.daily_day == day { save.daily_best } else { 0 };
+            root.spawn((DailyBtn, MenuBtn::Daily, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.55, 0.85))))
+                .with_children(|b| {
+                    b.spawn(txt(format!("DAILY: {dname}   (best today: {dbest})"), FONT_MED, Color::WHITE));
+                });
+
             root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
-                row.spawn((TomesBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 1.0))))
+                row.spawn((TomesBtn, MenuBtn::Tomes, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 1.0))))
                     .with_children(|b| {
                         b.spawn(txt("TOMES", FONT_MED, Color::WHITE));
                     });
-                row.spawn((QuestsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.8, 0.4))))
+                row.spawn((QuestsBtn, MenuBtn::Quests, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.8, 0.4))))
                     .with_children(|b| {
                         b.spawn(txt("QUESTS", FONT_MED, Color::WHITE));
                     });
-                row.spawn((SettingsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
+                row.spawn((SettingsBtn, MenuBtn::Settings, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
                     .with_children(|b| {
                         b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
                     });
-                row.spawn((QuitBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.4, 0.4))))
+                row.spawn((QuitBtn, MenuBtn::Quit, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.4, 0.4))))
                     .with_children(|b| {
                         b.spawn(txt("QUIT", FONT_MED, Color::WHITE));
                     });
@@ -127,15 +152,12 @@ pub fn despawn_menu(mut commands: Commands, q: Query<Entity, With<MenuRoot>>) {
 #[allow(clippy::too_many_arguments)]
 pub fn main_menu_input(
     mut commands: Commands,
-    launch: Query<&Interaction, (Changed<Interaction>, With<LaunchBtn>)>,
-    tomes: Query<&Interaction, (Changed<Interaction>, With<TomesBtn>)>,
-    quests: Query<&Interaction, (Changed<Interaction>, With<QuestsBtn>)>,
-    quit: Query<&Interaction, (Changed<Interaction>, With<QuitBtn>)>,
-    settings_btn: Query<&Interaction, (Changed<Interaction>, With<SettingsBtn>)>,
+    menu_btns: Query<(&Interaction, &MenuBtn), Changed<Interaction>>,
     plus: Query<(&Interaction, &TomePlus), Changed<Interaction>>,
     toggles: Query<(&Interaction, &TomeToggle), Changed<Interaction>>,
     mut tab: ResMut<MenuTab>,
     mut save: ResMut<MetaSave>,
+    mut selected: ResMut<Selected>,
     mut settings_open: ResMut<crate::ui::settings::SettingsOpen>,
     mut next: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
@@ -143,36 +165,43 @@ pub fn main_menu_input(
     panel: Query<Entity, With<SidePanel>>,
     mut dirty: Local<bool>,
 ) {
-    for i in &launch {
-        if *i == Interaction::Pressed {
-            next.set(AppState::CharSelect);
-            sfx.write(SfxMsg(Sfx::Click));
-            return;
-        }
-    }
-    for i in &settings_btn {
-        if *i == Interaction::Pressed {
-            settings_open.0 = true;
-            sfx.write(SfxMsg(Sfx::Click));
-            return;
-        }
-    }
-    for i in &quit {
-        if *i == Interaction::Pressed {
-            exit.write(AppExit::Success);
-        }
-    }
     let mut changed = false;
-    for i in &tomes {
-        if *i == Interaction::Pressed {
-            *tab = if *tab == MenuTab::Tomes { MenuTab::None } else { MenuTab::Tomes };
-            changed = true;
+    for (i, btn) in &menu_btns {
+        if *i != Interaction::Pressed {
+            continue;
         }
-    }
-    for i in &quests {
-        if *i == Interaction::Pressed {
-            *tab = if *tab == MenuTab::Quests { MenuTab::None } else { MenuTab::Quests };
-            changed = true;
+        match btn {
+            MenuBtn::Launch => {
+                selected.daily = false;
+                next.set(AppState::CharSelect);
+                sfx.write(SfxMsg(Sfx::Click));
+                return;
+            }
+            MenuBtn::Daily => {
+                // daily = fixed Moon T1 on today's shared seed; player still picks a hero
+                selected.daily = true;
+                selected.planet = crate::content::planets::PlanetKind::Moon;
+                selected.tier = 1;
+                next.set(AppState::CharSelect);
+                sfx.write(SfxMsg(Sfx::Click));
+                return;
+            }
+            MenuBtn::Settings => {
+                settings_open.0 = true;
+                sfx.write(SfxMsg(Sfx::Click));
+                return;
+            }
+            MenuBtn::Quit => {
+                exit.write(AppExit::Success);
+            }
+            MenuBtn::Tomes => {
+                *tab = if *tab == MenuTab::Tomes { MenuTab::None } else { MenuTab::Tomes };
+                changed = true;
+            }
+            MenuBtn::Quests => {
+                *tab = if *tab == MenuTab::Quests { MenuTab::None } else { MenuTab::Quests };
+                changed = true;
+            }
         }
     }
     for (i, p) in &plus {
@@ -330,18 +359,30 @@ pub fn spawn_char_select(mut commands: Commands, save: Res<MetaSave>, selected: 
         });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn char_select_input(
     cards: Query<(&Interaction, &CharCard), Changed<Interaction>>,
     back: Query<&Interaction, (Changed<Interaction>, With<BackBtn>)>,
     mut selected: ResMut<Selected>,
+    save: Res<MetaSave>,
+    mut run: ResMut<RunState>,
     mut next: ResMut<NextState<AppState>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     for (i, c) in &cards {
         if *i == Interaction::Pressed {
             selected.character = c.0;
-            next.set(AppState::PlanetSelect);
-            sfx.write(SfxMsg(Sfx::Click));
+            if selected.daily {
+                // build the daily run directly: today's shared seed, fixed Moon T1
+                *run = RunState::new(c.0, crate::content::planets::PlanetKind::Moon, 1, &save);
+                run.run_seed = crate::run::daily_seed(crate::run::today());
+                run.is_daily = true;
+                next.set(AppState::InRun);
+                sfx.write(SfxMsg(Sfx::Teleport));
+            } else {
+                next.set(AppState::PlanetSelect);
+                sfx.write(SfxMsg(Sfx::Click));
+            }
         }
     }
     for i in &back {
@@ -473,6 +514,16 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                 Color::srgb(0.85, 0.87, 0.95),
             ));
             root.spawn(txt(format!("SILVER EARNED: +{}", data.silver_earned), FONT_BIG, Color::srgb(0.75, 0.85, 1.0)));
+            if let Some((name, best, new_best)) = &data.daily {
+                root.spawn(txt(
+                    format!("DAILY {name} — score {}   (best today: {best})", data.silver_earned),
+                    FONT_MED,
+                    Color::srgb(1.0, 0.6, 0.85),
+                ));
+                if *new_best {
+                    root.spawn(txt("NEW DAILY BEST!", FONT_MED, Color::srgb(1.0, 0.85, 0.3)));
+                }
+            }
             for q in &data.quests_completed {
                 root.spawn(txt(format!("QUEST COMPLETE: {q}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.4)));
             }

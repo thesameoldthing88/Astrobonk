@@ -10,9 +10,60 @@ use crate::content::Rarity;
 use crate::save::MetaSave;
 use crate::stats::{StatKind, Stats};
 use bevy::prelude::*;
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 use std::collections::HashSet;
+
+/// The run's deterministic random source. Seeded from `RunState::run_seed` at stage entry
+/// so the world layout + spawn stream are reproducible — the foundation for the daily
+/// seeded planet and, later, co-op determinism. Only the (chained) sim systems draw from
+/// it, so draw order is deterministic.
+#[derive(Resource)]
+pub struct GameRng(pub StdRng);
+
+impl Default for GameRng {
+    fn default() -> Self {
+        Self(StdRng::seed_from_u64(0))
+    }
+}
+
+impl GameRng {
+    pub fn reseed(&mut self, seed: u64) {
+        self.0 = StdRng::seed_from_u64(seed);
+    }
+}
+
+/// A fresh non-reproducible seed for normal play (daily/testing override this).
+pub fn fresh_seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x9e3779b97f4a7c15)
+}
+
+/// Days since the Unix epoch (UTC) — the "day number" the daily is keyed on.
+pub fn today() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() / 86_400)
+        .unwrap_or(0)
+}
+
+/// A stable seed for a given day — everyone who plays the daily gets the same world.
+pub fn daily_seed(day: u64) -> u64 {
+    // splitmix64 avalanche so consecutive days feel unrelated
+    let mut z = day.wrapping_add(0x9e3779b97f4a7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+/// A procedural code-name for a daily world, e.g. "GRIEF-7B".
+pub fn daily_name(seed: u64) -> String {
+    const WORDS: [&str; 8] = ["GRIEF", "HUSH", "EMBER", "VIGIL", "DROSS", "WANE", "SILT", "PALL"];
+    format!("{}-{:X}{:X}", WORDS[(seed % 8) as usize], (seed >> 8) % 16, (seed >> 3) % 16)
+}
 
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum RunPhase {
@@ -81,6 +132,8 @@ pub struct RunState {
     pub frenzy_timer: f32,
     pub fast_move: bool,     // player is above base run speed (for Nova/Aurora)
     pub reticle_timer: f32,  // cycles 0..1.5 for Reticle's focus pulse
+    pub run_seed: u64,       // deterministic seed for world gen + spawns
+    pub is_daily: bool,      // this run is the daily seeded challenge
     pub powerups: Vec<(PowerupKind, f32)>,
     pub microwave_used: bool,
     pub chest_opens: u32,
@@ -130,6 +183,8 @@ impl RunState {
             frenzy_timer: 0.0,
             fast_move: false,
             reticle_timer: 0.0,
+            run_seed: fresh_seed(),
+            is_daily: false,
             powerups: Vec::new(),
             microwave_used: false,
             chest_opens: 0,

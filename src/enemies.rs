@@ -532,6 +532,7 @@ pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
     mut director: ResMut<Director>,
+    mut game_rng: ResMut<crate::run::GameRng>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
@@ -543,7 +544,7 @@ pub fn director_spawn(
         return;
     }
     let Ok(player) = q_player.single() else { return };
-    let mut rng = rand::thread_rng();
+    let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_enemies.iter().count();
     let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.stats.difficulty);
@@ -582,7 +583,7 @@ pub fn director_spawn(
         let dir = sphere::offset_dir(player.dir, heading, arc, planet.radius);
 
         if run.static_active {
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp_mult, dmg_mult, &mut rng);
+            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp_mult, dmg_mult, rng);
             continue;
         }
 
@@ -600,7 +601,7 @@ pub fn director_spawn(
         } else {
             dir
         };
-        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, &mut rng);
+        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, rng);
     }
 }
 

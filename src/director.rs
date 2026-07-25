@@ -28,6 +28,7 @@ pub struct ResultsData {
     pub silver_earned: u64,
     pub time: f32,
     pub quests_completed: Vec<String>,
+    pub daily: Option<(String, u64, bool)>, // (world name, best score, is-new-best)
 }
 
 /// Countdown, boss marks, The Static.
@@ -138,6 +139,7 @@ pub fn stage_transition(
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut director: ResMut<Director>,
+    mut game_rng: ResMut<crate::run::GameRng>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut next: ResMut<NextState<AppState>>,
@@ -178,9 +180,11 @@ pub fn stage_transition(
     run.teleporter_open = false;
     run.microwave_used = false;
     *director = Director::default();
+    let stage_seed = run.run_seed.wrapping_add(run.stage as u64);
+    game_rng.reseed(stage_seed);
 
     let planet = CurrentPlanet::from_kind(run.planet());
-    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet);
+    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run);
     interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, Vec3::Y);
     commands.insert_resource(planet);
@@ -235,6 +239,22 @@ pub fn bank_results(
     let payout = run.silver_run + (performance as f32 * run.stats.silver_gain) as u64;
     save.silver += payout;
 
+    // daily challenge: track today's best score
+    let daily = if run.is_daily {
+        let day = crate::run::today();
+        if save.daily_day != day {
+            save.daily_day = day;
+            save.daily_best = 0;
+        }
+        let new_best = payout > save.daily_best;
+        if new_best {
+            save.daily_best = payout;
+        }
+        Some((crate::run::daily_name(run.run_seed), save.daily_best, new_best))
+    } else {
+        None
+    };
+
     let newly = save.check_quests();
     let quests_completed: Vec<String> = newly
         .iter()
@@ -254,6 +274,7 @@ pub fn bank_results(
         silver_earned: payout,
         time: run.total_elapsed,
         quests_completed,
+        daily,
     });
 
     *phase = RunPhase::Playing; // reset for next run

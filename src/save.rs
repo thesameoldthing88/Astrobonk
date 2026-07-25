@@ -46,6 +46,9 @@ pub struct MetaSave {
     pub sfx_volume: f32,
     pub sensitivity: f32, // camera-sensitivity multiplier
     pub shake_scale: f32, // screenshake intensity multiplier
+    // --- daily seeded planet ---
+    pub daily_day: u64,   // day-number of the last daily played
+    pub daily_best: u64,  // best score on that day
 }
 
 impl Default for MetaSave {
@@ -93,6 +96,8 @@ impl Default for MetaSave {
             sfx_volume: 1.0,
             sensitivity: 1.0,
             shake_scale: 1.0,
+            daily_day: 0,
+            daily_best: 0,
         }
     }
 }

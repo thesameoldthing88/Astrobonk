@@ -1,5 +1,36 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2f: DAILY SEEDED PLANET (cashing the determinism payoff)
+- Course-correction (told user): combat-RNG determinism (step 1b) isn't needed for our
+  host-authoritative co-op plan or a fair daily; fixed-timestep is co-op-build-time. So the
+  smart continuation of the foundations work is its visible payoff — the daily planet.
+- New: run::today()/daily_seed()/daily_name() (splitmix64 day-seed → "GRIEF-7B" codename).
+  Main-menu DAILY button shows today's world + best; picks a hero, then drops onto a fixed
+  Moon T1 built from today's SHARED seed (same world + waves for everyone). run.is_daily flag.
+- Results screen shows daily score + NEW DAILY BEST; save tracks daily_day/daily_best
+  (serde(default) migrates old saves).
+- Refactor: collapsed 6 main-menu button queries into one MenuBtn enum query to stay under
+  Bevy's 16-system-param cap (adding daily+selected pushed main_menu_input to 18).
+- Validated: seeded smokes green, windowed menu renders. First feature built ON the seed
+  foundation — proves it end-to-end.
+- UNCOMMITTED (step-1 determinism + this daily both await "commit it").
+
+## 2026-07-24 — Session 2e: FOUNDATIONS step 1 — deterministic world seed (path to co-op)
+- User chose "the path to co-op". Step 1 of the foundations pass: a seeded, reproducible
+  world. New `run::GameRng(StdRng)` resource + `RunState.run_seed` (fresh time-seed per run,
+  overridable). Reseeded per stage (run_seed + stage) in enter_run / stage_transition /
+  headless_enter.
+- World gen is now deterministic BY CONSTRUCTION from the seed: `spawn_stage` (prop scatter),
+  `spawn_interactables` (chest/shrine layout + Shady Guy stock), and `director_spawn` (the
+  whole enemy spawn stream: kinds, elite timing) all draw from seeded StdRng instead of
+  thread_rng. Terrain was already seed-driven.
+- Headless `--seed N` flag added; seeded + normal + Mars smokes green; windowed boot OK.
+- This unlocks the DAILY SEEDED PLANET (same world for everyone) as a near-free next feature,
+  and is the determinism co-op needs.
+- NOT YET deterministic: in-combat rolls (crit/lifesteal/drops) still thread_rng, and dt is
+  variable — full run-reproducibility needs step 1b (combat RNG) + step 2 (fixed timestep).
+- UNCOMMITTED.
+
 ## 2026-07-24 — Session 2d: hero mechanic-passives, batch 2 (roster complete)
 - Final three flat heroes now play by mechanic:
   - **Dr. Reticle** — +10% crit + a guaranteed-crit "focus pulse" every ~1.5s (run.reticle_timer

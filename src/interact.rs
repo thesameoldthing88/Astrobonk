@@ -13,8 +13,9 @@ use crate::run::{ChoicePanel, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
 use bevy::prelude::*;
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
-use rand::Rng;
+use rand::{Rng, SeedableRng};
 
 #[derive(Component)]
 pub struct Pot {
@@ -141,7 +142,8 @@ pub fn spawn_interactables(
     player_dir: Vec3,
 ) {
     let def = planet.kind.def();
-    let mut rng = rand::thread_rng();
+    // deterministic interactable layout + vendor stock from the run seed
+    let mut rng = StdRng::seed_from_u64(run.run_seed.wrapping_add(run.stage as u64).wrapping_mul(0x9e37));
 
     // Pots
     let pot_mesh = meshes.add(Mesh::from(Cylinder::new(0.32, 0.55)));

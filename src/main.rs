@@ -59,7 +59,8 @@ fn main() {
             Some("darkmoon") => content::planets::PlanetKind::DarkMoon,
             _ => content::planets::PlanetKind::Moon,
         };
-        headless::run_headless(ticks, fast_boss, hero, planet);
+        let seed = args.iter().position(|a| a == "--seed").and_then(|p| args.get(p + 1)).and_then(|s| s.parse().ok());
+        headless::run_headless(ticks, fast_boss, hero, planet, seed);
         return;
     }
 
@@ -91,6 +92,7 @@ fn main() {
         .init_resource::<interact::ChestPanel>()
         .init_resource::<interact::ShopPanel>()
         .init_resource::<comet::Comet>()
+        .init_resource::<run::GameRng>()
         .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
         .init_resource::<ui::menus::Selected>()
@@ -289,10 +291,14 @@ fn enter_run(
     mut director_res: ResMut<enemies::Director>,
     mut phase: ResMut<run::RunPhase>,
     mut comet_res: ResMut<comet::Comet>,
+    mut game_rng: ResMut<run::GameRng>,
 ) {
     *comet_res = comet::Comet::default();
+    // seed the run's deterministic RNG streams from the run seed + stage
+    let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
+    game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
-    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet);
+    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
     interact::spawn_interactables(
         &mut commands,

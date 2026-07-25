@@ -120,12 +120,13 @@ fn bot_watchdog(run: Res<RunState>, q_enemies: Query<(), With<Enemy>>, mut ticks
     }
 }
 
-pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kind: PlanetKind) {
+pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kind: PlanetKind, seed: Option<u64>) {
     println!(
-        "ASTROBONK headless smoke: {ticks} ticks @33ms{} hero={} planet={:?}",
+        "ASTROBONK headless smoke: {ticks} ticks @33ms{} hero={} planet={:?} seed={:?}",
         if fast_boss { " (fast-boss)" } else { "" },
         hero.def().name,
-        planet_kind
+        planet_kind,
+        seed
     );
     let mut app = App::new();
     app.add_plugins((
@@ -147,6 +148,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         save.tome_levels.insert(crate::content::tomes::TomeKind::Health, 20);
     }
     let mut run = RunState::new(hero, planet_kind, 1, &save);
+    if let Some(s) = seed {
+        run.run_seed = s;
+    }
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
         run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
@@ -170,6 +174,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::interact::ChestPanel>()
         .init_resource::<crate::interact::ShopPanel>()
         .init_resource::<crate::comet::Comet>()
+        .init_resource::<crate::run::GameRng>()
         .init_resource::<crate::events_world::DustStorm>()
         .init_resource::<ButtonInput<KeyCode>>()
         .insert_resource(save)
@@ -296,9 +301,12 @@ fn headless_enter(
     mut materials: ResMut<Assets<StandardMaterial>>,
     run_state: Res<RunState>,
     save: Res<MetaSave>,
+    mut game_rng: ResMut<crate::run::GameRng>,
 ) {
+    let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
+    game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
-    crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet);
+    crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, Vec3::Y);
     commands.insert_resource(planet);
