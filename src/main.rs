@@ -163,16 +163,24 @@ fn main() {
             Update,
             (
                 enemies::rebuild_hash,
-                enemies::director_spawn,
-                enemies::enemy_move,
+                enemies::director_spawn.run_if(net::is_simulating),
+                // enemy_move MUST be gated: streamed proxies carry a real Enemy, so on a
+                // client this would steer them with local AI and fight drive_proxies for
+                // the transform.
+                enemies::enemy_move.run_if(net::is_simulating),
+                // KEPT on clients: this places the streamed worm's 12 segments from the
+                // head's trail. It writes PlayerHitMsg, which is inert now that
+                // apply_player_hits is host-only.
                 enemies::craterpillar_update,
                 enemies::anubot_beam_system.run_if(net::is_simulating),
                 enemies::boss_phase_system.run_if(net::is_simulating),
-                enemies::burrower_emerge,
-                enemies::enemy_contact,
-                enemies::spitter_attack,
-                enemies::beamer_attack,
-                enemies::lobber_attack,
+                enemies::burrower_emerge.run_if(net::is_simulating),
+                enemies::enemy_contact.run_if(net::is_simulating),
+                enemies::spitter_attack.run_if(net::is_simulating),
+                enemies::beamer_attack.run_if(net::is_simulating),
+                enemies::lobber_attack.run_if(net::is_simulating),
+                // KEPT on clients: these three integrate the hazards the host streamed as
+                // spawn events. Gating them would freeze every shot and telegraph mid-air.
                 enemies::mortar_shells,
                 enemies::enemy_projectiles,
                 enemies::boss_attacks.run_if(net::is_simulating),
@@ -198,9 +206,14 @@ fn main() {
         .add_systems(
             Update,
             (
-                interact::charge_shrines,
-                interact::interact_system,
-                pickups::pickup_update,
+                interact::charge_shrines.run_if(net::is_simulating),
+                // Interactables are host-resolved. A joiner pressing E is a no-op today —
+                // the same documented gap as a peer on the host.
+                interact::interact_system.run_if(net::is_simulating),
+                // Collection and the XP grant are the host's; a client animates its
+                // streamed loot with netenemy::animate_net_pickups instead. Left ungated
+                // this would collect locally and DOUBLE the XP a joiner receives.
+                pickups::pickup_update.run_if(net::is_simulating),
                 // The clock, boss marks and teleporter belong to the host — a client
                 // adopts them from RunSnapMsg instead of running a second, drifting copy.
                 director::run_clock.run_if(net::is_simulating),
@@ -212,7 +225,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            (comet::comet_system, events_world::dust_storm_system)
+            (comet::comet_system, events_world::dust_storm_system).run_if(net::is_simulating)
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
         )
@@ -230,12 +243,17 @@ fn main() {
             (
                 combat::apply_hits.run_if(net::is_simulating),
                 combat::apply_player_hits.run_if(net::is_simulating),
-                pickups::kill_drops,
+                // Loot is rolled by the host (it owns run.kills and the luck roll) and
+                // reaches clients as PickupEvent spawns.
+                pickups::kill_drops.run_if(net::is_simulating),
                 combat::fader_update,
                 enemies::enemy_flash,
                 player::player_physics,
                 player::animate_player,
-                player::player_upkeep,
+                // Regen, i-frames, shield recharge and powerup decay are all host-owned
+                // per-player state. A client adopts its own hp from the replicated
+                // PlayerVitals (net::adopt_my_vitals) instead of regenerating locally.
+                player::player_upkeep.run_if(net::is_simulating),
                 fx::update_particles,
                 director::stage_transition,
                 director::downed_watch,

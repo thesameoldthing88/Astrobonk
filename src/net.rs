@@ -354,6 +354,7 @@ impl Plugin for NetPlugin {
                     .run_if(on_timer(Duration::from_millis(500))),
             )
             .add_systems(Update, apply_player_build.run_if(is_hosting))
+            .add_systems(Update, adopt_my_vitals.run_if(is_client))
             .add_server_message::<AssignPlayerId>(Channel::Ordered)
             // Registered LAST of the server messages on purpose: registration order is
             // renet priority order, and the crowd is what should starve first if the
@@ -560,6 +561,29 @@ fn planet_from_code(c: u8) -> crate::content::planets::PlanetKind {
         1 => Mars,
         2 => DarkMoon,
         _ => Moon,
+    }
+}
+
+/// CLIENT: take our OWN hp from the host.
+///
+/// Once a client stops simulating, its local PlayerState.hp is frozen — nothing damages or
+/// heals it locally — so the HUD would cheerfully report full health while the host had us
+/// nearly dead. The host already replicates PlayerVitals for every astronaut; this reads the
+/// one carrying OUR PlayerId (the server's copy of us, which remote.rs deliberately skips
+/// when drawing teammates) and mirrors it into the local sheet the HUD reads.
+fn adopt_my_vitals(
+    mine: Res<MyPlayerId>,
+    vitals: Query<(&crate::player::PlayerId, &PlayerVitals), Without<crate::player::Player>>,
+    mut q: Query<&mut crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+) {
+    let Some(my_id) = mine.0 else { return };
+    let Ok(mut ps) = q.single_mut() else { return };
+    for (pid, v) in &vitals {
+        if pid.0 == my_id {
+            ps.hp = v.hp;
+            ps.dead = v.down;
+            break;
+        }
     }
 }
 

@@ -171,7 +171,12 @@ impl Plugin for EnemyStreamPlugin {
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
-            .add_systems(Update, receive_pickups.run_if(crate::net::is_client))
+            .add_systems(
+                Update,
+                (receive_pickups, animate_net_pickups)
+                    .chain()
+                    .run_if(crate::net::is_client),
+            )
             .add_systems(
                 Update,
                 stream_hazards
@@ -686,6 +691,53 @@ fn receive_pickups(
     }
 }
 
+/// CLIENT: bob and spin streamed loot, and fly it toward whoever is close.
+///
+/// Purely cosmetic — collection and the XP grant belong to the host, and `pickup_update` is
+/// gated off here. Without this a joiner's gems would hang motionless in the air and then
+/// blink out when the host collected them.
+fn animate_net_pickups(
+    time: Res<Time>,
+    planet: Option<Res<CurrentPlanet>>,
+    q_players: Query<(&Player, &crate::run::PlayerState, &Transform), Without<Pickup>>,
+    mut q: Query<(&mut Pickup, &mut Transform), Without<Player>>,
+) {
+    let Some(planet) = planet else { return };
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let t_now = time.elapsed_secs();
+    let attractors: Vec<(Vec3, f32)> = q_players
+        .iter()
+        .filter(|(_, ps, _)| !ps.dead)
+        .map(|(_, ps, tf)| (tf.translation, ps.pickup_range()))
+        .collect();
+
+    for (mut p, mut tf) in &mut q {
+        let near = attractors
+            .iter()
+            .filter(|(pos, range)| tf.translation.distance(*pos) < *range)
+            .min_by(|a, b| {
+                tf.translation
+                    .distance(a.0)
+                    .total_cmp(&tf.translation.distance(b.0))
+            })
+            .map(|(pos, _)| *pos);
+        if let Some(pos) = near {
+            p.flying = true;
+            p.speed = (p.speed + 60.0 * dt).min(crate::config::PICKUP_FLY_SPEED * 1.8);
+            let to = (pos - tf.translation).normalize_or_zero();
+            tf.translation += to * p.speed * dt;
+        } else {
+            let up = p.dir;
+            tf.translation =
+                planet.surface_point(up) + up * (0.35 + ((t_now * 2.0 + p.bob).sin() * 0.08));
+            tf.rotation = Quat::from_axis_angle(up, t_now * 1.5 + p.bob);
+        }
+    }
+}
+
 fn boss_code(k: BossKind) -> u8 {
     match k {
         BossKind::CraterpillarJr => 0,
@@ -1115,6 +1167,7 @@ pub fn log_stream_stats(
     mut stats: ResMut<NetEnemyStats>,
     residency: Res<ClientResidency>,
     proxies: Query<(), With<NetEnemy>>,
+    local_sim: Query<(), (With<Enemy>, Without<NetEnemy>, Without<NetBoss>, Without<crate::interact::Pot>)>,
     enemies: Query<(), With<Enemy>>,
     breakdown: Query<(&Enemy, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>)>,
     anchors: Query<(&PlayerId, &Player)>,
@@ -1190,8 +1243,9 @@ pub fn log_stream_stats(
         }
         NetRole::Client => {
             info!(
-                "NETENEMY[Client] proxies={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} gold={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
+                local_sim.iter().count(),
                 n_boss.iter().count(),
                 n_segs.iter().count(),
                 // spread of the body: 12 stacked segments would read ~0
@@ -1209,6 +1263,7 @@ pub fn log_stream_stats(
                 n_pick.iter().count(),
                 my_ps.iter().next().map(|p| p.level).unwrap_or(0),
                 my_ps.iter().next().map(|p| p.xp).unwrap_or(0.0),
+                my_ps.iter().next().map(|p| p.hp).unwrap_or(0.0),
                 my_ps.iter().next().map(|p| p.gold).unwrap_or(0),
                 stats.records,
                 stats.chunks,
