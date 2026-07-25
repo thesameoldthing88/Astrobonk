@@ -34,7 +34,7 @@ pub enum StatKind {
     ChestDiscount,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Stats {
     pub max_hp: f32,
     pub regen: f32,

@@ -148,6 +148,12 @@ fn main() {
         // ------------- menu inputs
         .add_systems(Update, client_follow_host_run)
         .add_systems(Update, dev_fast_boss.run_if(in_state(AppState::InRun)))
+        .add_systems(
+            Update,
+            dev_autopick
+                .run_if(in_state(AppState::InRun))
+                .run_if(|| std::env::args().any(|a| a == "--autopick")),
+        )
         .add_systems(Update, ui::menus::main_menu_input.run_if(in_state(AppState::MainMenu)))
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
@@ -389,6 +395,37 @@ fn enter_run(
     );
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
+    *phase = run::RunPhase::Playing;
+}
+
+/// `--autopick`: take option 1 of every card panel automatically. Without this a bot-driven
+/// client stalls forever on its first level-up (the panel opens and waits for a keypress
+/// that never comes), which also freezes the run — so co-op builds can never diverge and
+/// build sync is untestable.
+fn dev_autopick(
+    mut phase: ResMut<run::RunPhase>,
+    mut panel: ResMut<run::ChoicePanel>,
+    save: Res<save::MetaSave>,
+    global: Res<run::RunState>,
+    mut chest: ResMut<interact::ChestPanel>,
+    mut shop: ResMut<interact::ShopPanel>,
+    mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
+) {
+    if !matches!(*phase, run::RunPhase::LevelUp | run::RunPhase::Modal) {
+        return;
+    }
+    if let Ok(mut ps) = q.single_mut() {
+        if !panel.options.is_empty() {
+            let opt = panel.options[0].clone();
+            ps.apply_upgrade(&opt, &save, global.greed_stacks);
+            if panel.is_levelup {
+                ps.pending_levelups = ps.pending_levelups.saturating_sub(1);
+            }
+            panel.options.clear();
+        }
+    }
+    chest.open = false;
+    shop.open = false;
     *phase = run::RunPhase::Playing;
 }
 

@@ -153,6 +153,33 @@ pub struct BossSnapMsg {
     pub bosses: Vec<BossRec>,
 }
 
+/// CLIENT -> HOST: "this is my build".
+///
+/// The one piece of client->host traffic besides input, and it is unavoidable: the host
+/// spawns a peer with a FRESH LEVEL-1 SHEET (`carried: None`), card picks happen on the
+/// client, and combat damage rolls use `rand::thread_rng()` throughout combat.rs — so there
+/// is no lockstep or derived-hit scheme that would let the host recompute the peer's numbers
+/// itself. The host must be told them.
+///
+/// Sends the DERIVED Stats rather than the item list: items only reach combat through
+/// `recompute_stats`, so the derived sheet is sufficient and immune to the two machines
+/// disagreeing about how an item is applied.
+///
+/// ~130 B on change plus a 2 s heartbeat — the `announce_player_ids` idiom, so a dropped
+/// update self-heals instead of leaving the peer permanently weak.
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct PlayerBuildMsg {
+    /// NOT cosmetic: the character gates hero branches the host evaluates every frame
+    /// (Nova's sprint attack-speed bonus, etc.), and the host currently spawns peers with
+    /// the HOST's character, so without this a joiner is simulated as the wrong hero.
+    pub character: crate::content::characters::AstronautKind,
+    pub level: u32,
+    pub stats: crate::stats::Stats,
+    /// (weapon, level) pairs. Cooldowns are deliberately NOT sent — they are host-side
+    /// firing cadence, and overwriting them every heartbeat would stutter the peer's guns.
+    pub weapons: Vec<(crate::content::weapons::WeaponKind, u32)>,
+}
+
 /// LOCAL (never networked): the simulation says "someone earned this". A relay turns it
 /// into the right wire message. Keeps pickups.rs free of any notion of clients or channels.
 #[derive(Message, Clone, Copy, Debug)]
@@ -319,6 +346,14 @@ impl Plugin for NetPlugin {
             .replicate::<PlayerVitals>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
+            .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
+            .add_systems(
+                Update,
+                send_player_build
+                    .run_if(is_client)
+                    .run_if(on_timer(Duration::from_millis(500))),
+            )
+            .add_systems(Update, apply_player_build.run_if(is_hosting))
             .add_server_message::<AssignPlayerId>(Channel::Ordered)
             // Registered LAST of the server messages on purpose: registration order is
             // renet priority order, and the crowd is what should starve first if the
@@ -525,6 +560,66 @@ fn planet_from_code(c: u8) -> crate::content::planets::PlanetKind {
         1 => Mars,
         2 => DarkMoon,
         _ => Moon,
+    }
+}
+
+/// CLIENT: push our build up. Rate-limited rather than on-change because the sheet is
+/// small and a heartbeat is what makes a dropped update self-heal.
+fn send_player_build(
+    q: Query<&crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+    mut out: MessageWriter<PlayerBuildMsg>,
+) {
+    let Ok(ps) = q.single() else { return };
+    out.write(PlayerBuildMsg {
+        character: ps.character,
+        level: ps.level,
+        stats: ps.stats.clone(),
+        weapons: ps.weapons.iter().map(|w| (w.kind, w.level)).collect(),
+    });
+}
+
+/// HOST: adopt a peer's build onto our authoritative copy.
+///
+/// Applies ONLY build fields. Never hp, shield, iframes, powerups or `dead`: those are
+/// host-authoritative live state, and a 2 Hz full-sheet overwrite would undo damage the host
+/// had just applied — the player would appear to heal every time a heartbeat landed.
+fn apply_player_build(
+    mut msgs: MessageReader<FromClient<PlayerBuildMsg>>,
+    slots: Res<PeerSlots>,
+    mut q: Query<(&crate::player::PlayerId, &mut crate::run::PlayerState)>,
+) {
+    for FromClient { client_id, message } in msgs.read() {
+        let Some(client) = client_id.entity() else { continue };
+        let Some(pid) = slots.player_id(client) else { continue };
+        for (id, mut ps) in &mut q {
+            if id.0 != pid {
+                continue;
+            }
+            ps.character = message.character;
+            ps.level = message.level;
+            // A grown max_hp must ADD to current hp, not silently look like damage: the
+            // client's own recompute_stats preserves hp as a FRACTION of max_hp, so a plain
+            // assignment here would make a peer appear to have taken a hit every time they
+            // picked a health upgrade. Host hp is authoritative, so carry the delta.
+            let d = message.stats.max_hp - ps.stats.max_hp;
+            ps.stats = message.stats.clone();
+            if d > 0.0 {
+                ps.hp += d;
+            }
+            ps.hp = ps.hp.min(ps.stats.max_hp);
+            // NOTE: the host's copy of `items` is deliberately left stale and no longer
+            // matches `stats`. That is intended — nothing in the host's combat path reads
+            // items, and recompute_stats is CLIENT-ONLY for a peer sheet (it would fold in
+            // the HOST's meta tomes and save, producing numbers the peer never had).
+            // Keep each weapon's existing cooldown so the heartbeat does not reset firing
+            // cadence; only levels and membership come from the client.
+            let mut next: Vec<crate::run::WeaponInstance> = Vec::new();
+            for (kind, level) in &message.weapons {
+                let cd = ps.weapons.iter().find(|w| w.kind == *kind).map(|w| w.cd).unwrap_or(0.0);
+                next.push(crate::run::WeaponInstance { kind: *kind, level: *level, cd });
+            }
+            ps.weapons = next;
+        }
     }
 }
 

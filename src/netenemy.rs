@@ -1119,6 +1119,7 @@ pub fn log_stream_stats(
     breakdown: Query<(&Enemy, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>)>,
     anchors: Query<(&PlayerId, &Player)>,
     with_id: Query<(), (With<Enemy>, With<NetId>)>,
+    builds: Query<(&PlayerId, &crate::run::PlayerState)>,
     // Bundled into one param: this diagnostic hit Bevy's 16-system-param cap.
     counts: (
         Query<(), With<crate::enemies::Boss>>,
@@ -1163,7 +1164,7 @@ pub fn log_stream_stats(
                 })
                 .collect();
             info!(
-                "NETENEMY[Host] total={} mobile={} bosses={} hazards={} pickups={} with_netid={} in_interest[{}] resident_sent={}",
+                "NETENEMY[Host] total={} mobile={} bosses={} hazards={} pickups={} with_netid={} in_interest[{}] resident_sent={} builds[{}]",
                 enemies.iter().count(),
                 mobile,
                 n_boss.iter().count(),
@@ -1171,7 +1172,20 @@ pub fn log_stream_stats(
                 n_pick.iter().count(),
                 with_id.iter().count(),
                 reach.join(" "),
-                resident
+                resident,
+                builds
+                    .iter()
+                    .map(|(id, ps)| format!(
+                        "p{}:lvl{} dmg{:.2} hp{:.0} weps{} spd{:.2}",
+                        id.0,
+                        ps.level,
+                        ps.stats.damage,
+                        ps.stats.max_hp,
+                        ps.weapons.len(),
+                        ps.stats.attack_speed
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
         NetRole::Client => {
