@@ -41,6 +41,28 @@ pub struct PlayerId(pub u8);
 #[derive(Component)]
 pub struct LocalPlayer;
 
+/// A cheap copy of one astronaut's position, taken once per system before any mutable
+/// loop. Enemy systems iterate up to ENEMY_CAP entities, and Bevy forbids reading the
+/// player query inside a `&mut` loop over an overlapping archetype (B0001) — so every
+/// "who do I target?" site snapshots into a Vec first.
+#[derive(Clone, Copy)]
+pub struct AstronautSnap {
+    pub entity: Entity,
+    pub dir: Vec3,
+    pub pos: Vec3,
+}
+
+/// The astronaut closest to `from_dir` along the surface.
+/// GREAT-CIRCLE distance, never `Vec3::distance`: on a 105-160m planet the straight-line
+/// chord badly under-reads for anything past a short hop, so two players on opposite sides
+/// would compare wrongly.
+pub fn nearest_astronaut(from_dir: Vec3, list: &[AstronautSnap], radius: f32) -> Option<AstronautSnap> {
+    list.iter().copied().min_by(|a, b| {
+        crate::sphere::arc_dist(from_dir, a.dir, radius)
+            .total_cmp(&crate::sphere::arc_dist(from_dir, b.dir, radius))
+    })
+}
+
 /// One frame of movement intent for an astronaut. The LOCAL player's is filled from
 /// keyboard/mouse; a REMOTE player's is filled from their PlayerInputMsg on the host.
 /// Movement then consumes this identically either way, so there is exactly one
@@ -102,6 +124,9 @@ pub fn spawn_player(
     id: u8,
     character: crate::content::characters::AstronautKind,
     is_local: bool,
+    // Carried progression, when this astronaut already existed (a stage change). `None`
+    // starts a fresh sheet. Without this, every player's build is wiped on teleport.
+    carried: Option<PlayerState>,
 ) {
     let def = character.def();
     // fan players out around the drop point so they don't spawn inside each other
@@ -134,7 +159,7 @@ pub fn spawn_player(
                 squash_amt: 0.0,
                 lean: 0.0,
             },
-            PlayerState::new(character, save),
+            carried.unwrap_or_else(|| PlayerState::new(character, save)),
             PlayerId(id),
             InputIntent::default(),
             crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0 },

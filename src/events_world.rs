@@ -36,7 +36,7 @@ pub fn dust_storm_system(
     mut storm: ResMut<DustStorm>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    q_player: Query<&Player>,
+    q_player: Query<&Player, With<crate::player::LocalPlayer>>,
     mut q_vis: Query<(&mut Transform, &mut Visibility), With<DustStormVis>>,
 ) {
     let dt = time.delta_secs();
@@ -56,7 +56,6 @@ pub fn dust_storm_system(
         return;
     }
 
-    let Ok(player) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
 
     // Lazily create the (hidden) storm dome the first time we're on Mars.
@@ -107,8 +106,15 @@ pub fn dust_storm_system(
         storm.heading = (t * a.cos() + b * a.sin()).normalize();
     }
 
-    storm.player_inside =
-        storm.active && sphere::arc_dist(player.dir, storm.dir, planet.radius) < storm.radius;
+    // LOCAL-only: this drives the HUD haze. Ranged enemies gate on it too, which means a
+    // remote player standing in the dust is not yet hidden from them — noted as a
+    // follow-up rather than fixed here, since it needs a per-astronaut InStorm marker.
+    storm.player_inside = storm.active
+        && q_player
+            .iter()
+            .next()
+            .map(|p| sphere::arc_dist(p.dir, storm.dir, planet.radius) < storm.radius)
+            .unwrap_or(false);
 
     // move/show the dome
     for (mut tf, mut vis) in &mut q_vis {

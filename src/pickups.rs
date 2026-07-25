@@ -26,6 +26,9 @@ pub struct Pickup {
     pub flying: bool,
     pub speed: f32,
     pub bob: f32,
+    /// Who this pickup is flying to. LATCHED: with two attractors a gem released between
+    /// them would re-pick the nearest every frame and stall in the middle.
+    pub target: Option<Entity>,
 }
 
 #[derive(Resource)]
@@ -94,7 +97,7 @@ pub fn spawn_pickup(
     };
     let pos = planet.surface_point(dir) + dir * 0.35;
     commands.spawn((
-        Pickup { kind, dir, flying: false, speed: 0.0, bob: rng.gen_range(0.0..6.28) },
+        Pickup { kind, dir, flying: false, speed: 0.0, bob: rng.gen_range(0.0..6.28), target: None },
         Mesh3d(mesh),
         MeshMaterial3d(mat),
         Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
@@ -109,7 +112,7 @@ pub fn pickup_update(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
-    mut q_player: Query<(&Player, &mut PlayerState, &Transform), Without<Pickup>>,
+    mut q_player: Query<(Entity, &Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>), Without<Pickup>>,
     particles: Option<Res<ParticleAssets>>,
     mut q: Query<(Entity, &mut Pickup, &mut Transform), Without<Player>>,
     mut numbers: MessageWriter<NumberMsg>,
@@ -120,22 +123,61 @@ pub fn pickup_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, mut ps, ptf)) = q_player.single_mut() else { return };
-    let range = ps.pickup_range();
     let t_now = time.elapsed_secs();
 
+    // (1) Snapshot every attractor BEFORE touching the pickup query (B0001), with a
+    // PER-PLAYER range — the Magnet powerup multiplies it 40x, so a shared range would
+    // let one player's powerup vacuum the planet into someone else's pocket.
+    struct Attractor {
+        entity: Entity,
+        pos: Vec3,
+        dir: Vec3,
+        range: f32,
+        is_local: bool,
+    }
+    let attractors: Vec<Attractor> = q_player
+        .iter()
+        .filter(|(_, _, ps, _, _)| !ps.dead)
+        .map(|(e, pl, ps, tf, is_local)| Attractor {
+            entity: e,
+            pos: tf.translation,
+            dir: pl.dir,
+            range: ps.pickup_range(),
+            is_local,
+        })
+        .collect();
+    let _ = &attractors;
+
+    // (2) Move pickups and record what got collected — resolve ownership PER PICKUP so a
+    // gem inside 0.8m of two astronauts is granted (and despawned) exactly once.
+    let mut collected: Vec<(Entity, PickupKind, Vec3, bool, Vec3)> = Vec::new();
+
     for (e, mut p, mut tf) in &mut q {
-        let d = tf.translation.distance(ptf.translation);
-        if !p.flying && d < range {
-            p.flying = true;
-            p.speed = 6.0;
-        }
-        if p.flying {
+        let cur = p
+            .target
+            .and_then(|t| attractors.iter().find(|a| a.entity == t));
+        let target = match cur {
+            Some(a) => Some(a),
+            None => attractors
+                .iter()
+                .filter(|a| tf.translation.distance(a.pos) < a.range)
+                .min_by(|a, b| {
+                    tf.translation
+                        .distance(a.pos)
+                        .total_cmp(&tf.translation.distance(b.pos))
+                }),
+        };
+        if let Some(a) = target {
+            if !p.flying {
+                p.flying = true;
+                p.speed = 6.0;
+            }
+            p.target = Some(a.entity);
             p.speed = (p.speed + 60.0 * dt).min(PICKUP_FLY_SPEED * 1.8);
-            let to = (ptf.translation - tf.translation).normalize_or_zero();
+            let to = (a.pos - tf.translation).normalize_or_zero();
             tf.translation += to * p.speed * dt;
-            if tf.translation.distance(ptf.translation) < 0.8 {
-                collect(&mut run, &mut ps, p.kind, ptf.translation, &mut numbers, &mut sfx, &mut banners);
+            if tf.translation.distance(a.pos) < 0.8 {
+                collected.push((a.entity, p.kind, a.pos, a.is_local, a.dir));
                 if let Some(pa) = &particles {
                     let c = match p.kind {
                         PickupKind::Xp(_) => Pcolor::Green,
@@ -144,7 +186,8 @@ pub fn pickup_update(
                         PickupKind::Food => Pcolor::Red,
                         PickupKind::Powerup(_) => Pcolor::Purple,
                     };
-                    fx::burst(&mut commands, pa, ptf.translation, player.dir, c, 4, 3.0);
+                    // unconditional: everyone should see a teammate's pop
+                    fx::burst(&mut commands, pa, a.pos, a.dir, c, 4, 3.0);
                 }
                 commands.entity(e).despawn();
                 continue;
@@ -156,6 +199,25 @@ pub fn pickup_update(
             tf.rotation = Quat::from_axis_angle(up, t_now * 1.5 + p.bob);
         }
     }
+
+    // (3) Grant. XP is a SHARED pool on an individual curve (each player's own xp_gain and
+    // level thresholds still apply); gold, food and powerups belong to the collector.
+    for (collector, kind, pos, is_local, _) in collected {
+        if let PickupKind::Xp(v) = kind {
+            for (_, _, mut ps, _, _) in &mut q_player {
+                if !ps.dead {
+                    ps.gain_xp(v);
+                }
+            }
+            if is_local {
+                sfx.write(SfxMsg(Sfx::Pickup));
+            }
+            continue;
+        }
+        if let Ok((_, _, mut ps, _, _)) = q_player.get_mut(collector) {
+            collect(&mut run, &mut ps, kind, pos, is_local, &mut numbers, &mut sfx, &mut banners);
+        }
+    }
 }
 
 fn collect(
@@ -163,31 +225,41 @@ fn collect(
     ps: &mut PlayerState,
     kind: PickupKind,
     pos: Vec3,
+    is_local: bool,
     numbers: &mut MessageWriter<NumberMsg>,
     sfx: &mut MessageWriter<SfxMsg>,
     banners: &mut MessageWriter<BannerMsg>,
 ) {
     match kind {
         PickupKind::Xp(v) => {
+            // shared-pool XP is granted by the caller across all players
             ps.gain_xp(v);
-            sfx.write(SfxMsg(Sfx::Pickup));
+            if is_local {
+                sfx.write(SfxMsg(Sfx::Pickup));
+            }
         }
         PickupKind::Gold(g) => {
             let g = (g as f32 * ps.stats.gold_gain).round() as u64;
             ps.gold += g;
             run.gold_collected += g;
-            sfx.write(SfxMsg(Sfx::Coin));
+            if is_local {
+                sfx.write(SfxMsg(Sfx::Coin));
+            }
         }
         PickupKind::Silver(s) => {
             let s = (s as f32 * ps.stats.silver_gain).round() as u64;
             run.silver_run += s;
-            sfx.write(SfxMsg(Sfx::Coin));
+            if is_local {
+                sfx.write(SfxMsg(Sfx::Coin));
+            }
         }
         PickupKind::Food => {
             let heal = ps.stats.max_hp * 0.2;
             ps.hp = (ps.hp + heal).min(ps.stats.max_hp);
             numbers.write(NumberMsg { pos, amount: heal, kind: NumKind::Heal });
-            sfx.write(SfxMsg(Sfx::Pickup));
+            if is_local {
+                sfx.write(SfxMsg(Sfx::Pickup));
+            }
         }
         PickupKind::Powerup(k) => {
             let (name, secs) = match k {
@@ -197,8 +269,12 @@ fn collect(
             };
             ps.powerups.retain(|(pk, _)| *pk != k);
             ps.powerups.push((k, secs));
-            banners.write(BannerMsg(name.into()));
-            sfx.write(SfxMsg(Sfx::LevelUp));
+            if is_local {
+                banners.write(BannerMsg(name.into()));
+            }
+            if is_local {
+                sfx.write(SfxMsg(Sfx::LevelUp));
+            }
         }
     }
 }

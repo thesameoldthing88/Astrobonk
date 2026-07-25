@@ -49,8 +49,6 @@ pub fn run_clock(
     if dt <= 0.0 {
         return;
     }
-    let Ok(p) = q_player.single() else { return };
-
     run.elapsed += dt;
     run.total_elapsed += dt;
 
@@ -62,33 +60,45 @@ pub fn run_clock(
 
     run.timer -= dt;
 
+    // Spawn anchor: the party CENTROID, so a boss doesn't erupt in one player's lap and
+    // half a planet away from the other. Only the spawn calls below need it, so the clock
+    // above keeps running even with nobody alive.
+    let dirs: Vec<Vec3> = q_player.iter().map(|p| p.dir).collect();
+    let anchor = dirs
+        .iter()
+        .copied()
+        .sum::<Vec3>()
+        .try_normalize()
+        .or_else(|| dirs.first().copied());
+
     // miniboss marks
     for (i, mark) in MINIBOSS_MARKS.iter().enumerate() {
+        let Some(anchor) = anchor else { break };
         if run.timer <= *mark && !run.minibosses_spawned[i] {
             run.minibosses_spawned[i] = true;
             let kind = if i == 0 { BossKind::CraterpillarJr } else { BossKind::RoverGoneWrong };
-            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.difficulty);
+            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor, kind, run.difficulty);
             banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
     }
 
     // stage boss
-    if run.timer <= BOSS_MARK && !run.boss_spawned {
+    if run.timer <= BOSS_MARK && !run.boss_spawned && anchor.is_some() {
         run.boss_spawned = true;
         let kind = match planet.kind {
             PlanetKind::Moon => BossKind::Craterpillar,
             _ => BossKind::Anubot,
         };
-        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.difficulty);
+        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, run.difficulty);
         banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
         sfx.write(SfxMsg(Sfx::BossRoar));
     }
 
     // boss died -> teleporter (once)
-    if run.boss_dead && !run.teleporter_open {
+    if run.boss_dead && !run.teleporter_open && anchor.is_some() {
         run.teleporter_open = true;
-        interact::spawn_teleporter(&mut commands, &mut meshes, &mut materials, &planet, p.dir);
+        interact::spawn_teleporter(&mut commands, &mut meshes, &mut materials, &planet, anchor.unwrap_or(Vec3::Y));
         banners.write(BannerMsg("TELEPORTER ONLINE — OR STAY AND FARM".into()));
     }
 
@@ -107,7 +117,7 @@ pub fn run_clock(
 /// Open the level-up panel when XP crossed a threshold.
 pub fn levelup_trigger(
     run: Res<RunState>,
-    mut q_ps: Query<&mut PlayerState>,
+    mut q_ps: Query<&mut PlayerState, With<crate::player::LocalPlayer>>,
     save: Res<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
@@ -145,7 +155,7 @@ pub fn stage_transition(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut next: ResMut<NextState<AppState>>,
-    q_ps: Query<&PlayerState>,
+    q_ps: Query<(&PlayerState, &crate::player::PlayerId, Has<crate::player::LocalPlayer>)>,
     scoped: Query<Entity, With<StageScoped>>,
     mut banners: MessageWriter<BannerMsg>,
 ) {
@@ -165,6 +175,16 @@ pub fn stage_transition(
         next.set(AppState::Results);
         return;
     }
+
+    // Snapshot every astronaut's sheet BEFORE the sweep: astronauts are StageScoped, so
+    // this despawns them all. Previously only player 0 was respawned (peers vanished for
+    // good) and its sheet was read back AFTER the wipe, i.e. a blank level-1 sheet — which
+    // is why the shop rolled at zero luck and results always printed level 1.
+    let mut carried: Vec<(u8, PlayerState, bool)> = q_ps
+        .iter()
+        .map(|(ps, id, local)| (id.0, ps.clone(), local))
+        .collect();
+    carried.sort_by_key(|(id, _, _)| *id);
 
     // tear down the old stage
     for e in &scoped {
@@ -189,8 +209,21 @@ pub fn stage_transition(
     let planet = CurrentPlanet::from_kind(run.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, 0, run.character, true);
-    let ps_snapshot = q_ps.single().map(|p| p.clone()).unwrap_or_else(|_| PlayerState::new(run.character, &save));
+    let ps_snapshot = carried
+        .iter()
+        .find(|(_, _, local)| *local)
+        .map(|(_, ps, _)| ps.clone())
+        .unwrap_or_else(|| PlayerState::new(run.character, &save));
+    if carried.is_empty() {
+        player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, 0, run.character, true, None);
+    } else {
+        for (id, ps, is_local) in carried {
+            player::spawn_player(
+                &mut commands, &mut meshes, &mut materials, &planet, &run, &save,
+                id, ps.character, is_local, Some(ps),
+            );
+        }
+    }
     interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &ps_snapshot, &save, Vec3::Y);
     commands.insert_resource(planet);
 
@@ -199,6 +232,25 @@ pub fn stage_transition(
 }
 
 /// Death -> Results after a short beat.
+/// The run ends only when EVERY astronaut is down — one player's mistake must not kick the
+/// whole lobby to the results screen. With a single player this is bit-identical to the old
+/// behaviour (the one player being down IS all of them being down).
+///
+/// This is also the exact hook a revive plugs into: reviving is just clearing `dead`.
+pub fn downed_watch(
+    mut run: ResMut<RunState>,
+    mut phase: ResMut<RunPhase>,
+    q: Query<&crate::run::PlayerState, With<crate::player::Player>>,
+) {
+    if *phase == RunPhase::Dead || run.result.is_some() {
+        return;
+    }
+    if !q.is_empty() && q.iter().all(|ps| ps.dead) {
+        run.result = Some(crate::run::RunResult::Death);
+        *phase = RunPhase::Dead;
+    }
+}
+
 pub fn death_watch(
     phase: Res<RunPhase>,
     mut timer: Local<f32>,
@@ -219,7 +271,7 @@ pub fn death_watch(
 /// Bank the run into the save when Results opens.
 pub fn bank_results(
     mut commands: Commands,
-    q_ps: Query<&PlayerState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     mut run: ResMut<RunState>,
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,

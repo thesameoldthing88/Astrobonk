@@ -376,6 +376,7 @@ fn seat_joining_players(
             id,
             run.character,
             false, // remote: no LocalPlayer marker, no camera, driven by their input
+            None,
         );
         info!("NET seated client {client} as player {id}");
     }
@@ -392,6 +393,7 @@ fn seat_joining_players(
             id,
             run.character,
             false,
+            None,
         );
         info!("NET re-seated client {client} as player {id} after stage change");
     }

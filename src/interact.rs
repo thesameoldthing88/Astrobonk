@@ -345,15 +345,17 @@ pub fn charge_shrines(
     if dt <= 0.0 || *phase != RunPhase::Playing {
         return;
     }
-    let Ok(ptf) = q_player.single() else { return };
+    let ppos: Vec<Vec3> = q_player.iter().map(|t| t.translation).collect();
     let mut rng = rand::thread_rng();
     for (mut s, mut tf) in &mut q {
         if s.done {
             continue;
         }
-        let inside = tf.translation.distance(ptf.translation) < 4.2;
-        if inside {
-            s.progress += dt / 8.0;
+        // Charging scales with how many astronauts are standing in it — a stand-still
+        // objective is exactly where co-op should reward converging.
+        let inside_n = ppos.iter().filter(|p| tf.translation.distance(**p) < 4.2).count();
+        if inside_n > 0 {
+            s.progress += dt / 8.0 * inside_n as f32;
         } else {
             s.progress = (s.progress - dt / 16.0).max(0.0);
         }
@@ -387,13 +389,13 @@ pub fn interact_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut prompt: ResMut<InteractPrompt>,
     mut run: ResMut<RunState>,
-    mut q_ps: Query<&mut PlayerState>,
+    mut q_ps: Query<&mut PlayerState, With<crate::player::LocalPlayer>>,
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     mut panels: (ResMut<ChestPanel>, ResMut<ShopPanel>),
     mut pending: ResMut<crate::director::PendingStage>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(Entity, &Transform), (With<Player>, With<crate::player::LocalPlayer>)>,
     mut q: Query<(Entity, &mut Interactable, &Transform), Without<Player>>,
     mut pickups: Query<&mut Pickup>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -405,7 +407,7 @@ pub fn interact_system(
         prompt.0 = None;
         return;
     }
-    let Ok(ptf) = q_player.single() else { return };
+    let Ok((actor_entity, ptf)) = q_player.single() else { return };
     let Ok(mut ps) = q_ps.single_mut() else { return };
     let mut rng = rand::thread_rng();
 
@@ -483,6 +485,7 @@ pub fn interact_system(
             inter.used = true;
             for mut p in pickups.iter_mut() {
                 p.flying = true;
+                p.target = Some(actor_entity);
                 p.speed = 14.0;
             }
             banners.write(BannerMsg("THE PLANET GIVES".into()));

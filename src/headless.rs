@@ -28,17 +28,20 @@ fn bot_drive(
     save: Res<MetaSave>,
     mut chest: ResMut<crate::interact::ChestPanel>,
     mut shop: ResMut<crate::interact::ShopPanel>,
-    mut q: Query<(&mut Player, &mut PlayerState, &Transform)>,
+    mut q: Query<(&mut Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>)>,
     q_pickups: Query<(&crate::pickups::Pickup, &Transform), Without<Player>>,
     q_enemies: Query<(&Enemy, &Transform), (Without<Player>, Without<crate::pickups::Pickup>)>,
     mut heading_angle: Local<f32>,
 ) {
-    let Ok((mut p, mut run, ptf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
 
-    // resolve any open panel instantly
-    match *phase {
-        RunPhase::LevelUp | RunPhase::Modal => {
+    // Panels are per-MACHINE, so only the local astronaut resolves them — mirroring the
+    // real game, where a peer levelling up must not spend the host human's cards.
+    if matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) {
+        for (_, mut run, _, is_local) in &mut q {
+            if !is_local {
+                continue;
+            }
             if !panel.options.is_empty() {
                 let opt = panel.options[0].clone();
                 run.apply_upgrade(&opt, &save, global.greed_stacks);
@@ -47,14 +50,17 @@ fn bot_drive(
                 }
                 panel.options.clear();
             }
-            chest.open = false;
-            shop.open = false;
-            *phase = RunPhase::Playing;
-            return;
         }
-        RunPhase::Dead => return,
-        _ => {}
+        chest.open = false;
+        shop.open = false;
+        *phase = RunPhase::Playing;
+        return;
     }
+    if matches!(*phase, RunPhase::Dead) {
+        return;
+    }
+
+    for (mut p, mut run, ptf, _is_local) in &mut q {
 
     // hurt -> kite away from the nearest threat; healthy -> chase gems; else wander
     let mut heading = None;
@@ -99,11 +105,12 @@ fn bot_drive(
     let speed = PLAYER_RUN_SPEED * run.move_speed_mult() * 0.85;
     p.vel_t = heading * speed;
     p.facing = heading;
+    }
     let _ = &planet;
 }
 
 /// Fail-fast sanity checks each tick.
-fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
+fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
     if alive > ENEMY_CAP + 400 {
@@ -229,6 +236,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 bot_drive,
                 crate::combat::apply_hits,
                 crate::combat::apply_player_hits,
+                crate::director::downed_watch,
                 crate::pickups::kill_drops,
                 crate::combat::fader_update,
                 crate::player::player_physics,
@@ -310,7 +318,12 @@ fn headless_enter(
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true);
+    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
+    // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
+    // work is testable without launching two windows by hand.
+    if std::env::args().any(|a| a == "--coop2") {
+        crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
+    }
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
     commands.insert_resource(planet);
 }

@@ -39,7 +39,7 @@ pub fn comet_system(
     mut shake: ResMut<Shake>,
     mut hitstop: ResMut<Hitstop>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(&Player, &PlayerState, &Transform)>,
+    q_player: Query<(&Player, &PlayerState, &Transform), With<crate::player::LocalPlayer>>,
     enemies: Query<&Enemy, Without<Pot>>,
     mut hits: MessageWriter<HitMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -98,6 +98,7 @@ pub fn comet_system(
                 if enemies.get(e).map(|en| en.speed > 0.0).unwrap_or(false) {
                     let kdir = (epos - ppos).normalize_or_zero();
                     hits.write(HitMsg {
+            source: None, // world event, not an astronaut
                         target: e,
                         amount: 300.0 + peak as f32 * 18.0,
                         crit: true,

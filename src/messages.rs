@@ -6,6 +6,10 @@ use bevy::prelude::*;
 /// Damage dealt to an enemy-side entity (enemies, bosses, pots). `amount` is final.
 #[derive(Message)]
 pub struct HitMsg {
+    /// The astronaut that dealt this hit; `None` = world/environment (e.g. comet cash-out).
+    /// Makes cryo-slow and lifesteal resolve against the actual SHOOTER rather than
+    /// whichever player a `.single()` happened to return.
+    pub source: Option<Entity>,
     pub target: Entity,
     pub amount: f32,
     pub crit: bool,
@@ -15,6 +19,10 @@ pub struct HitMsg {
 /// Player took a hit (pre-mitigation).
 #[derive(Message)]
 pub struct PlayerHitMsg {
+    /// WHICH astronaut got hit. Required rather than Option: in co-op an unaddressed
+    /// player hit has no sane fallback, and making it mandatory forces every writer to
+    /// answer the question instead of silently damaging whoever `.single()` returned.
+    pub victim: Entity,
     pub amount: f32,
     pub from: Vec3,
     pub attacker: Option<Entity>,

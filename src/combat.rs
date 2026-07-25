@@ -114,6 +114,10 @@ pub enum ProjKind {
 
 #[derive(Component)]
 pub struct Projectile {
+    /// The astronaut that created this. Without it, two players with the same orbital
+    /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
+    /// from the host's shoulder.
+    pub owner: Entity,
     pub dir: Vec3,     // unit direction from core
     pub heading: Vec3, // tangent unit
     pub speed: f32,
@@ -127,6 +131,10 @@ pub struct Projectile {
 
 #[derive(Component)]
 pub struct Drone {
+    /// The astronaut that created this. Without it, two players with the same orbital
+    /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
+    /// from the host's shoulder.
+    pub owner: Entity,
     pub weapon: WeaponKind,
     pub idx: usize,
     pub count: usize,
@@ -138,6 +146,10 @@ pub struct Drone {
 
 #[derive(Component)]
 pub struct Beam {
+    /// The astronaut that created this. Without it, two players with the same orbital
+    /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
+    /// from the host's shoulder.
+    pub owner: Entity,
     pub heading: Vec3,
     pub range: f32,
     pub width: f32,
@@ -154,6 +166,10 @@ pub struct Fader {
 
 #[derive(Component)]
 pub struct AuraVis {
+    /// The astronaut that created this. Without it, two players with the same orbital
+    /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
+    /// from the host's shoulder.
+    pub owner: Entity,
     pub weapon: WeaponKind,
 }
 
@@ -198,7 +214,7 @@ pub fn weapon_fire(
     time: Res<Time>,
     assets: Res<WeaponAssets>,
     _planet: Res<CurrentPlanet>,
-    mut q_player: Query<(&Player, &mut PlayerState, &Transform)>,
+    mut q_player: Query<(Entity, &Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>)>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
     q_pots: Query<(), With<Pot>>,
     q_drones: Query<(Entity, &Drone)>,
@@ -210,19 +226,23 @@ pub fn weapon_fire(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, mut run, ptf)) = q_player.single_mut() else { return };
     let mut rng = rand::thread_rng();
+
+    // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
+    let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32)> = HashMap::new();
+    let mut want_auras: Vec<(Entity, WeaponKind)> = Vec::new();
+    let mut player_pos: Vec<(Entity, Vec3)> = Vec::new();
+
+    for (pe, player, mut run, ptf, is_local) in &mut q_player {
+    if run.dead {
+        continue; // a downed astronaut stops firing
+    }
+    player_pos.push((pe, ptf.translation));
     let atk_speed = run.attack_speed();
     let dmg_mult = run.damage_mult();
     let stats = run.stats.clone();
     let crit_ch = run.crit_chance(); // captured before the &mut weapons loop (Reticle pulse)
     let aura_sc = run.aura_scale(); // Aurora's fields swell while sprinting
-
-    // Reconcile drone + aura entities with owned weapons.
-    let mut want_drones: HashMap<WeaponKind, (usize, f32, f32, f32)> = HashMap::new();
-    let mut want_auras: Vec<WeaponKind> = Vec::new();
-
-    let weapons_snapshot: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
 
     for wi in run.weapons.iter_mut() {
         let def = wi.kind.def();
@@ -233,12 +253,12 @@ pub fn weapon_fire(
 
         match def.behavior {
             Behavior::Orbit { radius, deg_per_sec } => {
-                want_drones.insert(wi.kind, (count as usize, dmg, radius * size, deg_per_sec));
+                want_drones.insert((pe, wi.kind), (count as usize, dmg, radius * size, deg_per_sec));
                 continue;
             }
             Behavior::Aura { radius, slow } => {
                 let radius = radius * aura_sc;
-                want_auras.push(wi.kind);
+                want_auras.push((pe, wi.kind));
                 wi.cd -= dt * atk_speed;
                 if wi.cd <= 0.0 {
                     wi.cd = def.cooldown;
@@ -248,6 +268,7 @@ pub fn weapon_fire(
                             let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                             let elite = if en.elite { stats.elite_damage } else { 1.0 };
                             hits.write(HitMsg {
+                                source: Some(pe),
                                 target: e,
                                 amount: dmg * cm * elite,
                                 crit,
@@ -294,6 +315,7 @@ pub fn weapon_fire(
                         let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                         let elite = if en.elite { stats.elite_damage } else { 1.0 };
                         hits.write(HitMsg {
+                            source: Some(pe),
                             target: e,
                             amount: dmg * cm * elite,
                             crit,
@@ -323,6 +345,7 @@ pub fn weapon_fire(
                     let h = Quat::from_axis_angle(up, ang) * aim;
                     commands.spawn((
                         Projectile {
+                            owner: pe,
                             dir: player.dir,
                             heading: h,
                             speed: speed * stats.proj_speed,
@@ -346,6 +369,7 @@ pub fn weapon_fire(
                     let h = Quat::from_axis_angle(up, ang) * aim;
                     commands.spawn((
                         Projectile {
+                            owner: pe,
                             dir: player.dir,
                             heading: h,
                             speed: speed * stats.proj_speed,
@@ -370,6 +394,7 @@ pub fn weapon_fire(
                     let out_time = range / speed;
                     commands.spawn((
                         Projectile {
+                            owner: pe,
                             dir: player.dir,
                             heading: h,
                             speed: speed * stats.proj_speed,
@@ -390,6 +415,7 @@ pub fn weapon_fire(
             Behavior::Beam { range, width } => {
                 commands.spawn((
                     Beam {
+                        owner: pe,
                         heading: aim,
                         range: range * size,
                         width: width * size,
@@ -427,7 +453,7 @@ pub fn weapon_fire(
                 for (e, pos) in &chain {
                     let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                     let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
-                    hits.write(HitMsg { target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
+                    hits.write(HitMsg { source: Some(pe), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
                     // zap segment visual
                     let mid = (prev + *pos) / 2.0;
                     let len = prev.distance(*pos);
@@ -452,6 +478,7 @@ pub fn weapon_fire(
                     let h = Quat::from_axis_angle(up, rng.gen_range(-0.6..0.6)) * aim;
                     commands.spawn((
                         Projectile {
+                            owner: pe,
                             dir: player.dir,
                             heading: h,
                             speed: speed * stats.proj_speed,
@@ -472,19 +499,22 @@ pub fn weapon_fire(
             Behavior::Orbit { .. } | Behavior::Aura { .. } => unreachable!(),
         }
     }
+    let _ = is_local;
+    }
 
     // ------ drone reconciliation
-    let mut have: HashMap<WeaponKind, usize> = HashMap::new();
+    let mut have: HashMap<(Entity, WeaponKind), usize> = HashMap::new();
     for (e, d) in q_drones.iter() {
-        let alive = want_drones.get(&d.weapon);
+        let alive = want_drones.get(&(d.owner, d.weapon));
         match alive {
             Some((want_count, dmg, radius, dps)) => {
-                have.entry(d.weapon).and_modify(|c| *c += 1).or_insert(1);
+                have.entry((d.owner, d.weapon)).and_modify(|c| *c += 1).or_insert(1);
                 if d.idx >= *want_count {
                     commands.entity(e).despawn();
                 } else {
                     // keep tuning current
                     commands.entity(e).insert(Drone {
+                        owner: d.owner,
                         weapon: d.weapon,
                         idx: d.idx,
                         count: *want_count,
@@ -500,11 +530,13 @@ pub fn weapon_fire(
             }
         }
     }
-    for (kind, (count, dmg, radius, dps)) in &want_drones {
-        let existing = have.get(kind).copied().unwrap_or(0);
+    for ((owner, kind), (count, dmg, radius, dps)) in &want_drones {
+        let existing = have.get(&(*owner, *kind)).copied().unwrap_or(0);
+        let home = player_pos.iter().find(|(e, _)| e == owner).map(|(_, p)| *p).unwrap_or(Vec3::ZERO);
         for idx in existing..*count {
             commands.spawn((
                 Drone {
+                    owner: *owner,
                     weapon: *kind,
                     idx,
                     count: *count,
@@ -515,7 +547,7 @@ pub fn weapon_fire(
                 },
                 Mesh3d(assets.drone_mesh.clone()),
                 MeshMaterial3d(assets.mats[kind].clone()),
-                Transform::from_translation(ptf.translation),
+                Transform::from_translation(home),
                 StageScoped,
             ));
         }
@@ -523,25 +555,25 @@ pub fn weapon_fire(
 
     // ------ aura visuals reconciliation
     for (e, a) in q_auras.iter() {
-        if !want_auras.contains(&a.weapon) {
+        if !want_auras.contains(&(a.owner, a.weapon)) {
             commands.entity(e).despawn();
         }
     }
-    let existing_auras: Vec<WeaponKind> = q_auras.iter().map(|(_, a)| a.weapon).collect();
-    for kind in want_auras {
-        if !existing_auras.contains(&kind) {
+    let existing_auras: Vec<(Entity, WeaponKind)> = q_auras.iter().map(|(_, a)| (a.owner, a.weapon)).collect();
+    for (owner, kind) in want_auras {
+        if !existing_auras.contains(&(owner, kind)) {
             if let Behavior::Aura { radius, .. } = kind.def().behavior {
+                let home = player_pos.iter().find(|(e, _)| *e == owner).map(|(_, p)| *p).unwrap_or(Vec3::ZERO);
                 commands.spawn((
-                    AuraVis { weapon: kind },
+                    AuraVis { owner, weapon: kind },
                     Mesh3d(assets.aura_mesh.clone()),
                     MeshMaterial3d(assets.aura_mats[&kind].clone()),
-                    Transform::from_translation(ptf.translation).with_scale(Vec3::splat(radius)),
+                    Transform::from_translation(home).with_scale(Vec3::splat(radius)),
                     StageScoped,
                 ));
             }
         }
     }
-    let _ = weapons_snapshot;
 }
 
 /// Move player projectiles, collide with the swarm via the spatial hash.
@@ -561,10 +593,13 @@ pub fn projectile_move(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
 
     for (pe, mut p, mut tf) in &mut q {
+        let Ok((player, run, ptf)) = q_player.get(p.owner) else {
+            commands.entity(pe).despawn();
+            continue;
+        };
         p.life -= dt;
 
         // steering per kind
@@ -609,7 +644,7 @@ pub fn projectile_move(
 
         if p.life <= 0.0 {
             if let ProjKind::Rocket { aoe } = p.kind {
-                explode(&mut commands, &hash, &enemies, &run, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                explode(&mut commands, &hash, &enemies, &run, p.owner, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
             }
             commands.entity(pe).despawn();
             continue;
@@ -642,13 +677,14 @@ pub fn projectile_move(
             let reach = hit_r + en.scale * 0.5;
             if tpos.distance_squared(tf.translation) < reach * reach {
                 if let ProjKind::Rocket { aoe } = p.kind {
-                    explode(&mut commands, &hash, &enemies, &run, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                    explode(&mut commands, &hash, &enemies, &run, p.owner, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
                     exploded = true;
                     break;
                 }
                 let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                 let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                 hits.write(HitMsg {
+                    source: Some(p.owner),
                     target: te,
                     amount: p.damage * cm * elite,
                     crit,
@@ -666,7 +702,6 @@ pub fn projectile_move(
             commands.entity(pe).despawn();
         }
     }
-    let _ = player;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,6 +710,8 @@ fn explode(
     hash: &SpatialHash,
     enemies: &Query<&Enemy>,
     run: &PlayerState,
+    // the astronaut whose rocket this was — carried so AoE damage credits the right player
+    owner: Entity,
     pos: Vec3,
     aoe: f32,
     damage: f32,
@@ -689,7 +726,7 @@ fn explode(
             let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, rng);
             let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
             let kdir = (tpos - pos).normalize_or_zero();
-            hits.write(HitMsg { target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0 });
+            hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0 });
         }
     }
     if let Some(pa) = particles {
@@ -711,11 +748,11 @@ pub fn drone_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
     let t = time.elapsed_secs();
 
     for (mut d, mut tf) in &mut q {
+        let Ok((player, run, ptf)) = q_player.get(d.owner) else { continue };
         d.tick = (d.tick - dt).max(0.0);
         let base = t * d.deg_per_sec.to_radians() + d.idx as f32 / d.count.max(1) as f32 * std::f32::consts::TAU;
         let up = player.dir;
@@ -733,6 +770,7 @@ pub fn drone_update(
                     let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                     hits.write(HitMsg {
+                        source: Some(d.owner),
                         target: te,
                         amount: d.damage * cm * elite,
                         crit,
@@ -761,10 +799,13 @@ pub fn beam_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
 
     for (e, mut beam, mut tf) in &mut q {
+        let Ok((player, run, ptf)) = q_player.get(beam.owner) else {
+            commands.entity(e).despawn();
+            continue;
+        };
         beam.tick_cd -= dt;
         let up = player.dir;
         let origin = ptf.translation + up * 0.6;
@@ -789,7 +830,7 @@ pub fn beam_update(
                 if perp < beam.width + en.scale * 0.5 {
                     let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
-                    hits.write(HitMsg { target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO });
+                    hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO });
                 }
             }
         }
@@ -799,18 +840,15 @@ pub fn beam_update(
 /// Aura visuals follow the player and pulse; cryo slow applied on hit below.
 pub fn aura_follow(
     time: Res<Time>,
-    q_run: Query<&PlayerState>,
-    q_player: Query<&Transform, (With<Player>, Without<AuraVis>)>,
+    q_player: Query<(&PlayerState, &Transform), (With<Player>, Without<AuraVis>)>,
     mut q: Query<(&AuraVis, &mut Transform), Without<Player>>,
 ) {
-    let Ok(ptf) = q_player.single() else { return };
-    let Ok(run) = q_run.single() else { return };
     let t = time.elapsed_secs();
-    let aura_sc = run.aura_scale();
     for (a, mut tf) in &mut q {
+        let Ok((run, ptf)) = q_player.get(a.owner) else { continue };
         if let Behavior::Aura { radius, .. } = a.weapon.def().behavior {
             tf.translation = ptf.translation;
-            tf.scale = Vec3::splat(radius * aura_sc * (1.0 + (t * 3.0).sin() * 0.04));
+            tf.scale = Vec3::splat(radius * run.aura_scale() * (1.0 + (t * 3.0).sin() * 0.04));
         }
     }
 }
@@ -850,13 +888,18 @@ pub fn apply_hits(
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     let mut rng = rand::thread_rng();
-    let Ok(mut ps) = q_ps.single_mut() else { return };
-    let has_cryo = ps
-        .weapons
-        .iter()
-        .any(|w| matches!(w.kind, WeaponKind::CryoVent | WeaponKind::AbsoluteZero));
 
     for msg in reader.read() {
+        // Resolve cryo against THIS hit's shooter, not an arbitrary player.
+        let has_cryo = msg
+            .source
+            .and_then(|s| q_ps.get(s).ok())
+            .map(|ps| {
+                ps.weapons
+                    .iter()
+                    .any(|w| matches!(w.kind, WeaponKind::CryoVent | WeaponKind::AbsoluteZero))
+            })
+            .unwrap_or(false);
         // Pots first: they piggyback on the enemy hash but die as pots.
         if let Ok((mut pot, tf)) = pots.get_mut(msg.target) {
             if pot.broken {
@@ -895,9 +938,11 @@ pub fn apply_hits(
             if msg.crit {
                 sfx.write(SfxMsg(Sfx::Crit));
             }
-            // lifesteal: chance to heal 1
-            if ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
-                ps.hp = (ps.hp + 1.0).min(ps.stats.max_hp);
+            // lifesteal: chance to heal 1 — heals the SHOOTER, not an arbitrary player
+            if let Some(mut ps) = msg.source.and_then(|s| q_ps.get_mut(s).ok()) {
+                if ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
+                    ps.hp = (ps.hp + 1.0).min(ps.stats.max_hp);
+                }
             }
             if e.hp <= 0.0 {
                 let is_boss = boss.map(|b| b.kind.def().is_stage_boss).unwrap_or(false);
@@ -928,16 +973,19 @@ pub fn apply_hits(
 pub fn apply_player_hits(
     mut reader: MessageReader<PlayerHitMsg>,
     mut run: ResMut<RunState>,
-    mut q_ps: Query<(&mut PlayerState, &Transform), With<Player>>,
+    mut q_ps: Query<(&mut PlayerState, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
     mut shake: ResMut<Shake>,
     mut phase: ResMut<RunPhase>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    let Ok((mut run_ps, ptf)) = q_ps.single_mut() else { return };
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
+        // Address the hit to its actual victim. `continue`, never unwrap: messages are
+        // double-buffered, so a victim CAN be despawned between the write and this read
+        // (stage change, disconnect).
+        let Ok((mut run_ps, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
         if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
             continue;
         }
@@ -956,21 +1004,21 @@ pub fn apply_player_hits(
         run_ps.shield_cd = 5.0;
         run_ps.hp -= amount;
         run_ps.iframes = 0.4;
-        shake.add(0.12);
-        sfx.write(SfxMsg(Sfx::Hurt));
+        if is_local {
+            shake.add(0.12);
+            sfx.write(SfxMsg(Sfx::Hurt));
+        }
 
         // thorns
         if run_ps.stats.thorns > 0.0 {
             if let Some(att) = msg.attacker {
-                hits.write(HitMsg { target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(msg.victim), target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO });
             }
         }
 
         if run_ps.hp <= 0.0 {
             run_ps.hp = 0.0;
             run_ps.dead = true;
-            run.result = Some(crate::run::RunResult::Death);
-            *phase = RunPhase::Dead;
         }
     }
 }

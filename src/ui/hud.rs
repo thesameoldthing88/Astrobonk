@@ -314,7 +314,7 @@ pub fn despawn_hud(mut commands: Commands, q: Query<Entity, With<HudRoot>>) {
 #[allow(clippy::type_complexity)]
 pub fn update_hud(
     run: Res<RunState>,
-    q_ps: Query<&PlayerState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     prompt: Res<InteractPrompt>,
     mut sets: ParamSet<(
         Query<&mut Text, With<TimerText>>,
@@ -384,7 +384,7 @@ pub fn update_hud(
 /// Rebuild the weapon tray when loadout changes.
 pub fn update_weapon_row(
     mut commands: Commands,
-    q_ps: Query<&PlayerState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     mut cache: Local<Vec<(WeaponKind, u32)>>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {

@@ -226,6 +226,7 @@ fn main() {
                 player::player_upkeep,
                 fx::update_particles,
                 director::stage_transition,
+                director::downed_watch,
                 director::death_watch,
             )
                 .run_if(in_state(AppState::InRun)),
@@ -334,7 +335,7 @@ fn enter_run(
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true);
+    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     interact::spawn_interactables(
         &mut commands,
         &mut meshes,

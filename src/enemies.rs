@@ -97,6 +97,10 @@ pub struct Beamer {
     pub cd: f32,
     pub charging: f32, // >0 while painting the aim line
     pub aim: Vec3,     // locked tangent heading near the end of the charge
+    /// Who this beamer committed to when the charge began. LATCHED on purpose: re-picking
+    /// the nearest astronaut every frame during a 1.1s telegraph would make the aim line
+    /// snap between players mid-sweep, turning the dodge tell into a lie.
+    pub target: Option<Entity>,
 }
 
 /// The visible aim line while a Beamer charges.
@@ -524,7 +528,7 @@ fn spawn_enemy(
         cmd.insert(Buried { timer: 1.3 });
     }
     if kind == EnemyKind::Beamer {
-        cmd.insert(Beamer { cd: rng.gen_range(2.0..4.0), charging: 0.0, aim: Vec3::ZERO });
+        cmd.insert(Beamer { cd: rng.gen_range(2.0..4.0), charging: 0.0, aim: Vec3::ZERO, target: None });
     }
     if kind == EnemyKind::Lobber {
         cmd.insert(Lobber { cd: rng.gen_range(2.5..5.0) });
@@ -547,11 +551,21 @@ pub fn director_spawn(
     if dt <= 0.0 {
         return;
     }
-    let Ok(player) = q_player.single() else { return };
+    // Anchors to spawn around — one per living astronaut, round-robined below so each
+    // player gets their own share of the horde arriving over THEIR horizon.
+    let anchors: Vec<Vec3> = q_player.iter().map(|p| p.dir).collect();
+    if anchors.is_empty() {
+        return;
+    }
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_enemies.iter().count();
     let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
+
+    // Party scaling (GDD): more players means more horde, but sub-linearly — a full
+    // budget per player doubles density and blows the cap, while no bump at all gives
+    // each player half a horde.
+    let player_scale = [1.0, 1.75, 2.4, 3.0][anchors.len().clamp(1, 4) - 1];
 
     let rate = if run.static_active {
         10.0 + run.static_timer * 0.15
@@ -559,7 +573,7 @@ pub fn director_spawn(
         // gentler opening so a level-1 player can learn; ramp still bites by mid-game.
         let t = run.elapsed / 60.0;
         (1.0 + t * 2.1) * (1.0 + run.difficulty)
-    };
+    } * player_scale;
     director.spawn_bank += rate * dt;
     director.tick += dt;
     director.elite_timer -= dt;
@@ -575,16 +589,18 @@ pub fn director_spawn(
     }
     director.spawn_bank -= budget as f32;
 
-    let room = ENEMY_CAP.saturating_sub(alive);
+    let cap = ((ENEMY_CAP as f32) * player_scale) as usize;
+    let room = cap.saturating_sub(alive);
     let n = budget.min(room);
-    for _ in 0..n {
+    for i in 0..n {
+        let anchor = anchors[i % anchors.len()];
         let heading = {
-            let (t, b) = sphere::tangent_frame(player.dir);
+            let (t, b) = sphere::tangent_frame(anchor);
             let a = rng.gen_range(0.0..std::f32::consts::TAU);
             t * a.cos() + b * a.sin()
         };
         let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
-        let dir = sphere::offset_dir(player.dir, heading, arc, planet.radius);
+        let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
             spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp_mult, dmg_mult, rng);
@@ -601,7 +617,7 @@ pub fn director_spawn(
         // Burrowers ambush: spawn close.
         let dir = if kind == EnemyKind::Burrower {
             let arc = rng.gen_range(9.0..16.0);
-            sphere::offset_dir(player.dir, heading, arc, planet.radius)
+            sphere::offset_dir(anchor, heading, arc, planet.radius)
         } else {
             dir
         };
@@ -707,12 +723,16 @@ pub fn boss_phase_system(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     mut shake: ResMut<Shake>,
-    q_player: Query<&Player>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q_boss: Query<(&mut Enemy, &mut Boss)>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    let Ok(player) = q_player.single() else { return };
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps)| !ps.dead)
+        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .collect();
     let mut rng = rand::thread_rng();
     let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
 
@@ -753,12 +773,17 @@ pub fn boss_phase_system(
 
         // encirclement burst: a ring of adds crests the horizon around the player
         let ring = 8 + want as usize * 3;
-        let (t, b) = sphere::tangent_frame(player.dir);
+        // Encircle whoever this boss is closest to; if nobody is up, skip the ring but
+        // keep the enrage above — phases must not depend on finding a player.
+        let Some(victim) = crate::player::nearest_astronaut(enemy.dir, &snaps, planet.radius) else {
+            continue;
+        };
+        let (t, b) = sphere::tangent_frame(victim.dir);
         for i in 0..ring {
             let a = i as f32 / ring as f32 * std::f32::consts::TAU + rng.gen_range(-0.2..0.2);
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
-            let dir = sphere::offset_dir(player.dir, heading, arc, planet.radius);
+            let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
             let mix = EnemyKind::mix(run.elapsed.max(300.0));
             let kind = mix[rng.gen_range(0..mix.len())];
             let elite = want == 2 && rng.gen_bool(0.25);
@@ -774,7 +799,7 @@ pub fn anubot_beam_system(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     run: Res<RunState>,
-    q_player: Query<&Transform, (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
+    q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
     mut q_boss: Query<(Entity, &mut Transform, &Enemy, &Boss, &mut AnubotBeam)>,
     mut q_vis: Query<
         (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
@@ -786,7 +811,8 @@ pub fn anubot_beam_system(
     if dt <= 0.0 {
         return;
     }
-    let ppos = q_player.single().ok().map(|t| t.translation);
+    // Every astronaut in the corridor is hit — a sweeping beam is AoE, not single-target.
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     let t_now = time.elapsed_secs();
     // pass 1: advance each beam, apply damage, snapshot for the visuals
     let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
@@ -822,16 +848,17 @@ pub fn anubot_beam_system(
 
         // damage while firing
         if beam.state == 2 {
-            if let Some(pp) = ppos {
+            for (pe, pp) in ppos.iter().copied() {
                 {
                     let v = pp - tf.translation;
                     let along = v.dot(heading);
                     let perp = (v - heading * along - up * v.dot(up)).length();
                     if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
                         writer.write(PlayerHitMsg {
+                            victim: pe,
                             amount: enemy.damage * 1.2,
                             from: tf.translation,
-                            attacker: None,
+                            attacker: Some(e),
                         });
                     }
                 }
@@ -892,7 +919,7 @@ pub fn debug_spawn_boss(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
-    q_player: Query<&Player>,
+    q_player: Query<&Player, With<crate::player::LocalPlayer>>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     if !keys.just_pressed(KeyCode::KeyB) {
@@ -916,7 +943,7 @@ pub fn craterpillar_update(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<&Transform, (With<Player>, Without<CraterpillarSegment>, Without<CraterpillarHead>)>,
+    q_player: Query<(Entity, &Transform), (With<Player>, Without<CraterpillarSegment>, Without<CraterpillarHead>)>,
     mut set: ParamSet<(
         Query<(Entity, &Transform, &mut CraterpillarHead)>,
         Query<(Entity, &CraterpillarSegment, &mut Transform)>,
@@ -941,7 +968,7 @@ pub fn craterpillar_update(
     }
 
     // 2) place segments along their head's trail + contact damage
-    let ptf = q_player.single().ok().map(|t| t.translation);
+    let ptf: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     for (se, seg, mut stf) in &mut set.p1() {
         let Some(trail) = snapshots.get(&seg.head) else {
             commands.entity(se).despawn(); // head is gone → worm dies
@@ -978,10 +1005,10 @@ pub fn craterpillar_update(
         stf.scale = Vec3::new(seg.scale / sy.sqrt(), seg.scale * sy, seg.scale / sy.sqrt());
 
         {
-            if let Some(pp) = ptf {
+            for (pe, pp) in ptf.iter().copied() {
                 let reach = seg.scale * 0.6 + PLAYER_RADIUS + 0.25;
                 if pos.distance_squared(pp) < reach * reach {
-                    writer.write(PlayerHitMsg { amount: seg.damage, from: pos, attacker: None });
+                    writer.write(PlayerHitMsg { victim: pe, amount: seg.damage, from: pos, attacker: None });
                 }
             }
         }
@@ -993,7 +1020,7 @@ pub fn enemy_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    q_player: Query<(&Player, &Transform), Without<Enemy>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
     mut q: Query<
         (Entity, &mut Enemy, &mut Transform),
         (Without<Buried>, Without<crate::interact::Pot>),
@@ -1003,12 +1030,25 @@ pub fn enemy_move(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
-    let player_dir = player.dir;
-    let player_pos = ptf.translation;
+    // Snapshot BEFORE the mutable loop: reading q_player inside `&mut q` is a B0001
+    // conflict, and with up to 1200 enemies this must not be rebuilt per enemy.
+    // Downed astronauts are not targets.
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps, _)| !ps.dead)
+        .map(|(e, p, _, tf)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
+        .collect();
+    if snaps.is_empty() {
+        return;
+    }
     let t_now = time.elapsed_secs();
 
     for (entity, mut e, mut tf) in &mut q {
+        // Each enemy chases whoever is closest ALONG THE SURFACE.
+        let target = crate::player::nearest_astronaut(e.dir, &snaps, planet.radius)
+            .unwrap_or(snaps[0]);
+        let player_dir = target.dir;
+        let player_pos = target.pos;
         e.contact_cd = (e.contact_cd - dt).max(0.0);
         e.flash = (e.flash - dt * 6.0).max(0.0);
         e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
@@ -1138,7 +1178,7 @@ pub fn burrower_emerge(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     assets: Res<EnemyAssets>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(Entity, &Transform), With<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
     mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), Without<Player>>,
 ) {
@@ -1146,7 +1186,7 @@ pub fn burrower_emerge(
     if dt <= 0.0 {
         return;
     }
-    let Ok(ptf) = q_player.single() else { return };
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     for (e, enemy, mut b, mut tf) in &mut q {
         b.timer -= dt;
         // rumble under the surface
@@ -1154,9 +1194,11 @@ pub fn burrower_emerge(
         tf.translation = planet.surface_point(enemy.dir) - enemy.dir * (depth * 1.2);
         if b.timer <= 0.0 {
             commands.entity(e).remove::<Buried>();
-            // eruption damage if the player is on top of it
-            if tf.translation.distance(ptf.translation) < 2.6 {
-                writer.write(PlayerHitMsg { amount: enemy.damage, from: tf.translation, attacker: Some(e) });
+            // eruption damage to anyone standing on top of it
+            for (pe, pp) in ppos.iter().copied() {
+                if tf.translation.distance(pp) < 2.6 {
+                    writer.write(PlayerHitMsg { victim: pe, amount: enemy.damage, from: tf.translation, attacker: Some(e) });
+                }
             }
             commands.spawn((
                 Mesh3d(assets.ring_mesh.clone()),
@@ -1175,22 +1217,35 @@ pub fn burrower_emerge(
 pub fn enemy_contact(
     time: Res<Time>,
     run: Res<RunState>,
-    q_player: Query<(&Player, &Transform), Without<Enemy>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
     mut q: Query<(Entity, &mut Enemy, &Transform), Without<Buried>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     if time.delta_secs() <= 0.0 {
         return;
     }
-    let Ok((_, ptf)) = q_player.single() else { return };
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps, _)| !ps.dead)
+        .map(|(e, p, _, tf)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
+        .collect();
+    if snaps.is_empty() {
+        return;
+    }
     for (entity, mut e, tf) in &mut q {
         if e.contact_cd > 0.0 || e.speed == 0.0 {
             continue;
         }
         let reach = e.scale * 0.55 + PLAYER_RADIUS + 0.25;
-        if tf.translation.distance_squared(ptf.translation) < reach * reach {
+        let Some(victim) = crate::player::nearest_astronaut(e.dir, &snaps, 1.0) else { continue };
+        if tf.translation.distance_squared(victim.pos) < reach * reach {
             e.contact_cd = CONTACT_TICK;
-            writer.write(PlayerHitMsg { amount: e.damage, from: tf.translation, attacker: Some(entity) });
+            writer.write(PlayerHitMsg {
+                victim: victim.entity,
+                amount: e.damage,
+                from: tf.translation,
+                attacker: Some(entity),
+            });
         }
     }
 }
@@ -1202,19 +1257,27 @@ pub fn spitter_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<&Player>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 || storm.player_inside {
         return; // hidden in the dust storm — ranged enemies can't see you
     }
-    let Ok(player) = q_player.single() else { return };
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps)| !ps.dead)
+        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .collect();
+    if snaps.is_empty() {
+        return;
+    }
     for (e, mut s, tf) in &mut q {
         s.cd -= dt;
         if s.cd > 0.0 {
             continue;
         }
+        let Some(player) = crate::player::nearest_astronaut(e.dir, &snaps, planet.radius) else { continue };
         let arc = sphere::arc_dist(e.dir, player.dir, planet.radius);
         // UFOs zap faster, harder-to-dodge bolts from above
         let (range, cooldown, speed) = if e.kind == crate::content::enemies::EnemyKind::Ufo {
@@ -1247,7 +1310,7 @@ pub fn beamer_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(&Player, &Transform), Without<Enemy>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
     mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
     mut q_lines: Query<(Entity, &AimLine, &mut Transform), (Without<Enemy>, Without<Player>)>,
 ) {
@@ -1265,15 +1328,33 @@ pub fn beamer_attack(
         }
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps, _)| !ps.dead)
+        .map(|(en, p, _, tf)| crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation })
+        .collect();
+    if snaps.is_empty() {
+        return;
+    }
 
     for (entity, e, mut b, tf) in &mut q {
+        // While charging, stay on the LATCHED target (if it still exists); otherwise pick
+        // the nearest astronaut fresh.
+        let locked = b
+            .target
+            .filter(|_| b.charging > 0.0)
+            .and_then(|t| snaps.iter().copied().find(|s| s.entity == t));
+        let Some(player) = locked.or_else(|| crate::player::nearest_astronaut(e.dir, &snaps, planet.radius))
+        else {
+            continue;
+        };
+        let ptf = player;
         let arc = sphere::arc_dist(e.dir, player.dir, planet.radius);
         if b.charging > 0.0 {
             b.charging -= dt;
             // track the player until the final quarter second, then hold the lock
             if b.charging > 0.25 {
-                let v = ptf.translation - tf.translation;
+                let v = ptf.pos - tf.translation;
                 let vt = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
                 if vt != Vec3::ZERO {
                     b.aim = vt;
@@ -1309,7 +1390,8 @@ pub fn beamer_attack(
         b.cd -= dt;
         if b.cd <= 0.0 && arc < 26.0 {
             b.charging = 1.1;
-            let v = ptf.translation - tf.translation;
+            b.target = Some(player.entity); // commit for the whole telegraph
+            let v = ptf.pos - tf.translation;
             b.aim = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
             commands.spawn((
                 AimLine { owner: entity },
@@ -1347,19 +1429,27 @@ pub fn lobber_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<&Player>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 || storm.player_inside {
         return; // can't range you through the dust
     }
-    let Ok(player) = q_player.single() else { return };
+    let snaps: Vec<crate::player::AstronautSnap> = q_player
+        .iter()
+        .filter(|(_, _, ps)| !ps.dead)
+        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .collect();
+    if snaps.is_empty() {
+        return;
+    }
     for (e, mut l, tf) in &mut q {
         l.cd -= dt;
         if l.cd > 0.0 {
             continue;
         }
+        let Some(player) = crate::player::nearest_astronaut(e.dir, &snaps, planet.radius) else { continue };
         let arc = sphere::arc_dist(e.dir, player.dir, planet.radius);
         if arc < 24.0 {
             l.cd = 4.5;
@@ -1414,7 +1504,7 @@ pub fn enemy_projectiles(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(Entity, &Transform), With<Player>>,
     mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
@@ -1422,7 +1512,7 @@ pub fn enemy_projectiles(
     if dt <= 0.0 {
         return;
     }
-    let Ok(ptf) = q_player.single() else { return };
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     for (e, mut p, mut tf) in &mut q {
         p.life -= dt;
         if p.life <= 0.0 {
@@ -1435,8 +1525,13 @@ pub fn enemy_projectiles(
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
         tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
-        if tf.translation.distance_squared(ptf.translation) < 1.1 {
-            writer.write(PlayerHitMsg { amount: p.damage, from: tf.translation, attacker: None });
+        // first astronaut it touches eats it (a shot is consumed by one body)
+        if let Some((pe, _)) = ppos
+            .iter()
+            .copied()
+            .find(|(_, pp)| tf.translation.distance_squared(*pp) < 1.1)
+        {
+            writer.write(PlayerHitMsg { victim: pe, amount: p.damage, from: tf.translation, attacker: None });
             commands.entity(e).despawn();
         }
     }
@@ -1495,7 +1590,7 @@ pub fn telegraphs(
     time: Res<Time>,
     mut shake: ResMut<Shake>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(Entity, &Transform), With<Player>>,
     mut q: Query<(Entity, &mut Telegraph, &mut Transform), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
@@ -1503,21 +1598,23 @@ pub fn telegraphs(
     if dt <= 0.0 {
         return;
     }
-    let Ok(ptf) = q_player.single() else { return };
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     for (e, mut tg, mut tf) in &mut q {
         tg.timer -= dt;
         let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
         tf.scale = Vec3::splat(0.1 + t * tg.radius.max(0.6));
         if tg.timer <= 0.0 {
             if tg.damage > 0.0 {
-                let d = tf.translation.distance(ptf.translation);
-                let hit = if tg.ring {
-                    d < tg.radius + 1.0 && d > tg.radius * 0.35
-                } else {
-                    d < tg.radius + 0.6
-                };
-                if hit {
-                    writer.write(PlayerHitMsg { amount: tg.damage, from: tf.translation, attacker: None });
+                for (pe, pp) in ppos.iter().copied() {
+                    let d = tf.translation.distance(pp);
+                    let hit = if tg.ring {
+                        d < tg.radius + 1.0 && d > tg.radius * 0.35
+                    } else {
+                        d < tg.radius + 0.6
+                    };
+                    if hit {
+                        writer.write(PlayerHitMsg { victim: pe, amount: tg.damage, from: tf.translation, attacker: None });
+                    }
                 }
                 shake.add(0.22);
                 if let Some(pa) = &particles {
