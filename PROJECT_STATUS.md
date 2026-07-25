@@ -1,8 +1,9 @@
 # ASTROBONK — PROJECT STATUS
 
 **Canonical status doc. Update this + DEVLOG.md at every handoff.**
-Last update: 2026-07-13 (session 1b — playtest feedback #1 applied: flashlight,
-rugged terrain w/ craters + mountains, bigger worlds, per-planet flora, dimmer ambient)
+Last update: 2026-07-25 (co-op stages 2a-2e: netcode de-risked, transport, replication,
+input routing, remote player visuals. See "Co-op" below and the NETCODE NOTES block at the
+bottom of src/net.rs, which is the detailed running log.)
 
 ## What this is
 Megabonk-style 3D survivors roguelite on **tiny planets** (run all the way around;
@@ -47,6 +48,40 @@ cargo build --release          # ship build
 Controls: WASD move · mouse orbit · Space jump · Ctrl/C slide · E interact ·
 1-4 pick cards · R refresh · B banish · Esc pause
 
+## Co-op (in progress — host-authoritative listen server)
+`bevy_replicon 0.40.4` + `bevy_replicon_renet 0.16.0`. Versions are PINNED: the latest of
+either pulls Bevy 0.19 and you get two engines in one binary.
+
+**Working and verified with two live instances:**
+- Direct-IP transport, real handshake (`--host` / `--join <ip>` / `--port N`)
+- Input routing: `InputIntent` is written either by the keyboard (local) or by the network
+  (remote), so movement/physics/combat contain zero net code. A client predicts its own
+  astronaut; the host applies the client's intent to the astronaut it owns.
+- Replication down: `PlayerId`, `NetTransform{dir,height,facing}`, `PlayerVitals`
+- Identity: host sends `AssignPlayerId` (Ordered, repeated 500ms, Single-target)
+- Remote player visuals (`remote.rs`): teammates get the real rig, eased toward the
+  replicated pose, animated by the same `animate_rig` the local player uses
+
+**Not working yet — co-op looks right on the JOINER and is broken on the HOST.**
+MEASURED: with one client joined the host holds `local_players=2 player_states=2`, and
+~30 systems find the player with `.single()`, so they return `Err(MultipleEntities)` and
+silently early-return — HUD, weapon fire, pickups, interaction, level-up panels, enemy
+targeting. Two fail quieter still: Anubot's verdict beam and Craterpillar contact damage
+just stop dealing damage. **This is the next co-op ticket.** The client is unaffected by
+design (it keeps exactly one `Player`; remotes are visual only).
+
+Still open after that: enemy streaming with interest management (1,200 enemies cannot
+replicate per-entity — this is the real perf risk and could still change the design),
+shared XP / revives / per-player-count scaling, Steam relay for click-to-join, and a lobby
+UI. Nothing above needs port forwarding to TEST locally, but direct-IP does in the wild.
+
+**Co-op dev harness:** `--autodrop` (skip menus), `--botinput` (walk without a keyboard),
+`--netlog` (per-second pose/invariant dump). Two-instance repro:
+```
+astrobonk.exe --host --autodrop --botinput --netlog
+astrobonk.exe --join 127.0.0.1 --autodrop --botinput --netlog
+```
+
 ## Next steps (priority order)
 1. **HUMAN PLAYTEST** — balance is smoke-bot-calibrated only. Watch: early spawn
    pressure (softened once already), wrench feel, camera pitch limits, gem drought.
@@ -66,9 +101,16 @@ horde/bosses · `combat.rs` weapons/damage · `pickups.rs` drops/magnet · `run.
 run-state/upgrade-rolls · `director.rs` timer/stages/results · `interact.rs`
 chests/shrines/vendors · `content/` all data tables · `save.rs` meta ·
 `ui/` hud/panels/menus/numbers · `fx.rs` shake/hitstop/particles · `audio.rs` synth ·
-`headless.rs` smoke bot · `config.rs` tuning constants
+`headless.rs` smoke bot · `config.rs` tuning constants · `net.rs` co-op transport/
+replication/input routing (+ NETCODE NOTES running log) · `remote.rs` drawing teammates
 
 ## Known quirks
+- **The headless smoke is NOT deterministic, even with a fixed `--seed`.** Two runs of the
+  same build diverge, so it CANNOT be used as a before/after oracle for a refactor. Verify
+  refactors by inspection or targeted checks instead. (Determinism is worth fixing — co-op
+  and the daily planet both want it.)
+- Remote astronauts must NEVER get `Player`/`PlayerState` — see the header comment in
+  `remote.rs` for why (silent `.single()` failures, stomped transforms).
 - Pots piggyback on the `Enemy` component (hash membership) with `speed == 0` and are
   excluded from steering/targeting via `Without<Pot>` / pot checks — see combat.rs.
 - Charge-shrine loot + Moai + Microwave reuse the level-up ChoicePanel (`is_levelup: false`).
