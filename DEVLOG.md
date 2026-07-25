@@ -1,5 +1,15 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2g: ONBOARDING (first-run Mission-Control tutorial)
+- New `tutorial.rs`: 6 diegetic radio lines from Mission Control, triggered by what the
+  player is doing (move → auto-weapons → gems/level-up → slide → day/night+flashlight →
+  miniboss tell). Cyan lower-third line, fade in/out, ~5s each. No modal, no wall of text.
+- Fires ONLY on a brand-new player's first non-daily run (save.tutorial_done); veterans
+  (any prior run) auto-skip via migrate(); marked done after the first completed run.
+- DEV key T replays it (veterans can test). Regression smoke green, windowed render OK.
+- This closes the last "first 20 minutes" gap — the game now teaches itself for a stranger,
+  the prerequisite for a public demo.
+
 ## 2026-07-24 — Session 2f: DAILY SEEDED PLANET (cashing the determinism payoff)
 - Course-correction (told user): combat-RNG determinism (step 1b) isn't needed for our
   host-authoritative co-op plan or a fair daily; fixed-timestep is co-op-build-time. So the

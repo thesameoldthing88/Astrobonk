@@ -208,6 +208,18 @@ pub fn spawn_hud(mut commands: Commands) {
                 });
 
             // interact prompt
+            // first-run Mission-Control tutorial line
+            root.spawn((Node {
+                position_type: PositionType::Absolute,
+                bottom: Val::Px(210.0),
+                width: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },))
+                .with_children(|c| {
+                    c.spawn((crate::tutorial::TutorialText, txt("", FONT_MED, Color::srgb(0.55, 0.95, 1.0))));
+                });
+
             root.spawn((Node {
                 position_type: PositionType::Absolute,
                 bottom: Val::Px(150.0),

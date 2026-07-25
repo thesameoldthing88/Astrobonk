@@ -255,6 +255,11 @@ pub fn bank_results(
         None
     };
 
+    // a completed non-daily run means the player has seen the ropes
+    if !run.is_daily {
+        save.tutorial_done = true;
+    }
+
     let newly = save.check_quests();
     let quests_completed: Vec<String> = newly
         .iter()

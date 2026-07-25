@@ -49,6 +49,7 @@ pub struct MetaSave {
     // --- daily seeded planet ---
     pub daily_day: u64,   // day-number of the last daily played
     pub daily_best: u64,  // best score on that day
+    pub tutorial_done: bool, // first-run onboarding seen
 }
 
 impl Default for MetaSave {
@@ -98,6 +99,7 @@ impl Default for MetaSave {
             shake_scale: 1.0,
             daily_day: 0,
             daily_best: 0,
+            tutorial_done: false,
         }
     }
 }
@@ -135,6 +137,10 @@ impl MetaSave {
         }
         for p in &fresh.unlocked_planets {
             self.unlocked_planets.insert(*p);
+        }
+        // veterans (any prior run) skip the first-run tutorial
+        if self.counters.runs_started > 0 {
+            self.tutorial_done = true;
         }
     }
 

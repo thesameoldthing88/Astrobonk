@@ -19,6 +19,7 @@ mod run;
 mod save;
 mod sphere;
 mod stats;
+mod tutorial;
 mod ui;
 
 use bevy::post_process::bloom::Bloom;
@@ -93,6 +94,7 @@ fn main() {
         .init_resource::<interact::ShopPanel>()
         .init_resource::<comet::Comet>()
         .init_resource::<run::GameRng>()
+        .init_resource::<tutorial::Tutorial>()
         .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
         .init_resource::<ui::menus::Selected>()
@@ -220,6 +222,7 @@ fn main() {
                 ui::hud::update_comet_hud,
                 ui::hud::update_dust_overlay,
                 ui::hud::update_edge_markers,
+                tutorial::tutorial_system.run_if(playing),
                 ui::hud::update_banners,
                 ui::panels::sync_choice_panel,
                 ui::panels::choice_input,
@@ -292,8 +295,15 @@ fn enter_run(
     mut phase: ResMut<run::RunPhase>,
     mut comet_res: ResMut<comet::Comet>,
     mut game_rng: ResMut<run::GameRng>,
+    mut tut: ResMut<tutorial::Tutorial>,
 ) {
     *comet_res = comet::Comet::default();
+    // first-run onboarding, only for a brand-new player on a normal run
+    *tut = tutorial::Tutorial {
+        active: !save.tutorial_done && !run_state.is_daily,
+        step: 0,
+        timer: 0.0,
+    };
     // seed the run's deterministic RNG streams from the run seed + stage
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
