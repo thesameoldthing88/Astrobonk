@@ -955,11 +955,12 @@ pub fn craterpillar_update(
         // ---- undulation: a wave travelling down the body (skill recipe R6).
         // Each segment lags the one ahead by a fixed phase, so the worm ripples
         // instead of sliding along the trail like a flat train.
-        let phase = t_now * 4.6 - seg.idx as f32 * 0.8;
+        let phase = t_now * 3.9 - seg.idx as f32 * 0.8;
         let ripple = phase.sin();
-        // amplitude grows toward the tail — the classic whip falloff (>1 = grows)
-        let whip = 1.0 + seg.idx as f32 * 0.06;
-        let lift = ripple * 0.75 * seg.scale * whip;
+        // Nearly uniform amplitude: a big whip growth down the body reads as FLOPPY
+        // (tail flailing loose). A muscular worm holds its shape — barely any growth.
+        let whip = 1.0 + seg.idx as f32 * 0.015;
+        let lift = ripple * 0.40 * seg.scale * whip;
         let pos = planet.surface_point(dir) + dir * (seg.scale * 0.6 + lift);
         stf.translation = pos;
         // orient along the trail toward the next-newer point
@@ -970,10 +971,10 @@ pub fn craterpillar_update(
         // serpentine: roll into the wave AND yaw side-to-side a quarter-phase later,
         // so the body snakes rather than just bobbing.
         stf.rotation = base
-            * Quat::from_rotation_z(ripple * 0.5 * whip)
-            * Quat::from_rotation_y((phase - 1.57).sin() * 0.28);
+            * Quat::from_rotation_z(ripple * 0.26 * whip)
+            * Quat::from_rotation_y((phase - 1.57).sin() * 0.13);
         // squash on the down-beat, stretch on the crest (volume preserved)
-        let sy = 1.0 + ripple * 0.22;
+        let sy = 1.0 + ripple * 0.12;
         stf.scale = Vec3::new(seg.scale / sy.sqrt(), seg.scale * sy, seg.scale / sy.sqrt());
 
         if run.iframes <= 0.0 {
