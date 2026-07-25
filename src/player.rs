@@ -34,7 +34,7 @@ pub struct Player {
 
 /// Which player this astronaut belongs to. 0 = local/host; 1.. = joined peers.
 /// The netcode layer replicates inputs and state keyed on this id.
-#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlayerId(pub u8);
 
 /// Marks the astronaut this machine drives (exactly one, even in co-op).
@@ -140,6 +140,9 @@ pub fn spawn_player(
             },
             PlayerState::new(character, save),
             PlayerId(id),
+            crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0 },
+            crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
+            bevy_replicon::prelude::Replicated,
             Transform::from_translation(pos),
             Visibility::default(),
             StageScoped,

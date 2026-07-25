@@ -12,6 +12,7 @@ mod interact;
 mod meshkit;
 mod messages;
 mod music;
+mod net;
 mod pickups;
 mod planet;
 mod player;
@@ -79,6 +80,7 @@ fn main() {
             brightness: 80.0,
             ..default()
         })
+        .add_plugins(net::NetPlugin)
         .init_state::<AppState>()
         .init_resource::<run::RunPhase>()
         .init_resource::<run::ChoicePanel>()
