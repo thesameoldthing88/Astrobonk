@@ -1,5 +1,17 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2k: exaggeration pass (the skill's own 1.5x rule, applied)
+- Crowd gaits pushed ~2x: waddle 0.13→0.26 (Bruiser 0.20→0.34, heavy rock), inter-footfall
+  bob 0.10→0.20, Sprinter hop 0.30→0.55 (a real bound), flier bank 0.10→0.22 + bigger bob,
+  chase-lean 0.18→0.30 plus a new fore-aft NOD on the gait, lunge pitch 0.45→0.70 and
+  lunge squash 0.12→0.22 (the attack tell now reads across a crowded screen).
+- Craterpillar: lift 0.28→0.75 with a whip falloff that GROWS toward the tail, roll
+  0.22→0.5, squash 0.10→0.22, and a new quarter-phase-offset YAW so the body serpentines
+  side-to-side instead of only bobbing. Reads as a snake now, not a bouncing train.
+- Player gait matched so he isn't stiff beside a livelier horde: leg swing 0.55→0.85,
+  foot lift 0.09→0.15, arm swing 0.38→0.62, body bob 0.055→0.09, waddle 0.045→0.075.
+- Check + fast-boss smoke green.
+
 ## 2026-07-24 — Session 2j: the HORDE and BOSSES come alive (masterclass, part 2)
 - **Enemies (crowd tier — whole-transform only, so 1200 still batch to one draw call/kind):**
   new `Enemy.stride` advanced by DISTANCE travelled → waddle roll + inter-footfall bob that

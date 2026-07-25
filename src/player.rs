@@ -565,21 +565,21 @@ pub fn animate_player(
             Limb::LegL | Limb::LegR => {
                 let ph = if joint.limb == Limb::LegL { lp } else { rp };
                 // swing fore-aft; tuck up when sliding
-                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.55 * amp - tuck * 0.9);
+                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.85 * amp - tuck * 0.9);
                 // lift only during the swing half of the cycle
-                tf.translation.y += ph.sin().max(0.0) * 0.09 * amp;
+                tf.translation.y += ph.sin().max(0.0) * 0.15 * amp;
             }
             Limb::ArmL | Limb::ArmR => {
                 // arms swing ANTI-phase to the leg on the same side
                 let ph = if joint.limb == Limb::ArmL { rp } else { lp };
-                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.38 * amp + tuck * 0.5);
+                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.62 * amp + tuck * 0.5);
                 // subtle idle sway when standing still
                 tf.rotation *= Quat::from_rotation_z((t * 1.3).sin() * 0.03 * (1.0 - amp));
             }
             Limb::Body => {
                 // bob twice per cycle (lowest at each footfall) + waddle roll
-                tf.translation.y += (1.0 - lp.sin().abs()) * 0.055 * amp;
-                tf.rotation *= Quat::from_rotation_z((p.stride * 0.5).sin() * 0.045 * amp);
+                tf.translation.y += (1.0 - lp.sin().abs()) * 0.09 * amp;
+                tf.rotation *= Quat::from_rotation_z((p.stride * 0.5).sin() * 0.075 * amp);
                 // lean forward into the run, deeper while sliding
                 tf.rotation *= Quat::from_rotation_x(-0.12 * amp - tuck * 0.5);
                 // breathing [R1] + landing squash [R5] + air stretch, volume-ish preserved

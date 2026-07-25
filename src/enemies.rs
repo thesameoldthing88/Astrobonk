@@ -955,18 +955,25 @@ pub fn craterpillar_update(
         // ---- undulation: a wave travelling down the body (skill recipe R6).
         // Each segment lags the one ahead by a fixed phase, so the worm ripples
         // instead of sliding along the trail like a flat train.
-        let phase = t_now * 4.2 - seg.idx as f32 * 0.7;
+        let phase = t_now * 4.6 - seg.idx as f32 * 0.8;
         let ripple = phase.sin();
-        let lift = ripple * 0.28 * seg.scale;
+        // amplitude grows toward the tail — the classic whip falloff (>1 = grows)
+        let whip = 1.0 + seg.idx as f32 * 0.06;
+        let lift = ripple * 0.75 * seg.scale * whip;
         let pos = planet.surface_point(dir) + dir * (seg.scale * 0.6 + lift);
         stf.translation = pos;
         // orient along the trail toward the next-newer point
         let ahead = trail[i.saturating_sub(1)];
         let fwd = (planet.surface_point(ahead) - pos).normalize_or_zero();
-        let base = sphere::frame_quat(dir, if fwd == Vec3::ZERO { sphere::tangent_frame(dir).0 } else { fwd });
-        // roll into the wave + squash on the down-beat (volume preserved)
-        stf.rotation = base * Quat::from_rotation_z(ripple * 0.22);
-        let sy = 1.0 + ripple * 0.10;
+        let fwd = if fwd == Vec3::ZERO { sphere::tangent_frame(dir).0 } else { fwd };
+        let base = sphere::frame_quat(dir, fwd);
+        // serpentine: roll into the wave AND yaw side-to-side a quarter-phase later,
+        // so the body snakes rather than just bobbing.
+        stf.rotation = base
+            * Quat::from_rotation_z(ripple * 0.5 * whip)
+            * Quat::from_rotation_y((phase - 1.57).sin() * 0.28);
+        // squash on the down-beat, stretch on the crest (volume preserved)
+        let sy = 1.0 + ripple * 0.22;
         stf.scale = Vec3::new(seg.scale / sy.sqrt(), seg.scale * sy, seg.scale / sy.sqrt());
 
         if run.iframes <= 0.0 {
@@ -1080,13 +1087,15 @@ pub fn enemy_move(
 
         let bob = if e.hover > 0.0 {
             // fliers: stacked sines never visibly loop
-            (t_now * 2.2 + e.wobble).sin() * 0.35 + (t_now * 3.7 + e.wobble * 2.0).sin() * 0.1
+            (t_now * 2.2 + e.wobble).sin() * 0.45 + (t_now * 3.7 + e.wobble * 2.0).sin() * 0.16
         } else {
             match e.kind {
-                // sprinters bound: a real hop arc, twice per stride
-                EnemyKind::Sprinter => (gait * 2.0).sin().max(0.0) * 0.30 * e.scale * speed_frac,
+                // sprinters BOUND: a big hop arc, twice per stride
+                EnemyKind::Sprinter => (gait * 2.0).sin().max(0.0) * 0.55 * e.scale * speed_frac,
+                // heavies stomp: shorter, weightier rise
+                EnemyKind::Bruiser => (1.0 - gait.abs()) * 0.12 * e.scale * speed_frac,
                 // everything else rises between footfalls
-                _ => (1.0 - gait.abs()) * 0.10 * e.scale * speed_frac,
+                _ => (1.0 - gait.abs()) * 0.20 * e.scale * speed_frac,
             }
         };
         let pos = planet.surface_point(up) + up * (e.hover + bob + e.scale * 0.6);
@@ -1095,25 +1104,28 @@ pub fn enemy_move(
         let face = (player_pos - pos).normalize_or_zero();
         let mut rot = sphere::frame_quat(up, face);
         if e.hover > 0.0 {
-            // fliers bank lazily instead of walking
-            rot *= Quat::from_rotation_z((t_now * 1.9 + e.wobble).sin() * 0.10);
-            rot *= Quat::from_rotation_x(-0.12 * speed_frac);
+            // fliers bank hard into their drift instead of walking
+            rot *= Quat::from_rotation_z((t_now * 1.9 + e.wobble).sin() * 0.22);
+            rot *= Quat::from_rotation_x(-0.22 * speed_frac);
         } else {
             // waddle roll + lean into the chase + lunge pitch on a fresh hit
             let waddle = match e.kind {
-                EnemyKind::Bruiser => 0.20, // heavy things rock more
-                EnemyKind::Sprinter => 0.07,
-                _ => 0.13,
+                EnemyKind::Bruiser => 0.34, // heavy things rock hard
+                EnemyKind::Sprinter => 0.12,
+                _ => 0.26,
             };
             rot *= Quat::from_rotation_z(gait * waddle * speed_frac);
-            rot *= Quat::from_rotation_x(-0.18 * speed_frac - lunge * 0.45);
+            // forward-back nod on the gait as well as the constant chase-lean
+            rot *= Quat::from_rotation_x(
+                -0.30 * speed_frac + (gait * 2.0).cos() * 0.10 * speed_frac - lunge * 0.70,
+            );
         }
         tf.rotation = rot;
 
-        // squash & stretch: compress on the lunge, stretch a touch at speed.
+        // squash & stretch: compress hard on the lunge, stretch at speed.
         // volume-preserved so nothing looks like it's melting.
         let flash_pulse = 1.0 + e.flash * 0.25;
-        let sy = (1.0 + gait.abs() * 0.05 * speed_frac - lunge * 0.12).max(0.6);
+        let sy = (1.0 + gait.abs() * 0.11 * speed_frac - lunge * 0.22).max(0.6);
         let sxz = 1.0 / sy.sqrt();
         tf.scale = Vec3::new(e.scale * sxz, e.scale * sy, e.scale * sxz) * flash_pulse;
     }
