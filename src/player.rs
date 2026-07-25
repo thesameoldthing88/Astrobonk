@@ -32,6 +32,15 @@ pub struct Player {
     pub lean: f32,       // smoothed lean-into-acceleration
 }
 
+/// Which player this astronaut belongs to. 0 = local/host; 1.. = joined peers.
+/// The netcode layer replicates inputs and state keyed on this id.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PlayerId(pub u8);
+
+/// Marks the astronaut this machine drives (exactly one, even in co-op).
+#[derive(Component)]
+pub struct LocalPlayer;
+
 #[derive(Component)]
 pub struct PlayerRig; // camera
 
@@ -77,9 +86,19 @@ pub fn spawn_player(
     planet: &CurrentPlanet,
     run: &RunState,
     save: &crate::save::MetaSave,
+    id: u8,
+    character: crate::content::characters::AstronautKind,
+    is_local: bool,
 ) {
-    let def = run.character.def();
-    let dir = Vec3::Y;
+    let def = character.def();
+    // fan players out around the drop point so they don't spawn inside each other
+    let dir = if id == 0 {
+        Vec3::Y
+    } else {
+        let (t, b) = sphere::tangent_frame(Vec3::Y);
+        let a = id as f32 * 1.7;
+        crate::sphere::offset_dir(Vec3::Y, (t * a.cos() + b * a.sin()).normalize(), 3.5, planet.radius)
+    };
     let pos = planet.surface_point(dir) + dir * PLAYER_HEIGHT;
 
     let suit = materials.add(StandardMaterial {
@@ -119,11 +138,13 @@ pub fn spawn_player(
                 squash_amt: 0.0,
                 lean: 0.0,
             },
-            PlayerState::new(run.character, save),
+            PlayerState::new(character, save),
+            PlayerId(id),
             Transform::from_translation(pos),
             Visibility::default(),
             StageScoped,
         ))
+        .insert_if(LocalPlayer, || is_local)
         .with_children(|p| {
             // ---- BODY joint: torso + backpack ride here so they can bob/lean ----
             let body_rest = Transform::from_xyz(0.0, 0.0, 0.0);

@@ -310,7 +310,7 @@ fn headless_enter(
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save);
+    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true);
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
     commands.insert_resource(planet);
 }

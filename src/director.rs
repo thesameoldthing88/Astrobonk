@@ -189,7 +189,7 @@ pub fn stage_transition(
     let planet = CurrentPlanet::from_kind(run.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save);
+    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, 0, run.character, true);
     let ps_snapshot = q_ps.single().map(|p| p.clone()).unwrap_or_else(|_| PlayerState::new(run.character, &save));
     interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &ps_snapshot, &save, Vec3::Y);
     commands.insert_resource(planet);
