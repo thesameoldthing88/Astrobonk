@@ -31,7 +31,7 @@ use crate::config::*;
 use crate::content::enemies::EnemyKind;
 use crate::enemies::{Enemy, EnemyAssets};
 use crate::content::enemies::BossKind;
-use crate::enemies::{AnubotBeam, Boss};
+use crate::enemies::{AnubotBeam, Boss, CraterpillarHead, CraterpillarSegment, WORM_SEGMENTS};
 use crate::enemies::{EnemyProjectile, MortarShell, Telegraph};
 use crate::net::{BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole, PeerSlots};
 use crate::planet::CurrentPlanet;
@@ -663,6 +663,31 @@ fn receive_bosses(
                     crate::planet::StageScoped,
                 ))
                 .id();
+            // THE WORM'S BODY COSTS NOTHING ON THE WIRE. Segments carry no Enemy, no Boss
+            // and are not in the spatial hash - they are pure decoration placed from the
+            // head's trail. So the client grows its own body: attach a CraterpillarHead to
+            // the proxy, spawn the 12 segments, and the existing `craterpillar_update`
+            // (which needs only those two components) animates them exactly as on the host.
+            if kind == BossKind::Craterpillar {
+                commands
+                    .entity(ent)
+                    .insert(CraterpillarHead { trail: std::collections::VecDeque::new() });
+                for i in 0..WORM_SEGMENTS {
+                    let seg_scale = def.scale * (0.85 - 0.03 * i as f32).max(0.4);
+                    commands.spawn((
+                        CraterpillarSegment {
+                            head: ent,
+                            idx: i,
+                            damage: 0.0, // visual only - the host resolves contact damage
+                            scale: seg_scale,
+                        },
+                        Mesh3d(assets.worm_seg_mesh.clone()),
+                        MeshMaterial3d(assets.worm_mat.clone()),
+                        Transform::from_translation(pos).with_scale(Vec3::splat(seg_scale)),
+                        crate::planet::StageScoped,
+                    ));
+                }
+            }
             index.0.insert(r.id, ent);
             info!("NET boss proxy spawned: {:?} (id {})", kind, r.id);
         }
@@ -952,6 +977,8 @@ pub fn log_stream_stats(
     anchors: Query<(&PlayerId, &Player)>,
     with_id: Query<(), (With<Enemy>, With<NetId>)>,
     n_boss: Query<(), With<crate::enemies::Boss>>,
+    n_segs: Query<(), With<CraterpillarSegment>>,
+    seg_pos: Query<&Transform, With<CraterpillarSegment>>,
     n_hazard: Query<(), Or<(With<crate::enemies::EnemyProjectile>, With<crate::enemies::Telegraph>)>>,
     planet: Option<Res<CurrentPlanet>>,
     mine: Res<MyPlayerId>,
@@ -999,9 +1026,21 @@ pub fn log_stream_stats(
         }
         NetRole::Client => {
             info!(
-                "NETENEMY[Client] proxies={} bosses={} hazards={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} bosses={} worm_segs={} worm_len={:.1}m hazards={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
                 n_boss.iter().count(),
+                n_segs.iter().count(),
+                // spread of the body: 12 stacked segments would read ~0
+                {
+                    let ps: Vec<Vec3> = seg_pos.iter().map(|t| t.translation).collect();
+                    let mut d: f32 = 0.0;
+                    for a in &ps {
+                        for b in &ps {
+                            d = d.max(a.distance(*b));
+                        }
+                    }
+                    d
+                },
                 n_hazard.iter().count(),
                 stats.records,
                 stats.chunks,

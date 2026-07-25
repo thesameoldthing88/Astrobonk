@@ -60,7 +60,7 @@ pub struct CraterpillarSegment {
     pub scale: f32,
 }
 
-const WORM_SEGMENTS: usize = 12;
+pub const WORM_SEGMENTS: usize = 12;
 const WORM_STRIDE: usize = 2; // trail points between segments
 const WORM_TRAIL_STEP: f32 = 0.55; // meters between recorded trail points
 
