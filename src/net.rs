@@ -88,6 +88,44 @@ pub struct PlayerVitals {
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct AssignPlayerId(pub u8);
 
+/// The authoritative run: seed, world chain, clock and shared counters.
+///
+/// Without this a joiner generates its world from its OWN `fresh_seed()`, so every rock,
+/// pot, chest, shop and shrine lands somewhere different — and the streamed horde walks
+/// through scenery that isn't there. The seed is what makes both machines build the same
+/// planet; everything else here keeps the joiner's HUD from lying.
+///
+/// ~70 bytes at 4 Hz is 0.3 KB/s — noise next to the crowd stream.
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct RunSnapMsg {
+    pub run_seed: u64,
+    pub stage: u8,
+    /// Planet chain as kind codes. Sent rather than derived: the chain comes from the
+    /// start planet and tier picked in each machine's OWN menu, so a joiner would
+    /// otherwise generate a different sequence of worlds.
+    pub chain: Vec<u8>,
+    pub timer: f32,
+    pub elapsed: f32,
+    pub total_elapsed: f32,
+    pub difficulty: f32,
+    pub kills: u64,
+    pub gold_collected: u64,
+    pub silver_run: u64,
+    pub static_active: bool,
+    pub static_timer: f32,
+    pub boss_spawned: bool,
+    pub boss_dead: bool,
+    pub teleporter_open: bool,
+}
+
+/// Client-side: has the authoritative run arrived yet? A joiner must NOT build its world
+/// until it has the host's seed, or it builds the wrong one and has to tear it down.
+#[derive(Resource, Default)]
+pub struct RunSync {
+    pub seeded: bool,
+    pub world_built: bool,
+}
+
 /// One chunk of a crowd snapshot. The records are HAND-PACKED into `data` rather than
 /// serialized as a Vec of structs: postcard would varint-encode every field, making record
 /// size data-dependent, and we need it exact to keep each chunk under renet's 1200-byte
@@ -175,6 +213,9 @@ impl Plugin for NetPlugin {
             // Registered LAST of the server messages on purpose: registration order is
             // renet priority order, and the crowd is what should starve first if the
             // link is tight.
+            .add_server_message::<RunSnapMsg>(Channel::Unordered)
+            .make_message_independent::<RunSnapMsg>()
+            .init_resource::<RunSync>()
             .add_server_message::<EnemySnapMsg>(Channel::Unreliable)
             // Without this the stream is gated on ServerTick and silently dropped for any
             // client that isn't AuthorizedClient yet.
@@ -182,6 +223,18 @@ impl Plugin for NetPlugin {
             .init_resource::<MyPlayerId>()
             .add_systems(Startup, apply_cli_net)
             .init_resource::<PeerSlots>()
+            .add_systems(
+                Update,
+                push_run_snapshot
+                    .run_if(is_hosting)
+                    .run_if(on_timer(Duration::from_millis(250))),
+            )
+            .add_systems(
+                PreUpdate,
+                apply_run_snapshot
+                    .after(ClientSystems::Receive)
+                    .run_if(is_client),
+            )
             .add_systems(
                 Update,
                 announce_player_ids
@@ -269,6 +322,84 @@ fn announce_player_ids(
     }
 }
 
+/// HOST -> clients: the authoritative run. `CLIENTS_ONLY`, never `All` — `All` also writes
+/// the message into the host's own queue for listen-server support, and the host would
+/// then apply its own snapshot back over its authoritative RunState.
+fn push_run_snapshot(run: Res<crate::run::RunState>, mut out: MessageWriter<ToClients<RunSnapMsg>>) {
+    out.write(ToClients {
+        targets: SendTargets::CLIENTS_ONLY,
+        message: RunSnapMsg {
+            run_seed: run.run_seed,
+            stage: run.stage as u8,
+            chain: run.chain.iter().map(|k| planet_code(*k)).collect(),
+            timer: run.timer,
+            elapsed: run.elapsed,
+            total_elapsed: run.total_elapsed,
+            difficulty: run.difficulty,
+            kills: run.kills,
+            gold_collected: run.gold_collected,
+            silver_run: run.silver_run,
+            static_active: run.static_active,
+            static_timer: run.static_timer,
+            boss_spawned: run.boss_spawned,
+            boss_dead: run.boss_dead,
+            teleporter_open: run.teleporter_open,
+        },
+    });
+}
+
+/// CLIENT: adopt the host's run wholesale. These fields are the host's to own — the client
+/// never simulates them, it only displays them.
+fn apply_run_snapshot(
+    mut msgs: MessageReader<RunSnapMsg>,
+    mut run: ResMut<crate::run::RunState>,
+    mut sync: ResMut<RunSync>,
+) {
+    for m in msgs.read() {
+        let first = !sync.seeded;
+        run.run_seed = m.run_seed;
+        run.stage = m.stage as usize;
+        if !m.chain.is_empty() {
+            run.chain = m.chain.iter().map(|c| planet_from_code(*c)).collect();
+        }
+        run.timer = m.timer;
+        run.elapsed = m.elapsed;
+        run.total_elapsed = m.total_elapsed;
+        run.difficulty = m.difficulty;
+        run.kills = m.kills;
+        run.gold_collected = m.gold_collected;
+        run.silver_run = m.silver_run;
+        run.static_active = m.static_active;
+        run.static_timer = m.static_timer;
+        run.boss_spawned = m.boss_spawned;
+        run.boss_dead = m.boss_dead;
+        run.teleporter_open = m.teleporter_open;
+        sync.seeded = true;
+        if first {
+            info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
+        }
+    }
+}
+
+/// Explicit wire codes — this is a wire format, so it must not shift if the enum is
+/// ever reordered.
+fn planet_code(k: crate::content::planets::PlanetKind) -> u8 {
+    use crate::content::planets::PlanetKind::*;
+    match k {
+        Moon => 0,
+        Mars => 1,
+        DarkMoon => 2,
+    }
+}
+fn planet_from_code(c: u8) -> crate::content::planets::PlanetKind {
+    use crate::content::planets::PlanetKind::*;
+    match c {
+        1 => Mars,
+        2 => DarkMoon,
+        _ => Moon,
+    }
+}
+
 /// CLIENT. Latch our identity. Logged only on change, since the host repeats the message.
 fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<MyPlayerId>) {
     for m in msgs.read() {
@@ -329,12 +460,40 @@ fn log_astronauts(
     rigs: Query<(&PlayerId, &crate::remote::RemoteAstronaut)>,
     n_players: Query<(), With<crate::player::Player>>,
     n_states: Query<(), With<crate::run::PlayerState>>,
+    props: Option<Res<crate::planet::PropColliders>>,
+    run: Res<crate::run::RunState>,
 ) {
     let now = time.elapsed_secs();
     if now < *next {
         return;
     }
     *next = now + 1.0;
+    // World-layout checksum. This is the ONLY thing that proves both machines generated
+    // the same planet from the same seed — a mismatch means the joiner is walking a
+    // different world, which otherwise only shows up much later as streamed enemies
+    // clipping through rocks that aren't there.
+    let (layout, n_props): (i64, usize) = props
+        .as_ref()
+        .map(|p| {
+            (
+                p.0.iter()
+                    .map(|c| (c.dir.x as f64 * 1e6) as i64 + (c.dir.z as f64 * 1e6) as i64)
+                    .sum(),
+                p.0.len(),
+            )
+        })
+        .unwrap_or((0, 0));
+    info!(
+        "NET[{:?}] seed={} stage={} props={} layout_sum={} timer={:.1} kills={}",
+        *role,
+        run.run_seed,
+        run.stage,
+        n_props,
+        layout,
+        run.timer,
+        run.kills
+    );
+
     // Player/PlayerState counts are the load-bearing invariant: ~30 systems find the player
     // with .single(), so on a CLIENT these must stay at exactly 1 no matter how many
     // teammates are drawn. If either climbs above 1 on a client, remote visuals have leaked

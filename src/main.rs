@@ -146,6 +146,7 @@ fn main() {
         )
         .add_systems(OnExit(AppState::Results), ui::menus::despawn_menu)
         // ------------- menu inputs
+        .add_systems(Update, client_follow_host_run)
         .add_systems(Update, ui::menus::main_menu_input.run_if(in_state(AppState::MainMenu)))
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
@@ -193,7 +194,9 @@ fn main() {
                 interact::charge_shrines,
                 interact::interact_system,
                 pickups::pickup_update,
-                director::run_clock,
+                // The clock, boss marks and teleporter belong to the host — a client
+                // adopts them from RunSnapMsg instead of running a second, drifting copy.
+                director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
                 enemies::debug_spawn_boss,
             )
@@ -292,6 +295,34 @@ fn setup_camera(mut commands: Commands) {
     ));
 }
 
+/// CLIENT: don't enter the run until the host's seed has arrived.
+///
+/// The joiner's own RunState still holds a random local seed, so building the world early
+/// would place every rock, pot, chest and shrine somewhere the host never put them — and
+/// the streamed horde would walk through scenery that isn't there. Waiting is also what
+/// keeps `enter_run` a single code path: by the time it runs, the seed is already correct.
+fn client_follow_host_run(
+    role: Res<net::NetRole>,
+    sync: Res<net::RunSync>,
+    state: Res<State<AppState>>,
+    mut next: ResMut<NextState<AppState>>,
+    mut announced: Local<bool>,
+) {
+    if !matches!(*role, net::NetRole::Client) {
+        return;
+    }
+    if !sync.seeded {
+        if !*announced {
+            *announced = true;
+            info!("NET waiting for the host's run seed before building the world");
+        }
+        return;
+    }
+    if *state.get() != AppState::InRun {
+        next.set(AppState::InRun);
+    }
+}
+
 /// Load the save; a placeholder RunState keeps Res<RunState> alive in menus.
 fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     let save = save::MetaSave::load();
@@ -305,7 +336,10 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     commands.insert_resource(run_state);
     // Dev/co-op harness: drop straight into a run so two instances can be tested
     // without a human clicking through menus in each window.
-    if std::env::args().any(|a| a == "--autodrop") {
+    // A client never self-starts: `client_follow_host_run` enters the run once the host's
+    // seed lands, so both machines build the same planet.
+    let joining = std::env::args().any(|a| a == "--join");
+    if std::env::args().any(|a| a == "--autodrop") && !joining {
         next.set(AppState::InRun);
     } else {
         next.set(AppState::MainMenu);
@@ -323,6 +357,8 @@ fn enter_run(
     mut comet_res: ResMut<comet::Comet>,
     mut game_rng: ResMut<run::GameRng>,
     mut tut: ResMut<tutorial::Tutorial>,
+    role: Res<net::NetRole>,
+    mut sync: ResMut<net::RunSync>,
 ) {
     *comet_res = comet::Comet::default();
     // first-run onboarding, only for a brand-new player on a normal run
@@ -331,6 +367,8 @@ fn enter_run(
         step: 0,
         timer: 0.0,
     };
+    sync.world_built = true;
+    let _ = &role;
     // seed the run's deterministic RNG streams from the run seed + stage
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
