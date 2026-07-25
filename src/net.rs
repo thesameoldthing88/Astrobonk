@@ -33,7 +33,7 @@ use std::time::{Duration, SystemTime};
 
 /// Bumped whenever the wire format changes — mismatched builds refuse to connect
 /// instead of desyncing in confusing ways.
-pub const PROTOCOL_ID: u64 = 0xA570B0_1;
+pub const PROTOCOL_ID: u64 = 0xA570B0_2; // bumped: enemy streaming changed the wire
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -87,6 +87,28 @@ pub struct PlayerVitals {
 /// a not-yet-`AuthorizedClient` is dropped with only an error log.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
 pub struct AssignPlayerId(pub u8);
+
+/// One chunk of a crowd snapshot. The records are HAND-PACKED into `data` rather than
+/// serialized as a Vec of structs: postcard would varint-encode every field, making record
+/// size data-dependent, and we need it exact to keep each chunk under renet's 1200-byte
+/// slice limit (a fragmented chunk becomes all-or-nothing on an unreliable channel).
+///
+/// Layout of `data`: n_spawn × 8-byte descriptors, then n_update × 6-byte updates, then
+/// n_despawn × 2-byte despawns.
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct EnemySnapMsg {
+    pub seq: u16,
+    pub chunk: u8,
+    pub chunks: u8,
+    /// The EXACT anchor the host quantized against — the receiving client's own astronaut
+    /// direction. Sent rather than assumed: the client's predicted position differs
+    /// slightly, and decoding against a different frame would skew the whole horde.
+    pub anchor: [f32; 3],
+    pub n_spawn: u16,
+    pub n_update: u16,
+    pub n_despawn: u16,
+    pub data: Vec<u8>,
+}
 
 /// Client-side: which PlayerId the host says we are. `None` until the handshake lands.
 #[derive(Resource, Default, Debug)]
@@ -150,6 +172,13 @@ impl Plugin for NetPlugin {
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_server_message::<AssignPlayerId>(Channel::Ordered)
+            // Registered LAST of the server messages on purpose: registration order is
+            // renet priority order, and the crowd is what should starve first if the
+            // link is tight.
+            .add_server_message::<EnemySnapMsg>(Channel::Unreliable)
+            // Without this the stream is gated on ServerTick and silently dropped for any
+            // client that isn't AuthorizedClient yet.
+            .make_message_independent::<EnemySnapMsg>()
             .init_resource::<MyPlayerId>()
             .add_systems(Startup, apply_cli_net)
             .init_resource::<PeerSlots>()
@@ -178,6 +207,10 @@ impl Plugin for NetPlugin {
             .add_systems(Update, log_astronauts.run_if(|d: Res<NetDebug>| d.log))
             .add_systems(
                 Update,
+                crate::netenemy::log_stream_stats.run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 send_local_input
                     // Must be the LAST touch of InputIntent before movement — anything
                     // that writes intent after this point would move us locally but
@@ -203,7 +236,7 @@ impl Plugin for NetPlugin {
     }
 }
 
-fn is_simulating(role: Res<NetRole>) -> bool {
+pub fn is_simulating(role: Res<NetRole>) -> bool {
     role.simulates()
 }
 pub fn is_client(role: Res<NetRole>) -> bool {

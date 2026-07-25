@@ -64,3 +64,36 @@ pub const COMET_GRACE: f32 = 0.7; // seconds the tail can dip before the combo b
 
 pub const SAVE_DIR: &str = "astrobonk";
 pub const SAVE_FILE: &str = "save.json";
+
+// ── Co-op enemy streaming ────────────────────────────────────────────────────
+// A client cannot receive 1200+ enemies as replicated ENTITIES, so the crowd rides a
+// custom quantized batch message. Positions are sent as a great-circle offset from the
+// receiving client's OWN astronaut, in that astronaut's tangent frame, in arc metres —
+// on a sphere a position is a direction, so two numbers beat three floats.
+
+/// Half-width of the quantized position range, in arc metres. Must exceed the largest
+/// interest radius. 16 bits over ±128 m gives a 3.9 mm step — the slowest enemy (Lobber,
+/// 1.8 m/s) still advances ~31 steps per snapshot, so nothing stair-steps.
+pub const NET_ENEMY_RANGE: f32 = 128.0;
+/// Snapshot rate. Matches NET_ENEMY_SMOOTH_RATE's time constant, so the interpolation
+/// filter is itself the reconstructor and 30 Hz would buy nothing visible.
+pub const NET_ENEMY_HZ: f32 = 15.0;
+/// Inside this arc, an enemy is sent EVERY snapshot. Comfortably covers the whole combat
+/// volume (auto-target 40 m, longest weapon 26 m, director spawn band 42–58 m).
+pub const NET_ENEMY_NEAR_ARC: f32 = 50.0;
+/// Enters interest at IN, leaves at OUT — the gap is hysteresis so an enemy pacing the
+/// boundary doesn't spawn/despawn every snapshot. Indexed like PlanetKind::ALL.
+pub const NET_ENEMY_INTEREST_IN: [f32; 3] = [95.0, 110.0, 82.0];
+pub const NET_ENEMY_INTEREST_OUT: [f32; 3] = [107.0, 122.0, 93.0];
+/// Hard ceiling on records per snapshot — the bandwidth backstop.
+pub const NET_ENEMY_MAX_RECORDS: usize = 1200;
+/// Payload bytes per chunk. Under renet's SLICE_SIZE (1200) so a chunk is never
+/// auto-fragmented, which would make it all-or-nothing on an unreliable channel.
+pub const NET_ENEMY_CHUNK_BYTES: usize = 1024;
+/// How hard a proxy chases its last streamed position (framerate-independent).
+pub const NET_ENEMY_SMOOTH_RATE: f32 = 12.0;
+/// Arc error past which a proxy teleports instead of easing.
+pub const NET_ENEMY_SNAP_ARC: f32 = 12.0;
+/// Seconds an unseen proxy survives before despawning — long enough that a dropped
+/// unreliable packet doesn't flicker the horde.
+pub const NET_ENEMY_GRACE: f32 = 2.0;

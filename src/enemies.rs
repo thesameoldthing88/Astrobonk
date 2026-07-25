@@ -1116,60 +1116,80 @@ pub fn enemy_move(
         e.dir = new_dir;
         let up = e.dir;
 
-        // ---- crowd-tier animation (code-art-animation skill: whole-transform only,
-        // so 1200 enemies still batch into one draw call per kind) ----
-        // gait advances by DISTANCE travelled, so the waddle always matches real motion
-        let moved = eff_speed * dt;
-        e.stride = (e.stride + moved * 2.3) % std::f32::consts::TAU;
-        let gait = (e.stride + e.wobble).sin();
-        let speed_frac = (eff_speed / 6.0).clamp(0.0, 1.4);
-        // just-attacked lunge, decaying — the follow-through of a contact hit
-        let lunge = (e.contact_cd / CONTACT_TICK).clamp(0.0, 1.0);
-
-        let bob = if e.hover > 0.0 {
-            // fliers: stacked sines never visibly loop
-            (t_now * 2.2 + e.wobble).sin() * 0.45 + (t_now * 3.7 + e.wobble * 2.0).sin() * 0.16
-        } else {
-            match e.kind {
-                // sprinters BOUND: a big hop arc, twice per stride
-                EnemyKind::Sprinter => (gait * 2.0).sin().max(0.0) * 0.55 * e.scale * speed_frac,
-                // heavies stomp: shorter, weightier rise
-                EnemyKind::Bruiser => (1.0 - gait.abs()) * 0.12 * e.scale * speed_frac,
-                // everything else rises between footfalls
-                _ => (1.0 - gait.abs()) * 0.20 * e.scale * speed_frac,
-            }
-        };
-        let pos = planet.surface_point(up) + up * (e.hover + bob + e.scale * 0.6);
-        tf.translation = pos;
-
-        let face = (player_pos - pos).normalize_or_zero();
-        let mut rot = sphere::frame_quat(up, face);
-        if e.hover > 0.0 {
-            // fliers bank hard into their drift instead of walking
-            rot *= Quat::from_rotation_z((t_now * 1.9 + e.wobble).sin() * 0.22);
-            rot *= Quat::from_rotation_x(-0.22 * speed_frac);
-        } else {
-            // waddle roll + lean into the chase + lunge pitch on a fresh hit
-            let waddle = match e.kind {
-                EnemyKind::Bruiser => 0.34, // heavy things rock hard
-                EnemyKind::Sprinter => 0.12,
-                _ => 0.26,
-            };
-            rot *= Quat::from_rotation_z(gait * waddle * speed_frac);
-            // forward-back nod on the gait as well as the constant chase-lean
-            rot *= Quat::from_rotation_x(
-                -0.30 * speed_frac + (gait * 2.0).cos() * 0.10 * speed_frac - lunge * 0.70,
-            );
-        }
-        tf.rotation = rot;
-
-        // squash & stretch: compress hard on the lunge, stretch at speed.
-        // volume-preserved so nothing looks like it's melting.
-        let flash_pulse = 1.0 + e.flash * 0.25;
-        let sy = (1.0 + gait.abs() * 0.11 * speed_frac - lunge * 0.22).max(0.6);
-        let sxz = 1.0 / sy.sqrt();
-        tf.scale = Vec3::new(e.scale * sxz, e.scale * sy, e.scale * sxz) * flash_pulse;
+        animate_crowd(&mut e, &mut tf, &planet, player_pos, eff_speed, dt, t_now);
     }
+}
+
+/// Crowd-tier animation, shared by the host's simulated horde and a client's streamed
+/// proxies so both wear exactly the same gait. Whole-transform only — 1200 enemies still
+/// batch into one draw call per kind.
+///
+/// `eff_speed` is the enemy's current surface speed: integrated locally on the host,
+/// finite-differenced from interpolated network positions on a client.
+pub fn animate_crowd(
+    e: &mut Enemy,
+    tf: &mut Transform,
+    planet: &CurrentPlanet,
+    player_pos: Vec3,
+    eff_speed: f32,
+    dt: f32,
+    t_now: f32,
+) {
+    let up = e.dir;
+    // ---- crowd-tier animation (code-art-animation skill: whole-transform only,
+    // so 1200 enemies still batch into one draw call per kind) ----
+    // gait advances by DISTANCE travelled, so the waddle always matches real motion
+    let moved = eff_speed * dt;
+    e.stride = (e.stride + moved * 2.3) % std::f32::consts::TAU;
+    let gait = (e.stride + e.wobble).sin();
+    let speed_frac = (eff_speed / 6.0).clamp(0.0, 1.4);
+    // just-attacked lunge, decaying — the follow-through of a contact hit
+    let lunge = (e.contact_cd / CONTACT_TICK).clamp(0.0, 1.0);
+
+    let bob = if e.hover > 0.0 {
+        // fliers: stacked sines never visibly loop
+        (t_now * 2.2 + e.wobble).sin() * 0.45 + (t_now * 3.7 + e.wobble * 2.0).sin() * 0.16
+    } else {
+        match e.kind {
+            // sprinters BOUND: a big hop arc, twice per stride
+            EnemyKind::Sprinter => (gait * 2.0).sin().max(0.0) * 0.55 * e.scale * speed_frac,
+            // heavies stomp: shorter, weightier rise
+            EnemyKind::Bruiser => (1.0 - gait.abs()) * 0.12 * e.scale * speed_frac,
+            // everything else rises between footfalls
+            _ => (1.0 - gait.abs()) * 0.20 * e.scale * speed_frac,
+        }
+    };
+    let pos = planet.surface_point(up) + up * (e.hover + bob + e.scale * 0.6);
+    tf.translation = pos;
+
+    let face = (player_pos - pos).normalize_or_zero();
+    let mut rot = sphere::frame_quat(up, face);
+    if e.hover > 0.0 {
+        // fliers bank hard into their drift instead of walking
+        rot *= Quat::from_rotation_z((t_now * 1.9 + e.wobble).sin() * 0.22);
+        rot *= Quat::from_rotation_x(-0.22 * speed_frac);
+    } else {
+        // waddle roll + lean into the chase + lunge pitch on a fresh hit
+        let waddle = match e.kind {
+            EnemyKind::Bruiser => 0.34, // heavy things rock hard
+            EnemyKind::Sprinter => 0.12,
+            _ => 0.26,
+        };
+        rot *= Quat::from_rotation_z(gait * waddle * speed_frac);
+        // forward-back nod on the gait as well as the constant chase-lean
+        rot *= Quat::from_rotation_x(
+            -0.30 * speed_frac + (gait * 2.0).cos() * 0.10 * speed_frac - lunge * 0.70,
+        );
+    }
+    tf.rotation = rot;
+
+    // squash & stretch: compress hard on the lunge, stretch at speed.
+    // volume-preserved so nothing looks like it's melting.
+    let flash_pulse = 1.0 + e.flash * 0.25;
+    let sy = (1.0 + gait.abs() * 0.11 * speed_frac - lunge * 0.22).max(0.6);
+    let sxz = 1.0 / sy.sqrt();
+    tf.scale = Vec3::new(e.scale * sxz, e.scale * sy, e.scale * sxz) * flash_pulse;
+
 }
 
 /// Buried burrowers erupt after their telegraph.

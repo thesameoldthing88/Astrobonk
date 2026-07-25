@@ -110,6 +110,57 @@ fn bot_drive(
 }
 
 /// Fail-fast sanity checks each tick.
+/// `--enemydist`: histogram how far the horde actually is from each astronaut, in
+/// great-circle metres. This is the number the co-op streaming bandwidth budget rests on —
+/// interest management is only a win if most of the horde is genuinely out of view.
+fn enemy_distance_probe(
+    planet: Res<CurrentPlanet>,
+    q_players: Query<&Player>,
+    q_enemies: Query<&Enemy>,
+    mut ticks: Local<u64>,
+) {
+    *ticks += 1;
+    if *ticks % 450 != 0 {
+        return;
+    }
+    let players: Vec<Vec3> = q_players.iter().map(|p| p.dir).collect();
+    if players.is_empty() {
+        return;
+    }
+    // bucket by distance to the NEAREST astronaut (that is what interest management asks)
+    let mut buckets = [0usize; 7];
+    let edges = [20.0f32, 40.0, 60.0, 80.0, 120.0, 200.0];
+    let mut total = 0usize;
+    let mut statics = 0usize;
+    for e in q_enemies.iter() {
+        // Pots piggyback on Enemy with speed == 0 and never move — they are scenery, not
+        // horde, and must not be counted against a streaming budget.
+        if e.speed == 0.0 {
+            statics += 1;
+            continue;
+        }
+        total += 1;
+        let d = players
+            .iter()
+            .map(|p| crate::sphere::arc_dist(e.dir, *p, planet.radius))
+            .fold(f32::MAX, f32::min);
+        let mut i = edges.len();
+        for (k, edge) in edges.iter().enumerate() {
+            if d < *edge {
+                i = k;
+                break;
+            }
+        }
+        buckets[i] += 1;
+    }
+    let pct = |n: usize| if total == 0 { 0.0 } else { n as f32 * 100.0 / total as f32 };
+    println!(
+        "  ENEMYDIST mobile={total:<4} static_pots={statics:<3} <20m:{:>4} ({:>4.1}%) <40m:{:>4} ({:>4.1}%) <60m:{:>4} ({:>4.1}%) <80m:{:>4} ({:>4.1}%) <120m:{:>4} ({:>4.1}%) <200m:{:>4} 200m+:{:>4}",
+        buckets[0], pct(buckets[0]), buckets[1], pct(buckets[1]), buckets[2], pct(buckets[2]),
+        buckets[3], pct(buckets[3]), buckets[4], pct(buckets[4]), buckets[5], buckets[6]
+    );
+}
+
 fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
@@ -237,6 +288,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::combat::apply_hits,
                 crate::combat::apply_player_hits,
                 crate::director::downed_watch,
+                enemy_distance_probe.run_if(|| std::env::args().any(|a| a == "--enemydist")),
                 crate::pickups::kill_drops,
                 crate::combat::fader_update,
                 crate::player::player_physics,
