@@ -9,7 +9,7 @@ use crate::interact;
 use crate::messages::*;
 use crate::planet::{self, CurrentPlanet, StageScoped};
 use crate::player::{self, Player};
-use crate::run::{self, ChoicePanel, RunPhase, RunResult, RunState};
+use crate::run::{self, ChoicePanel, PlayerState, RunPhase, RunResult, RunState};
 use crate::save::MetaSave;
 use crate::AppState;
 use bevy::prelude::*;
@@ -67,7 +67,7 @@ pub fn run_clock(
         if run.timer <= *mark && !run.minibosses_spawned[i] {
             run.minibosses_spawned[i] = true;
             let kind = if i == 0 { BossKind::CraterpillarJr } else { BossKind::RoverGoneWrong };
-            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.stats.difficulty);
+            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.difficulty);
             banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
@@ -80,7 +80,7 @@ pub fn run_clock(
             PlanetKind::Moon => BossKind::Craterpillar,
             _ => BossKind::Anubot,
         };
-        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.stats.difficulty);
+        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, p.dir, kind, run.difficulty);
         banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
         sfx.write(SfxMsg(Sfx::BossRoar));
     }
@@ -106,26 +106,28 @@ pub fn run_clock(
 
 /// Open the level-up panel when XP crossed a threshold.
 pub fn levelup_trigger(
-    mut run: ResMut<RunState>,
+    run: Res<RunState>,
+    mut q_ps: Query<&mut PlayerState>,
     save: Res<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    if *phase != RunPhase::Playing || run.pending_levelups == 0 {
+    let Ok(mut ps) = q_ps.single_mut() else { return };
+    if *phase != RunPhase::Playing || ps.pending_levelups == 0 {
         return;
     }
     let mut rng = rand::thread_rng();
-    let opts = run::roll_upgrades(&run, &save, &mut rng);
+    let opts = run::roll_upgrades(&ps, &save, &mut rng);
     *panel = ChoicePanel {
-        title: format!("LEVEL {}", run.level),
+        title: format!("LEVEL {}", ps.level),
         options: opts,
         banishing: false,
         is_levelup: true,
     };
     // stat recompute so CritPerLevel-style passives track level
     let save_clone = save.clone();
-    run.recompute_stats(&save_clone);
+    ps.recompute_stats(&save_clone, run.greed_stacks);
     *phase = RunPhase::LevelUp;
     sfx.write(SfxMsg(Sfx::LevelUp));
 }
@@ -143,6 +145,7 @@ pub fn stage_transition(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut next: ResMut<NextState<AppState>>,
+    q_ps: Query<&PlayerState>,
     scoped: Query<Entity, With<StageScoped>>,
     mut banners: MessageWriter<BannerMsg>,
 ) {
@@ -186,8 +189,9 @@ pub fn stage_transition(
     let planet = CurrentPlanet::from_kind(run.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run);
-    interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, Vec3::Y);
+    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save);
+    let ps_snapshot = q_ps.single().map(|p| p.clone()).unwrap_or_else(|_| PlayerState::new(run.character, &save));
+    interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &ps_snapshot, &save, Vec3::Y);
     commands.insert_resource(planet);
 
     banners.write(BannerMsg(format!("STAGE {} — {}", target + 1, run.planet().def().name)));
@@ -215,11 +219,13 @@ pub fn death_watch(
 /// Bank the run into the save when Results opens.
 pub fn bank_results(
     mut commands: Commands,
+    q_ps: Query<&PlayerState>,
     mut run: ResMut<RunState>,
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,
 ) {
     let victory = run.result == Some(RunResult::Victory);
+    let (p_level, p_gold) = q_ps.single().map(|p| (p.level, p.gold)).unwrap_or((1, 0));
 
     // meta counters
     save.counters.kills += run.kills;
@@ -228,7 +234,7 @@ pub fn bank_results(
     save.counters.shrines += run.shrines_charged;
     save.counters.gold += run.gold_collected;
     save.counters.evolves += run.evolves;
-    save.counters.best_level = save.counters.best_level.max(run.level);
+    save.counters.best_level = save.counters.best_level.max(p_level);
     save.counters.static_secs_best = save.counters.static_secs_best.max(run.static_timer);
     save.counters.runs_started += 1;
     if victory {
@@ -236,8 +242,8 @@ pub fn bank_results(
     }
 
     // silver payout: pickups + performance
-    let performance = (run.kills / 40) as u64 + run.level as u64 + if victory { 30 * run.tier as u64 } else { 0 };
-    let payout = run.silver_run + (performance as f32 * run.stats.silver_gain) as u64;
+    let performance = (run.kills / 40) as u64 + p_level as u64 + if victory { 30 * run.tier as u64 } else { 0 };
+    let payout = run.silver_run + (performance as f32 * q_ps.single().map(|p| p.stats.silver_gain).unwrap_or(1.0)) as u64;
     save.silver += payout;
 
     // daily challenge: track today's best score
@@ -275,8 +281,8 @@ pub fn bank_results(
     commands.insert_resource(ResultsData {
         victory,
         kills: run.kills,
-        level: run.level,
-        gold: run.gold,
+        level: p_level,
+        gold: p_gold,
         silver_earned: payout,
         time: run.total_elapsed,
         quests_completed,

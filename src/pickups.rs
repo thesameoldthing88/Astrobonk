@@ -6,7 +6,7 @@ use crate::fx::{self, Pcolor, ParticleAssets};
 use crate::messages::*;
 use crate::planet::{CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{PowerupKind, RunState};
+use crate::run::{PlayerState, PowerupKind, RunState};
 use bevy::prelude::*;
 use rand::Rng;
 
@@ -109,8 +109,8 @@ pub fn pickup_update(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
+    mut q_player: Query<(&Player, &mut PlayerState, &Transform), Without<Pickup>>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(&Player, &Transform), Without<Pickup>>,
     mut q: Query<(Entity, &mut Pickup, &mut Transform), Without<Player>>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -120,8 +120,8 @@ pub fn pickup_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
-    let range = run.pickup_range();
+    let Ok((player, mut ps, ptf)) = q_player.single_mut() else { return };
+    let range = ps.pickup_range();
     let t_now = time.elapsed_secs();
 
     for (e, mut p, mut tf) in &mut q {
@@ -135,7 +135,7 @@ pub fn pickup_update(
             let to = (ptf.translation - tf.translation).normalize_or_zero();
             tf.translation += to * p.speed * dt;
             if tf.translation.distance(ptf.translation) < 0.8 {
-                collect(&mut run, p.kind, ptf.translation, &mut numbers, &mut sfx, &mut banners);
+                collect(&mut run, &mut ps, p.kind, ptf.translation, &mut numbers, &mut sfx, &mut banners);
                 if let Some(pa) = &particles {
                     let c = match p.kind {
                         PickupKind::Xp(_) => Pcolor::Green,
@@ -160,6 +160,7 @@ pub fn pickup_update(
 
 fn collect(
     run: &mut RunState,
+    ps: &mut PlayerState,
     kind: PickupKind,
     pos: Vec3,
     numbers: &mut MessageWriter<NumberMsg>,
@@ -168,23 +169,23 @@ fn collect(
 ) {
     match kind {
         PickupKind::Xp(v) => {
-            run.gain_xp(v);
+            ps.gain_xp(v);
             sfx.write(SfxMsg(Sfx::Pickup));
         }
         PickupKind::Gold(g) => {
-            let g = (g as f32 * run.stats.gold_gain).round() as u64;
-            run.gold += g;
+            let g = (g as f32 * ps.stats.gold_gain).round() as u64;
+            ps.gold += g;
             run.gold_collected += g;
             sfx.write(SfxMsg(Sfx::Coin));
         }
         PickupKind::Silver(s) => {
-            let s = (s as f32 * run.stats.silver_gain).round() as u64;
+            let s = (s as f32 * ps.stats.silver_gain).round() as u64;
             run.silver_run += s;
             sfx.write(SfxMsg(Sfx::Coin));
         }
         PickupKind::Food => {
-            let heal = run.stats.max_hp * 0.2;
-            run.hp = (run.hp + heal).min(run.stats.max_hp);
+            let heal = ps.stats.max_hp * 0.2;
+            ps.hp = (ps.hp + heal).min(ps.stats.max_hp);
             numbers.write(NumberMsg { pos, amount: heal, kind: NumKind::Heal });
             sfx.write(SfxMsg(Sfx::Pickup));
         }
@@ -194,8 +195,8 @@ fn collect(
                 PowerupKind::Magnet => ("MEGA MAGNET!", 12.0),
                 PowerupKind::Speed => ("SPEED BOOST!", 15.0),
             };
-            run.powerups.retain(|(pk, _)| *pk != k);
-            run.powerups.push((k, secs));
+            ps.powerups.retain(|(pk, _)| *pk != k);
+            ps.powerups.push((k, secs));
             banners.write(BannerMsg(name.into()));
             sfx.write(SfxMsg(Sfx::LevelUp));
         }
@@ -209,6 +210,7 @@ pub fn kill_drops(
     assets: Res<PickupAssets>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
+    q_ps: Query<&PlayerState>,
     particles: Option<Res<ParticleAssets>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {

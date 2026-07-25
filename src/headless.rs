@@ -8,7 +8,7 @@ use crate::content::planets::PlanetKind;
 use crate::enemies::Enemy;
 use crate::planet::CurrentPlanet;
 use crate::player::Player;
-use crate::run::{ChoicePanel, RunPhase, RunState};
+use crate::run::{ChoicePanel, PlayerState, RunPhase, RunState};
 use crate::save::MetaSave;
 use crate::sphere;
 use bevy::app::ScheduleRunnerPlugin;
@@ -22,18 +22,18 @@ use std::time::Duration;
 fn bot_drive(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
-    mut run: ResMut<RunState>,
+    global: Res<RunState>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     save: Res<MetaSave>,
     mut chest: ResMut<crate::interact::ChestPanel>,
     mut shop: ResMut<crate::interact::ShopPanel>,
-    mut q: Query<(&mut Player, &Transform)>,
+    mut q: Query<(&mut Player, &mut PlayerState, &Transform)>,
     q_pickups: Query<(&crate::pickups::Pickup, &Transform), Without<Player>>,
     q_enemies: Query<(&Enemy, &Transform), (Without<Player>, Without<crate::pickups::Pickup>)>,
     mut heading_angle: Local<f32>,
 ) {
-    let Ok((mut p, ptf)) = q.single_mut() else { return };
+    let Ok((mut p, mut run, ptf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
 
     // resolve any open panel instantly
@@ -41,7 +41,7 @@ fn bot_drive(
         RunPhase::LevelUp | RunPhase::Modal => {
             if !panel.options.is_empty() {
                 let opt = panel.options[0].clone();
-                run.apply_upgrade(&opt, &save);
+                run.apply_upgrade(&opt, &save, global.greed_stacks);
                 if panel.is_levelup {
                     run.pending_levelups = run.pending_levelups.saturating_sub(1);
                 }
@@ -103,19 +103,20 @@ fn bot_drive(
 }
 
 /// Fail-fast sanity checks each tick.
-fn bot_watchdog(run: Res<RunState>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
+fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
     if alive > ENEMY_CAP + 400 {
         panic!("SMOKE FAIL: enemy cap breached ({alive})");
     }
-    if !run.hp.is_finite() || !run.timer.is_finite() {
+    let hp = q_ps.single().map(|p| p.hp).unwrap_or(1.0);
+    if !hp.is_finite() || !run.timer.is_finite() {
         panic!("SMOKE FAIL: non-finite run state");
     }
     if *ticks % 300 == 0 {
         println!(
             "  t={:>4.0}s timer={:>5.1} lvl={} kills={} hp={:.0} enemies={} gold={} static={}",
-            run.total_elapsed, run.timer, run.level, run.kills, run.hp, alive, run.gold, run.static_active
+            run.total_elapsed, run.timer, q_ps.single().map(|p| p.level).unwrap_or(1), run.kills, hp, alive, q_ps.single().map(|p| p.gold).unwrap_or(0), run.static_active
         );
     }
 }
@@ -154,10 +155,6 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
         run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
-        if let Some(w) = run.weapons.first_mut() {
-            w.level = 7;
-        }
-        run.hp = run.stats.max_hp;
     }
 
     app.init_state::<crate::AppState>()
@@ -256,6 +253,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
 
     let world = app.world_mut();
     let run = world.resource::<RunState>().clone();
+    let ps = world.query::<&PlayerState>().iter(world).next().cloned();
+    let (p_level, p_gold, p_hp, p_maxhp) = ps
+        .map(|p| (p.level, p.gold, p.hp, p.stats.max_hp))
+        .unwrap_or((1, 0, 0.0, 100.0));
     let enemies = world.query_filtered::<(), With<Enemy>>().iter(world).count();
     let phase = *world.resource::<RunPhase>();
     let comet_fires = world.resource::<crate::comet::Comet>().fires;
@@ -265,7 +266,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     println!("--- SMOKE SUMMARY ---");
     println!(
         "phase={phase:?} level={} kills={} gold={} hp={:.0}/{:.0} timer={:.0} enemies={} comets={comet_fires} storm[{storm_state}] boss_spawned={} boss_dead={}",
-        run.level, run.kills, run.gold, run.hp, run.stats.max_hp, run.timer, enemies, run.boss_spawned, run.boss_dead
+        p_level, run.kills, p_gold, p_hp, p_maxhp, run.timer, enemies, run.boss_spawned, run.boss_dead
     );
 
     let mut ok = true;
@@ -277,7 +278,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: bot killed nothing");
         ok = false;
     }
-    if run.level < 2 && run.kills > 50 {
+    if p_level < 2 && run.kills > 50 {
         println!("FAIL: XP pipeline dead (kills but no levels)");
         ok = false;
     }
@@ -309,7 +310,7 @@ fn headless_enter(
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, Vec3::Y);
+    crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
     commands.insert_resource(planet);
 }

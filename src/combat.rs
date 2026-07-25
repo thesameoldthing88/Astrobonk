@@ -9,7 +9,7 @@ use crate::interact::Pot;
 use crate::messages::*;
 use crate::planet::{CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{RunPhase, RunState};
+use crate::run::{PlayerState, RunPhase, RunState};
 use crate::sphere;
 use bevy::prelude::*;
 use rand::Rng;
@@ -198,8 +198,7 @@ pub fn weapon_fire(
     time: Res<Time>,
     assets: Res<WeaponAssets>,
     _planet: Res<CurrentPlanet>,
-    mut run: ResMut<RunState>,
-    q_player: Query<(&Player, &Transform)>,
+    mut q_player: Query<(&Player, &mut PlayerState, &Transform)>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
     q_pots: Query<(), With<Pot>>,
     q_drones: Query<(Entity, &Drone)>,
@@ -211,7 +210,7 @@ pub fn weapon_fire(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
+    let Ok((player, mut run, ptf)) = q_player.single_mut() else { return };
     let mut rng = rand::thread_rng();
     let atk_speed = run.attack_speed();
     let dmg_mult = run.damage_mult();
@@ -551,9 +550,8 @@ pub fn projectile_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    run: Res<RunState>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(&Player, &Transform), Without<Projectile>>,
+    q_player: Query<(&Player, &PlayerState, &Transform), Without<Projectile>>,
     enemies: Query<&Enemy>,
     q_pots: Query<(), With<Pot>>,
     mut q: Query<(Entity, &mut Projectile, &mut Transform), Without<Player>>,
@@ -563,7 +561,7 @@ pub fn projectile_move(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
+    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
 
     for (pe, mut p, mut tf) in &mut q {
@@ -676,7 +674,7 @@ fn explode(
     commands: &mut Commands,
     hash: &SpatialHash,
     enemies: &Query<&Enemy>,
-    run: &RunState,
+    run: &PlayerState,
     pos: Vec3,
     aoe: f32,
     damage: f32,
@@ -704,8 +702,7 @@ pub fn drone_update(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    run: Res<RunState>,
-    q_player: Query<(&Player, &Transform), Without<Drone>>,
+    q_player: Query<(&Player, &PlayerState, &Transform), Without<Drone>>,
     enemies: Query<&Enemy>,
     mut q: Query<(&mut Drone, &mut Transform), Without<Player>>,
     mut hits: MessageWriter<HitMsg>,
@@ -714,7 +711,7 @@ pub fn drone_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
+    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
     let t = time.elapsed_secs();
 
@@ -755,8 +752,7 @@ pub fn drone_update(
 pub fn beam_update(
     mut commands: Commands,
     time: Res<Time>,
-    run: Res<RunState>,
-    q_player: Query<(&Player, &Transform), Without<Beam>>,
+    q_player: Query<(&Player, &PlayerState, &Transform), Without<Beam>>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Beam>, Without<Player>)>,
     mut q: Query<(Entity, &mut Beam, &mut Transform), Without<Player>>,
     mut hits: MessageWriter<HitMsg>,
@@ -765,7 +761,7 @@ pub fn beam_update(
     if dt <= 0.0 {
         return;
     }
-    let Ok((player, ptf)) = q_player.single() else { return };
+    let Ok((player, run, ptf)) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
 
     for (e, mut beam, mut tf) in &mut q {
@@ -803,11 +799,12 @@ pub fn beam_update(
 /// Aura visuals follow the player and pulse; cryo slow applied on hit below.
 pub fn aura_follow(
     time: Res<Time>,
-    run: Res<RunState>,
+    q_run: Query<&PlayerState>,
     q_player: Query<&Transform, (With<Player>, Without<AuraVis>)>,
     mut q: Query<(&AuraVis, &mut Transform), Without<Player>>,
 ) {
     let Ok(ptf) = q_player.single() else { return };
+    let Ok(run) = q_run.single() else { return };
     let t = time.elapsed_secs();
     let aura_sc = run.aura_scale();
     for (a, mut tf) in &mut q {
@@ -843,6 +840,7 @@ pub fn apply_hits(
     mut commands: Commands,
     mut reader: MessageReader<HitMsg>,
     mut run: ResMut<RunState>,
+    mut q_ps: Query<&mut PlayerState>,
     mut shake: ResMut<Shake>,
     mut hitstop: ResMut<Hitstop>,
     mut enemies: Query<(&mut Enemy, &Transform, Option<&Boss>), Without<Pot>>,
@@ -852,7 +850,8 @@ pub fn apply_hits(
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     let mut rng = rand::thread_rng();
-    let has_cryo = run
+    let Ok(mut ps) = q_ps.single_mut() else { return };
+    let has_cryo = ps
         .weapons
         .iter()
         .any(|w| matches!(w.kind, WeaponKind::CryoVent | WeaponKind::AbsoluteZero));
@@ -897,8 +896,8 @@ pub fn apply_hits(
                 sfx.write(SfxMsg(Sfx::Crit));
             }
             // lifesteal: chance to heal 1
-            if run.stats.lifesteal > 0.0 && rng.gen_bool((run.stats.lifesteal.min(1.0)) as f64) {
-                run.hp = (run.hp + 1.0).min(run.stats.max_hp);
+            if ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
+                ps.hp = (ps.hp + 1.0).min(ps.stats.max_hp);
             }
             if e.hp <= 0.0 {
                 let is_boss = boss.map(|b| b.kind.def().is_stage_boss).unwrap_or(false);
@@ -929,46 +928,47 @@ pub fn apply_hits(
 pub fn apply_player_hits(
     mut reader: MessageReader<PlayerHitMsg>,
     mut run: ResMut<RunState>,
+    mut q_ps: Query<(&mut PlayerState, &Transform), With<Player>>,
     mut shake: ResMut<Shake>,
     mut phase: ResMut<RunPhase>,
-    q_player: Query<&Transform, With<Player>>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    let Ok(ptf) = q_player.single() else { return };
+    let Ok((mut run_ps, ptf)) = q_ps.single_mut() else { return };
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
-        if run.iframes > 0.0 || run.hp <= 0.0 {
+        if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
             continue;
         }
         // evasion
-        if rng.gen_bool(run.stats.evasion_fraction() as f64) {
+        if rng.gen_bool(run_ps.stats.evasion_fraction() as f64) {
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        let mut amount = msg.amount * (1.0 - run.effective_armor_fraction());
+        let mut amount = msg.amount * (1.0 - run_ps.effective_armor_fraction());
         // shield first
-        if run.shield > 0.0 {
-            let absorbed = run.shield.min(amount);
-            run.shield -= absorbed;
+        if run_ps.shield > 0.0 {
+            let absorbed = run_ps.shield.min(amount);
+            run_ps.shield -= absorbed;
             amount -= absorbed;
         }
-        run.shield_cd = 5.0;
-        run.hp -= amount;
-        run.iframes = 0.4;
+        run_ps.shield_cd = 5.0;
+        run_ps.hp -= amount;
+        run_ps.iframes = 0.4;
         shake.add(0.12);
         sfx.write(SfxMsg(Sfx::Hurt));
 
         // thorns
-        if run.stats.thorns > 0.0 {
+        if run_ps.stats.thorns > 0.0 {
             if let Some(att) = msg.attacker {
-                hits.write(HitMsg { target: att, amount: run.stats.thorns, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO });
             }
         }
 
-        if run.hp <= 0.0 {
-            run.hp = 0.0;
+        if run_ps.hp <= 0.0 {
+            run_ps.hp = 0.0;
+            run_ps.dead = true;
             run.result = Some(crate::run::RunResult::Death);
             *phase = RunPhase::Dead;
         }

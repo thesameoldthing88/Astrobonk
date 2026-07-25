@@ -9,7 +9,7 @@ use crate::fx::{self, Hitstop, ParticleAssets, Pcolor, Shake};
 use crate::interact::Pot;
 use crate::messages::*;
 use crate::player::Player;
-use crate::run::RunState;
+use crate::run::{PlayerState, RunState};
 use bevy::prelude::*;
 
 #[derive(Resource, Default)]
@@ -39,7 +39,7 @@ pub fn comet_system(
     mut shake: ResMut<Shake>,
     mut hitstop: ResMut<Hitstop>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(&Player, &Transform)>,
+    q_player: Query<(&Player, &PlayerState, &Transform)>,
     enemies: Query<&Enemy, Without<Pot>>,
     mut hits: MessageWriter<HitMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -51,7 +51,7 @@ pub fn comet_system(
     }
     comet.flash = (comet.flash - dt).max(0.0);
     let prev_progress = comet.progress();
-    let Ok((p, ptf)) = q_player.single() else { return };
+    let Ok((p, ps, ptf)) = q_player.single() else { return };
     let ppos = ptf.translation;
     let move_dir = p.vel_t.normalize_or_zero();
     let speed = p.vel_t.length();
@@ -101,7 +101,7 @@ pub fn comet_system(
                         target: e,
                         amount: 300.0 + peak as f32 * 18.0,
                         crit: true,
-                        knock: kdir * 12.0 * run.stats.knockback,
+                        knock: kdir * 12.0 * ps.stats.knockback,
                     });
                 }
             }

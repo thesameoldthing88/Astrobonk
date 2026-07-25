@@ -176,15 +176,26 @@ fn main() {
                 combat::drone_update,
                 combat::beam_update,
                 combat::aura_follow,
+            )
+                .chain()
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (
                 interact::charge_shrines,
                 interact::interact_system,
                 pickups::pickup_update,
                 director::run_clock,
                 director::levelup_trigger,
                 enemies::debug_spawn_boss,
-                comet::comet_system,
-                events_world::dust_storm_system,
             )
+                .chain()
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (comet::comet_system, events_world::dust_storm_system)
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
         )
@@ -291,7 +302,7 @@ fn enter_run(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut run_state: ResMut<run::RunState>,
+    run_state: Res<run::RunState>,
     save: Res<save::MetaSave>,
     mut director_res: ResMut<enemies::Director>,
     mut phase: ResMut<run::RunPhase>,
@@ -312,22 +323,20 @@ fn enter_run(
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
+    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save);
     interact::spawn_interactables(
         &mut commands,
         &mut meshes,
         &mut materials,
         &planet,
         &run_state,
+        &run::PlayerState::new(run_state.character, &save),
         &save,
         Vec3::Y,
     );
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
     *phase = run::RunPhase::Playing;
-    let save_c = save.clone();
-    run_state.recompute_stats(&save_c);
-    run_state.hp = run_state.stats.max_hp;
 }
 
 /// Close any leftover modal state when leaving a run.

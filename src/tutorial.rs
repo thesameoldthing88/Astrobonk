@@ -4,7 +4,7 @@
 
 use crate::enemies::Enemy;
 use crate::messages::{Sfx, SfxMsg};
-use crate::run::RunState;
+use crate::run::{PlayerState, RunState};
 use bevy::prelude::*;
 
 #[derive(Resource, Default)]
@@ -34,6 +34,7 @@ pub fn tutorial_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut tut: ResMut<Tutorial>,
     run: Res<RunState>,
+    q_ps: Query<&PlayerState>,
     q_enemies: Query<(), With<Enemy>>,
     mut q_text: Query<(&mut Text, &mut TextColor), With<TutorialText>>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -72,7 +73,7 @@ pub fn tutorial_system(
         0 => run.elapsed > 1.2,
         1 => run.elapsed > 6.0 || alive > 0,
         2 => run.elapsed > 14.0,
-        3 => run.level >= 2,
+        3 => q_ps.single().map(|p| p.level >= 2).unwrap_or(false),
         4 => run.elapsed > 42.0,
         5 => run.minibosses_spawned[0],
         _ => false,

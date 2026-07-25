@@ -5,7 +5,7 @@ use crate::config::*;
 use crate::content::characters::Passive;
 use crate::fx::Shake;
 use crate::planet::{CurrentPlanet, StageScoped};
-use crate::run::{RunPhase, RunState};
+use crate::run::{PlayerState, RunPhase, RunState};
 use crate::sphere;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -76,6 +76,7 @@ pub fn spawn_player(
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
     run: &RunState,
+    save: &crate::save::MetaSave,
 ) {
     let def = run.character.def();
     let dir = Vec3::Y;
@@ -118,6 +119,7 @@ pub fn spawn_player(
                 squash_amt: 0.0,
                 lean: 0.0,
             },
+            PlayerState::new(run.character, save),
             Transform::from_translation(pos),
             Visibility::default(),
             StageScoped,
@@ -300,12 +302,11 @@ pub fn player_input(
     time: Res<Time>,
     rig: Res<CamRig>,
     planet: Res<CurrentPlanet>,
-    mut run: ResMut<RunState>,
     particles: Option<Res<crate::fx::ParticleAssets>>,
     mut sfx: MessageWriter<crate::messages::SfxMsg>,
-    mut q: Query<(&mut Player, &Transform)>,
+    mut q: Query<(&mut Player, &mut PlayerState, &Transform)>,
 ) {
-    let Ok((mut p, ptf)) = q.single_mut() else { return };
+    let Ok((mut p, mut run, ptf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
 
     // Use the camera's persistent forward (reprojected onto the current tangent plane)
@@ -433,10 +434,9 @@ pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     props: Res<crate::planet::PropColliders>,
-    mut run: ResMut<RunState>,
-    mut q: Query<(&mut Player, &mut Transform)>,
+    mut q: Query<(&mut Player, &mut PlayerState, &mut Transform)>,
 ) {
-    let Ok((mut p, mut tf)) = q.single_mut() else { return };
+    let Ok((mut p, mut run, mut tf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -693,11 +693,18 @@ pub fn cursor_control(
 }
 
 /// HP regen, shield recharge, iframe + powerup decay.
-pub fn player_upkeep(time: Res<Time>, mut run: ResMut<RunState>) {
+pub fn player_upkeep(
+    time: Res<Time>,
+    mut run: ResMut<RunState>,
+    mut q: Query<&mut PlayerState>,
+) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
+    // world difficulty is the max across players (co-op: one Cursed build raises it for all)
+    run.difficulty = q.iter().map(|p| p.stats.difficulty).fold(0.0f32, f32::max);
+    for mut run in &mut q {
     run.reticle_timer = (run.reticle_timer + dt) % 1.5;
     if run.hp > 0.0 {
         let regen = run.stats.regen / 60.0;
@@ -717,5 +724,6 @@ pub fn player_upkeep(time: Res<Time>, mut run: ResMut<RunState>) {
     }
     if expired {
         run.powerups.retain(|(_, t)| *t > 0.0);
+    }
     }
 }

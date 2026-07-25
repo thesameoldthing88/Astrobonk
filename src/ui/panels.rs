@@ -4,7 +4,7 @@
 use super::*;
 use crate::interact::{ChestPanel, Interactable, ShopPanel};
 use crate::messages::{BannerMsg, Sfx, SfxMsg};
-use crate::run::{roll_upgrades, ChoicePanel, RunPhase, RunResult, RunState, UpgradeOption};
+use crate::run::{roll_upgrades, ChoicePanel, PlayerState, RunPhase, RunResult, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use bevy::prelude::*;
 
@@ -47,7 +47,7 @@ pub fn sync_choice_panel(
     mut commands: Commands,
     phase: Res<RunPhase>,
     panel: Res<ChoicePanel>,
-    run: Res<RunState>,
+    q_run: Query<&PlayerState>,
     q_root: Query<Entity, With<ChoiceRoot>>,
 ) {
     let should_show = matches!(*phase, RunPhase::LevelUp) || (matches!(*phase, RunPhase::Modal) && !panel.options.is_empty());
@@ -60,6 +60,7 @@ pub fn sync_choice_panel(
     if !panel.is_changed() && !q_root.is_empty() {
         return;
     }
+    let Ok(run) = q_run.single() else { return };
     for e in &q_root {
         commands.entity(e).despawn();
     }
@@ -142,7 +143,8 @@ pub fn choice_input(
     banish: Query<&Interaction, (Changed<Interaction>, With<BanishBtn>)>,
     skip: Query<&Interaction, (Changed<Interaction>, With<SkipBtn>)>,
     mut panel: ResMut<ChoicePanel>,
-    mut run: ResMut<RunState>,
+    mut q_run: Query<&mut PlayerState>,
+    global: Res<RunState>,
     save: Res<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -152,6 +154,7 @@ pub fn choice_input(
     if !matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) || panel.options.is_empty() {
         return;
     }
+    let Ok(mut run) = q_run.single_mut() else { return };
 
     let mut pick: Option<usize> = None;
     for (i, key) in [KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3, KeyCode::Digit4].iter().enumerate() {
@@ -227,7 +230,7 @@ pub fn choice_input(
     }
 
     let opt = panel.options[idx].clone();
-    let evolved = run.apply_upgrade(&opt, &save);
+    let evolved = run.apply_upgrade(&opt, &save, global.greed_stacks);
     if evolved {
         banners.write(BannerMsg("WEAPON EVOLVED".into()));
         sfx.write(SfxMsg(Sfx::Evolve));
@@ -238,7 +241,7 @@ pub fn choice_input(
     finish_choice(&mut run, &mut panel, &mut phase, &save);
 }
 
-fn finish_choice(run: &mut RunState, panel: &mut ChoicePanel, phase: &mut RunPhase, save: &MetaSave) {
+fn finish_choice(run: &mut PlayerState, panel: &mut ChoicePanel, phase: &mut RunPhase, save: &MetaSave) {
     if panel.is_levelup {
         run.pending_levelups = run.pending_levelups.saturating_sub(1);
         if run.pending_levelups > 0 {
@@ -258,7 +261,8 @@ pub fn chest_panel(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut chest: ResMut<ChestPanel>,
-    mut run: ResMut<RunState>,
+    mut q_run: Query<&mut PlayerState>,
+    global: Res<RunState>,
     save: Res<MetaSave>,
     mut phase: ResMut<RunPhase>,
     q_root: Query<Entity, With<ChestRoot>>,
@@ -273,6 +277,7 @@ pub fn chest_panel(
         }
         return;
     }
+    let Ok(mut run) = q_run.single_mut() else { return };
     if q_root.is_empty() {
         let Some(item) = chest.item else { return };
         let d = item.def();
@@ -342,10 +347,8 @@ pub fn chest_panel(
                 } else if let Some(e) = run.items.iter_mut().find(|(k, _)| *k == item) {
                     e.1 += 1;
                 }
-                run.chest_opens += 1;
-                run.chests_opened += 1;
                 let save_c = save.clone();
-                run.recompute_stats(&save_c);
+                run.recompute_stats(&save_c, global.greed_stacks);
                 if let Some(ent) = chest.chest {
                     if let Ok(mut i) = q_inter.get_mut(ent) {
                         i.used = true;
@@ -369,7 +372,8 @@ pub fn shop_panel(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
     mut shop: ResMut<ShopPanel>,
-    mut run: ResMut<RunState>,
+    mut q_run: Query<&mut PlayerState>,
+    global: Res<RunState>,
     save: Res<MetaSave>,
     mut phase: ResMut<RunPhase>,
     q_root: Query<Entity, With<ShopRoot>>,
@@ -385,6 +389,7 @@ pub fn shop_panel(
         }
         return;
     }
+    let Ok(mut run) = q_run.single_mut() else { return };
     if q_root.is_empty() || *rebuild {
         *rebuild = false;
         for e in &q_root {
@@ -463,7 +468,7 @@ pub fn shop_panel(
                     e.1 += 1;
                 }
                 let save_c = save.clone();
-                run.recompute_stats(&save_c);
+                run.recompute_stats(&save_c, global.greed_stacks);
                 shop.offers[i].2 = true;
                 if let Some(v) = shop.vendor {
                     if let Ok(mut inter) = q_inter.get_mut(v) {
@@ -498,6 +503,7 @@ pub fn pause_panel(
     keys: Res<ButtonInput<KeyCode>>,
     mut phase: ResMut<RunPhase>,
     mut run: ResMut<RunState>,
+    q_ps: Query<&PlayerState>,
     mut settings_open: ResMut<crate::ui::settings::SettingsOpen>,
     q_root: Query<Entity, With<PauseRoot>>,
     resume: Query<&Interaction, (Changed<Interaction>, With<ResumeBtn>)>,
@@ -525,7 +531,7 @@ pub fn pause_panel(
         }
         RunPhase::Paused => {
             if q_root.is_empty() {
-                let stats = run.stats.clone();
+                let Ok(stats) = q_ps.single().map(|p| p.stats.clone()) else { return };
                 commands
                     .spawn((PauseRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(20)))
                     .with_children(|root| {

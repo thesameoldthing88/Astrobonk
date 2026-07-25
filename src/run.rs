@@ -96,22 +96,53 @@ pub enum RunResult {
     Death,
 }
 
+/// Run-GLOBAL state: the clock, the world chain, boss flags, shared counters.
+/// Everything here is shared by every player in the run (co-op ready).
 #[derive(Resource, Clone, Debug)]
 pub struct RunState {
-    pub character: AstronautKind,
     pub tier: u32,
     pub chain: Vec<PlanetKind>,
     pub stage: usize,
     pub timer: f32,
     pub elapsed: f32,
     pub total_elapsed: f32,
+    pub silver_run: u64,
+    pub kills: u64,
+    pub greed_stacks: u32,
+    pub boss_spawned: bool,
+    pub boss_dead: bool,
+    pub minibosses_spawned: [bool; 2],
+    pub static_active: bool,
+    pub static_timer: f32,
+    pub teleporter_open: bool,
+    pub run_seed: u64,       // deterministic seed for world gen + spawns
+    pub is_daily: bool,      // this run is the daily seeded challenge
+    pub microwave_used: bool,
+    pub chest_opens: u32,
+    pub shrines_charged: u64,
+    pub pots_broken: u64,
+    pub chests_opened: u64,
+    pub gold_collected: u64,
+    pub evolves: u64,
+    pub result: Option<RunResult>,
+    /// Aggregated difficulty from all players (Cursed items/tomes). World-level in co-op.
+    pub difficulty: f32,
+    /// Character of the local/primary player — kept so menus and results screens
+    /// have something to show without querying the world.
+    pub character: AstronautKind,
+}
+
+/// PER-PLAYER state, attached as a component to each astronaut entity. In co-op every
+/// player owns their own HP, build, level, and gold (the GDD model); XP is granted to
+/// all players when anyone collects a gem.
+#[derive(Component, Clone, Debug)]
+pub struct PlayerState {
+    pub character: AstronautKind,
     pub xp: f32,
     pub level: u32,
     pub xp_needed: f32,
     pub pending_levelups: u32,
     pub gold: u64,
-    pub silver_run: u64,
-    pub kills: u64,
     pub weapons: Vec<WeaponInstance>,
     pub items: Vec<(ItemKind, u32)>,
     pub stats: Stats,
@@ -122,47 +153,60 @@ pub struct RunState {
     pub banishes: u32,
     pub refreshes: u32,
     pub banned_items: HashSet<ItemKind>,
-    pub greed_stacks: u32,
-    pub boss_spawned: bool,
-    pub boss_dead: bool,
-    pub minibosses_spawned: [bool; 2],
-    pub static_active: bool,
-    pub static_timer: f32,
-    pub teleporter_open: bool,
     pub frenzy_timer: f32,
-    pub fast_move: bool,     // player is above base run speed (for Nova/Aurora)
+    pub fast_move: bool,     // above base run speed (Nova / Aurora passives)
     pub reticle_timer: f32,  // cycles 0..1.5 for Reticle's focus pulse
-    pub run_seed: u64,       // deterministic seed for world gen + spawns
-    pub is_daily: bool,      // this run is the daily seeded challenge
     pub powerups: Vec<(PowerupKind, f32)>,
-    pub microwave_used: bool,
-    pub chest_opens: u32,
-    pub shrines_charged: u64,
-    pub pots_broken: u64,
-    pub chests_opened: u64,
-    pub gold_collected: u64,
-    pub evolves: u64,
-    pub result: Option<RunResult>,
+    pub dead: bool,
 }
 
 impl RunState {
-    pub fn new(character: AstronautKind, start: PlanetKind, tier: u32, save: &MetaSave) -> Self {
-        let chain = PlanetKind::chain_from(start, tier);
-        let mut s = Self {
-            character,
+    pub fn new(character: AstronautKind, start: PlanetKind, tier: u32, _save: &MetaSave) -> Self {
+        Self {
             tier,
-            chain,
+            chain: PlanetKind::chain_from(start, tier),
             stage: 0,
             timer: config::STAGE_SECONDS[0],
             elapsed: 0.0,
             total_elapsed: 0.0,
+            silver_run: 0,
+            kills: 0,
+            greed_stacks: 0,
+            boss_spawned: false,
+            boss_dead: false,
+            minibosses_spawned: [false; 2],
+            static_active: false,
+            static_timer: 0.0,
+            teleporter_open: false,
+            run_seed: fresh_seed(),
+            is_daily: false,
+            microwave_used: false,
+            chest_opens: 0,
+            shrines_charged: 0,
+            pots_broken: 0,
+            chests_opened: 0,
+            gold_collected: 0,
+            evolves: 0,
+            result: None,
+            difficulty: 0.0,
+            character,
+        }
+    }
+
+    pub fn planet(&self) -> PlanetKind {
+        self.chain[self.stage.min(self.chain.len() - 1)]
+    }
+}
+
+impl PlayerState {
+    pub fn new(character: AstronautKind, save: &MetaSave) -> Self {
+        let mut s = Self {
+            character,
             xp: 0.0,
             level: 1,
             xp_needed: xp_needed(1),
             pending_levelups: 0,
             gold: 0,
-            silver_run: 0,
-            kills: 0,
             weapons: vec![WeaponInstance { kind: character.def().weapon, level: 1, cd: 0.0 }],
             items: Vec::new(),
             stats: Stats::default(),
@@ -173,29 +217,13 @@ impl RunState {
             banishes: 3,
             refreshes: 2,
             banned_items: HashSet::new(),
-            greed_stacks: 0,
-            boss_spawned: false,
-            boss_dead: false,
-            minibosses_spawned: [false; 2],
-            static_active: false,
-            static_timer: 0.0,
-            teleporter_open: false,
             frenzy_timer: 0.0,
             fast_move: false,
             reticle_timer: 0.0,
-            run_seed: fresh_seed(),
-            is_daily: false,
             powerups: Vec::new(),
-            microwave_used: false,
-            chest_opens: 0,
-            shrines_charged: 0,
-            pots_broken: 0,
-            chests_opened: 0,
-            gold_collected: 0,
-            evolves: 0,
-            result: None,
+            dead: false,
         };
-        s.recompute_stats(save);
+        s.recompute_stats(save, 0);
         s.hp = s.stats.max_hp;
         s.shield = s.stats.shield;
         // Lady Fortuna gambles harder — extra level-up rerolls.
@@ -205,11 +233,7 @@ impl RunState {
         s
     }
 
-    pub fn planet(&self) -> PlanetKind {
-        self.chain[self.stage.min(self.chain.len() - 1)]
-    }
-
-    pub fn recompute_stats(&mut self, save: &MetaSave) {
+    pub fn recompute_stats(&mut self, save: &MetaSave, greed_stacks: u32) {
         let mut st = Stats::default();
         // Tomes (meta loadout)
         for t in &save.tome_loadout {
@@ -239,9 +263,9 @@ impl RunState {
                 st.apply(*k, v * *count as f32);
             }
         }
-        // Greed shrines
-        st.apply(StatKind::Difficulty, 0.12 * self.greed_stacks as f32);
-        st.apply(StatKind::Luck, 0.08 * self.greed_stacks as f32);
+        // Greed shrines (run-global, passed in)
+        st.apply(StatKind::Difficulty, 0.12 * greed_stacks as f32);
+        st.apply(StatKind::Luck, 0.08 * greed_stacks as f32);
         // Level-ups grant +1 max hp each (genre staple)
         st.apply(StatKind::MaxHp, (self.level - 1) as f32);
 
@@ -407,7 +431,7 @@ impl UpgradeOption {
         }
     }
 
-    pub fn body(&self, run: &RunState) -> String {
+    pub fn body(&self, run: &PlayerState) -> String {
         match self {
             UpgradeOption::NewWeapon(w) => {
                 let d = w.def();
@@ -483,7 +507,7 @@ pub fn catalyst_line(item: ItemKind) -> String {
 }
 
 /// Roll the four level-up options.
-pub fn roll_upgrades(run: &RunState, save: &MetaSave, rng: &mut impl Rng) -> Vec<UpgradeOption> {
+pub fn roll_upgrades(run: &PlayerState, save: &MetaSave, rng: &mut impl Rng) -> Vec<UpgradeOption> {
     let mut opts: Vec<UpgradeOption> = Vec::new();
 
     // Guaranteed evolution card if eligible.
@@ -562,7 +586,7 @@ fn rarity_pass(r: Rarity, luck: f32) -> f64 {
     }
 }
 
-impl RunState {
+impl PlayerState {
     fn weapon_slot_free(&self, w: WeaponKind) -> bool {
         !self.weapons.iter().any(|i| {
             i.kind == w || i.kind.def().evolves_to == Some(w) || w.def().evolves_to == Some(i.kind)
@@ -570,7 +594,7 @@ impl RunState {
     }
 
     /// Apply a chosen upgrade. Returns true if it was an evolution (for fanfare).
-    pub fn apply_upgrade(&mut self, opt: &UpgradeOption, save: &MetaSave) -> bool {
+    pub fn apply_upgrade(&mut self, opt: &UpgradeOption, save: &MetaSave, greed_stacks: u32) -> bool {
         let mut evolved = false;
         match opt {
             UpgradeOption::NewWeapon(w) => {
@@ -590,7 +614,6 @@ impl RunState {
                         evolved = true;
                     }
                 }
-                self.evolves += 1;
             }
             UpgradeOption::NewItem(i) => self.items.push((*i, 1)),
             UpgradeOption::ItemUp(i) => {
@@ -600,7 +623,7 @@ impl RunState {
             }
             UpgradeOption::GoldPile(g) => self.gold += g,
         }
-        self.recompute_stats(save);
+        self.recompute_stats(save, greed_stacks);
         evolved
     }
 }

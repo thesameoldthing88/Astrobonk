@@ -551,14 +551,14 @@ pub fn director_spawn(
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_enemies.iter().count();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.stats.difficulty);
+    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
 
     let rate = if run.static_active {
         10.0 + run.static_timer * 0.15
     } else {
         // gentler opening so a level-1 player can learn; ramp still bites by mid-game.
         let t = run.elapsed / 60.0;
-        (1.0 + t * 2.1) * (1.0 + run.stats.difficulty)
+        (1.0 + t * 2.1) * (1.0 + run.difficulty)
     };
     director.spawn_bank += rate * dt;
     director.tick += dt;
@@ -714,7 +714,7 @@ pub fn boss_phase_system(
 ) {
     let Ok(player) = q_player.single() else { return };
     let mut rng = rand::thread_rng();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.stats.difficulty);
+    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
 
     for (mut enemy, mut boss) in &mut q_boss {
         if enemy.hp <= 0.0 || enemy.max_hp <= 0.0 {
@@ -823,7 +823,7 @@ pub fn anubot_beam_system(
         // damage while firing
         if beam.state == 2 {
             if let Some(pp) = ppos {
-                if run.iframes <= 0.0 {
+                {
                     let v = pp - tf.translation;
                     let along = v.dot(heading);
                     let perp = (v - heading * along - up * v.dot(up)).length();
@@ -903,7 +903,7 @@ pub fn debug_spawn_boss(
         crate::content::planets::PlanetKind::Moon => BossKind::Craterpillar,
         _ => BossKind::Anubot,
     };
-    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, run.stats.difficulty);
+    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, run.difficulty);
     run.boss_spawned = true;
     banners.write(crate::messages::BannerMsg(format!("[DEV] {} SUMMONED", kind.def().name)));
 }
@@ -977,7 +977,7 @@ pub fn craterpillar_update(
         let sy = 1.0 + ripple * 0.12;
         stf.scale = Vec3::new(seg.scale / sy.sqrt(), seg.scale * sy, seg.scale / sy.sqrt());
 
-        if run.iframes <= 0.0 {
+        {
             if let Some(pp) = ptf {
                 let reach = seg.scale * 0.6 + PLAYER_RADIUS + 0.25;
                 if pos.distance_squared(pp) < reach * reach {
@@ -1179,7 +1179,7 @@ pub fn enemy_contact(
     mut q: Query<(Entity, &mut Enemy, &Transform), Without<Buried>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
-    if time.delta_secs() <= 0.0 || run.iframes > 0.0 {
+    if time.delta_secs() <= 0.0 {
         return;
     }
     let Ok((_, ptf)) = q_player.single() else { return };
@@ -1435,7 +1435,7 @@ pub fn enemy_projectiles(
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
         tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
-        if run.iframes <= 0.0 && tf.translation.distance_squared(ptf.translation) < 1.1 {
+        if tf.translation.distance_squared(ptf.translation) < 1.1 {
             writer.write(PlayerHitMsg { amount: p.damage, from: tf.translation, attacker: None });
             commands.entity(e).despawn();
         }

@@ -6,7 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
-use crate::run::{RunState, xp_needed};
+use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -314,6 +314,7 @@ pub fn despawn_hud(mut commands: Commands, q: Query<Entity, With<HudRoot>>) {
 #[allow(clippy::type_complexity)]
 pub fn update_hud(
     run: Res<RunState>,
+    q_ps: Query<&PlayerState>,
     prompt: Res<InteractPrompt>,
     mut sets: ParamSet<(
         Query<&mut Text, With<TimerText>>,
@@ -331,6 +332,7 @@ pub fn update_hud(
     )>,
     mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
 ) {
+    let Ok(ps) = q_ps.single() else { return };
     if let Ok(mut t) = sets.p0().single_mut() {
         if run.static_active {
             let m = (run.static_timer / 60.0) as u32;
@@ -346,22 +348,22 @@ pub fn update_hud(
         t.0 = format!("BONKS {}", run.kills);
     }
     if let Ok(mut t) = sets.p2().single_mut() {
-        t.0 = format!("GOLD {}", run.gold);
+        t.0 = format!("GOLD {}", ps.gold);
     }
     if let Ok(mut t) = sets.p3().single_mut() {
         t.0 = format!("SILVER +{}", run.silver_run);
     }
     if let Ok(mut t) = sets.p4().single_mut() {
-        t.0 = format!("LV {}", run.level);
+        t.0 = format!("LV {}", ps.level);
     }
     if let Ok(mut t) = sets.p5().single_mut() {
-        t.0 = format!("{:.0}/{:.0}", run.hp.max(0.0), run.stats.max_hp);
+        t.0 = format!("{:.0}/{:.0}", ps.hp.max(0.0), ps.stats.max_hp);
     }
     if let Ok(mut t) = sets.p6().single_mut() {
         t.0 = prompt.0.clone().unwrap_or_default();
     }
     if let Ok(mut t) = sets.p7().single_mut() {
-        let s: Vec<String> = run
+        let s: Vec<String> = ps
             .powerups
             .iter()
             .map(|(k, secs)| format!("{:?} {:.0}s", k, secs))
@@ -369,23 +371,24 @@ pub fn update_hud(
         t.0 = s.join("  ");
     }
     if let Ok(mut n) = fills.p0().single_mut() {
-        n.width = Val::Percent((run.xp / xp_needed(run.level).max(0.001) * 100.0).clamp(0.0, 100.0));
+        n.width = Val::Percent((ps.xp / xp_needed(ps.level).max(0.001) * 100.0).clamp(0.0, 100.0));
     }
     if let Ok(mut n) = fills.p1().single_mut() {
-        n.width = Val::Percent((run.hp / run.stats.max_hp * 100.0).clamp(0.0, 100.0));
+        n.width = Val::Percent((ps.hp / ps.stats.max_hp * 100.0).clamp(0.0, 100.0));
     }
     if let Ok(mut bg) = vignette.single_mut() {
-        bg.0 = Color::srgba(1.0, 0.1, 0.1, (run.iframes * 0.55).clamp(0.0, 0.4));
+        bg.0 = Color::srgba(1.0, 0.1, 0.1, (ps.iframes * 0.55).clamp(0.0, 0.4));
     }
 }
 
 /// Rebuild the weapon tray when loadout changes.
 pub fn update_weapon_row(
     mut commands: Commands,
-    run: Res<RunState>,
+    q_ps: Query<&PlayerState>,
     mut cache: Local<Vec<(WeaponKind, u32)>>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {
+    let Ok(run) = q_ps.single() else { return };
     let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
     if *cache == current {
         return;

@@ -9,7 +9,7 @@ use crate::messages::*;
 use crate::pickups::Pickup;
 use crate::planet::{random_dir, CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{ChoicePanel, RunPhase, RunState, UpgradeOption};
+use crate::run::{ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
 use bevy::prelude::*;
@@ -89,7 +89,7 @@ impl InteractDefs {
     }
 }
 
-fn roll_item(run: &RunState, luck: f32, rng: &mut impl Rng) -> ItemKind {
+fn roll_item(run: &PlayerState, luck: f32, rng: &mut impl Rng) -> ItemKind {
     let rarity = Rarity::roll(luck, rng);
     let candidates: Vec<ItemKind> = ItemKind::ALL
         .iter()
@@ -138,6 +138,7 @@ pub fn spawn_interactables(
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
     run: &RunState,
+    ps: &PlayerState,
     save: &MetaSave,
     player_dir: Vec3,
 ) {
@@ -240,8 +241,8 @@ pub fn spawn_interactables(
     for _ in 0..2 {
         let mut stock = Vec::new();
         for _ in 0..3 {
-            let item = roll_item(run, run.stats.luck, &mut rng);
-            stock.push((item, price(item.def().rarity, run.stats.chest_discount), false));
+            let item = roll_item(ps, ps.stats.luck, &mut rng);
+            stock.push((item, price(item.def().rarity, ps.stats.chest_discount), false));
         }
         let dir = place_dir(&mut rng, planet, player_dir, 15.0);
         spawn_simple(commands, InteractKind::ShadyGuy, dir, stock, None);
@@ -331,6 +332,7 @@ pub fn spawn_teleporter(
 pub fn charge_shrines(
     time: Res<Time>,
     mut run: ResMut<RunState>,
+    q_ps: Query<&PlayerState>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     save: Res<MetaSave>,
@@ -362,10 +364,11 @@ pub fn charge_shrines(
             run.shrines_charged += 1;
             sfx.write(SfxMsg(Sfx::Shrine));
             banners.write(BannerMsg("SHRINE CHARGED".into()));
+            let Ok(ps) = q_ps.single() else { continue };
             let mut opts = Vec::new();
             for _ in 0..3 {
-                let item = roll_item(&run, run.stats.luck + 0.3, &mut rng);
-                opts.push(if run.item_count(item) == 0 {
+                let item = roll_item(ps, ps.stats.luck + 0.3, &mut rng);
+                opts.push(if ps.item_count(item) == 0 {
                     UpgradeOption::NewItem(item)
                 } else {
                     UpgradeOption::ItemUp(item)
@@ -384,11 +387,11 @@ pub fn interact_system(
     keys: Res<ButtonInput<KeyCode>>,
     mut prompt: ResMut<InteractPrompt>,
     mut run: ResMut<RunState>,
+    mut q_ps: Query<&mut PlayerState>,
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
-    mut chest_panel: ResMut<ChestPanel>,
-    mut shop_panel: ResMut<ShopPanel>,
+    mut panels: (ResMut<ChestPanel>, ResMut<ShopPanel>),
     mut pending: ResMut<crate::director::PendingStage>,
     q_player: Query<&Transform, With<Player>>,
     mut q: Query<(Entity, &mut Interactable, &Transform), Without<Player>>,
@@ -403,6 +406,7 @@ pub fn interact_system(
         return;
     }
     let Ok(ptf) = q_player.single() else { return };
+    let Ok(mut ps) = q_ps.single_mut() else { return };
     let mut rng = rand::thread_rng();
 
     let mut nearest: Option<(Entity, f32)> = None;
@@ -426,7 +430,7 @@ pub fn interact_system(
     };
 
     let cost_now = ((CHEST_BASE_COST as f32) * CHEST_COST_GROWTH.powi(run.chest_opens as i32)
-        * (1.0 - run.stats.chest_discount))
+        * (1.0 - ps.stats.chest_discount))
         .round() as u64;
 
     prompt.0 = Some(match inter.kind {
@@ -452,17 +456,17 @@ pub fn interact_system(
 
     match inter.kind {
         InteractKind::Chest => {
-            if run.gold < cost_now {
+            if ps.gold < cost_now {
                 banners.write(BannerMsg("NOT ENOUGH GOLD".into()));
                 return;
             }
-            let item = *inter.chest_item.get_or_insert_with(|| roll_item(&run, run.stats.luck, &mut rng));
-            *chest_panel = ChestPanel { open: true, item: Some(item), cost: cost_now, chest: Some(entity) };
+            let item = *inter.chest_item.get_or_insert_with(|| roll_item(&ps, ps.stats.luck, &mut rng));
+            *panels.0 = ChestPanel { open: true, item: Some(item), cost: cost_now, chest: Some(entity) };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Chest));
         }
         InteractKind::ShadyGuy => {
-            *shop_panel = ShopPanel { open: true, vendor: Some(entity), offers: inter.stock.clone() };
+            *panels.1 = ShopPanel { open: true, vendor: Some(entity), offers: inter.stock.clone() };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Click));
         }
@@ -470,7 +474,8 @@ pub fn interact_system(
             inter.used = true;
             run.greed_stacks += 1;
             let save_clone = save.clone();
-            run.recompute_stats(&save_clone);
+            ps.recompute_stats(&save_clone, run.greed_stacks);
+            run.difficulty = ps.stats.difficulty;
             banners.write(BannerMsg("GREED: +12% DIFFICULTY, +8% LUCK".into()));
             sfx.write(SfxMsg(Sfx::Shrine));
         }
@@ -487,8 +492,8 @@ pub fn interact_system(
             inter.used = true;
             let mut opts = Vec::new();
             for _ in 0..3 {
-                let item = roll_item(&run, run.stats.luck + 0.15, &mut rng);
-                opts.push(if run.item_count(item) == 0 {
+                let item = roll_item(&ps, ps.stats.luck + 0.15, &mut rng);
+                opts.push(if ps.item_count(item) == 0 {
                     UpgradeOption::NewItem(item)
                 } else {
                     UpgradeOption::ItemUp(item)
@@ -499,11 +504,11 @@ pub fn interact_system(
             sfx.write(SfxMsg(Sfx::Shrine));
         }
         InteractKind::Microwave => {
-            if run.microwave_used || run.items.is_empty() {
+            if run.microwave_used || ps.items.is_empty() {
                 return;
             }
             run.microwave_used = true;
-            let mut owned: Vec<ItemKind> = run
+            let mut owned: Vec<ItemKind> = ps
                 .items
                 .iter()
                 .filter(|(k, c)| *c < k.def().max_stacks)
