@@ -13,6 +13,48 @@ use rand::{Rng, SeedableRng};
 #[derive(Component)]
 pub struct StageScoped;
 
+/// A solid prop you can't walk through: a vertical cylinder standing on the surface,
+/// stored as a surface direction + radius (meters) + how tall it blocks. Populated at
+/// stage spawn; collision is resolved on the tangent plane (see `prop_collision`).
+#[derive(Clone, Copy)]
+pub struct PropCollider {
+    pub dir: Vec3,
+    pub radius: f32,
+    pub height: f32,
+}
+
+/// All solid props on the current planet. Rebuilt per stage.
+#[derive(Resource, Default)]
+pub struct PropColliders(pub Vec<PropCollider>);
+
+impl PropColliders {
+    /// Push a point out of any prop it's inside. Returns the corrected position
+    /// direction, or None if it wasn't colliding. Works on the sphere's tangent plane.
+    pub fn resolve(&self, dir: Vec3, height: f32, radius: f32, planet_r: f32) -> Option<Vec3> {
+        let mut out = dir;
+        let mut hit = false;
+        for c in &self.0 {
+            if height > c.height {
+                continue; // jumped over it
+            }
+            let arc = out.angle_between(c.dir) * planet_r;
+            let min = c.radius + radius;
+            if arc < min && arc > 1e-4 {
+                // push straight away from the prop centre along the great circle
+                let away = (out - c.dir * out.dot(c.dir)).normalize_or_zero();
+                if away != Vec3::ZERO {
+                    let axis = c.dir.cross(away).normalize_or_zero();
+                    if axis != Vec3::ZERO {
+                        out = (Quat::from_axis_angle(axis, min / planet_r) * c.dir).normalize();
+                        hit = true;
+                    }
+                }
+            }
+        }
+        if hit { Some(out) } else { None }
+    }
+}
+
 /// The active planet parameters, sampled by every system that touches the ground.
 #[derive(Resource, Clone, Copy)]
 pub struct CurrentPlanet {
@@ -104,10 +146,12 @@ pub fn spawn_stage(
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
     seed: u64,
-) {
+) -> PropColliders {
     let def = planet.kind.def();
     // deterministic prop scatter from the run seed (terrain was already seed-driven)
     let mut rng = StdRng::seed_from_u64(seed ^ 0xA11CE ^ planet.terrain.seed as u64);
+    // solid props collected as we place them
+    let mut colliders: Vec<PropCollider> = Vec::new();
 
     // Terrain
     let mesh = meshes.add(planet_mesh(&def, &planet.terrain));
@@ -170,6 +214,10 @@ pub fn spawn_stage(
                 .with_scale(scale),
             StageScoped,
         ));
+        // only chunky rocks block movement — pebbles you just step over
+        if scale.x > 1.1 {
+            colliders.push(PropCollider { dir, radius: scale.x * 0.75, height: scale.y * 1.2 });
+        }
     }
 
     // Boulders: a few big angular landmarks that break up the horizon.
@@ -189,6 +237,8 @@ pub fn spawn_stage(
                 .with_scale(Vec3::splat(scale)),
             StageScoped,
         ));
+        // big landmarks are always solid
+        colliders.push(PropCollider { dir, radius: scale * 0.7, height: scale * 1.4 });
     }
 
     // Crystals: emissive spikes (accent + light the night side a bit).
@@ -212,6 +262,7 @@ pub fn spawn_stage(
                 .with_scale(Vec3::splat(scale)),
             StageScoped,
         ));
+        colliders.push(PropCollider { dir, radius: scale * 0.4, height: scale * 1.6 });
     }
 
     // Wrecks: crashed landers half-sunk in the surface — some are your own dead prints.
@@ -244,6 +295,7 @@ pub fn spawn_stage(
                     .with_scale(Vec3::splat(scale)),
                 StageScoped,
             ));
+            colliders.push(PropCollider { dir, radius: scale * 0.85, height: scale * 1.1 });
         }
     }
 
@@ -285,6 +337,8 @@ pub fn spawn_stage(
                 Transform::from_translation(pos + dir * 2.0),
                 StageScoped,
             ));
+            // the mast is a thin pole — small radius, but you can't walk through it
+            colliders.push(PropCollider { dir, radius: 0.55, height: 2.4 });
         }
     }
 
@@ -444,6 +498,8 @@ pub fn spawn_stage(
         Transform::from_translation(-sun_dir * 1600.0),
         StageScoped,
     ));
+
+    PropColliders(colliders)
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {

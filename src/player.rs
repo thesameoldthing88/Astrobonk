@@ -24,10 +24,37 @@ pub struct Player {
     pub slide_cd: f32,
     pub land_timer: f32, // time since landing (for bhop window)
     pub coyote: f32,
+    // --- animation state (see the code-art-animation skill) ---
+    pub stride: f32,     // gait phase, advanced by DISTANCE so feet don't skate
+    pub gait_amp: f32,   // smoothed 0..1 blend between idle and full walk
+    pub squash: f32,     // landing-squash timer (counts up to ~0.25)
+    pub squash_amt: f32, // how hard the landing was
+    pub lean: f32,       // smoothed lean-into-acceleration
 }
 
 #[derive(Component)]
 pub struct PlayerRig; // camera
+
+/// Which limb a joint drives (hero-tier rig — see the code-art-animation skill).
+#[derive(Clone, Copy, PartialEq)]
+pub enum Limb {
+    ArmL,
+    ArmR,
+    LegL,
+    LegR,
+    Head,
+    Body,
+}
+
+/// An animated joint: we always compose from `rest`, never accumulate onto the
+/// live transform (the golden rule — otherwise it drifts and explodes).
+#[derive(Component)]
+pub struct Joint {
+    pub limb: Limb,
+    pub rest: Transform,
+    /// smoothed drag value, used by the head/body lag layer
+    pub lag: f32,
+}
 
 #[derive(Resource)]
 pub struct CamRig {
@@ -85,36 +112,81 @@ pub fn spawn_player(
                 slide_cd: 0.0,
                 land_timer: 10.0,
                 coyote: 0.0,
+                stride: 0.0,
+                gait_amp: 0.0,
+                squash: 1.0,
+                squash_amt: 0.0,
+                lean: 0.0,
             },
             Transform::from_translation(pos),
             Visibility::default(),
             StageScoped,
         ))
         .with_children(|p| {
-            // full suit (torso, chest panel, shoulders, arms, legs, boots) as one mesh
+            // ---- BODY joint: torso + backpack ride here so they can bob/lean ----
+            let body_rest = Transform::from_xyz(0.0, 0.0, 0.0);
             p.spawn((
-                Mesh3d(meshes.add(astronaut_suit_mesh())),
-                MeshMaterial3d(suit.clone()),
-                Transform::from_xyz(0.0, 0.0, 0.0),
-            ));
-            // helmet
+                Joint { limb: Limb::Body, rest: body_rest, lag: 0.0 },
+                body_rest,
+                Visibility::default(),
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Mesh3d(meshes.add(astronaut_torso_mesh())),
+                    MeshMaterial3d(suit.clone()),
+                    Transform::IDENTITY,
+                ));
+                b.spawn((
+                    Mesh3d(meshes.add(backpack_mesh())),
+                    MeshMaterial3d(pack),
+                    Transform::from_xyz(0.0, 0.18, 0.0),
+                ));
+            });
+
+            // ---- HEAD joint: helmet + visor (gets the drag/scan layer) ----
+            let head_rest = Transform::from_xyz(0.0, 0.7, 0.0);
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Sphere::new(0.3)))),
-                MeshMaterial3d(suit),
-                Transform::from_xyz(0.0, 0.7, 0.0),
-            ));
-            // visor
-            p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Sphere::new(0.24)))),
-                MeshMaterial3d(visor),
-                Transform::from_xyz(0.0, 0.72, -0.16).with_scale(Vec3::new(1.05, 0.85, 0.7)),
-            ));
-            // backpack (main + two life-support tanks)
-            p.spawn((
-                Mesh3d(meshes.add(backpack_mesh())),
-                MeshMaterial3d(pack),
-                Transform::from_xyz(0.0, 0.18, 0.0),
-            ));
+                Joint { limb: Limb::Head, rest: head_rest, lag: 0.0 },
+                head_rest,
+                Visibility::default(),
+            ))
+            .with_children(|h| {
+                h.spawn((
+                    Mesh3d(meshes.add(Mesh::from(Sphere::new(0.3)))),
+                    MeshMaterial3d(suit.clone()),
+                    Transform::IDENTITY,
+                ));
+                h.spawn((
+                    Mesh3d(meshes.add(Mesh::from(Sphere::new(0.24)))),
+                    MeshMaterial3d(visor),
+                    Transform::from_xyz(0.0, 0.02, -0.16).with_scale(Vec3::new(1.05, 0.85, 0.7)),
+                ));
+            });
+
+            // ---- LIMB joints: arms pivot at shoulders, legs at hips ----
+            let arm_mesh = meshes.add(astronaut_arm_mesh());
+            let leg_mesh = meshes.add(astronaut_leg_mesh());
+            for (limb, x, y, mesh) in [
+                (Limb::ArmL, -0.34, 0.42, arm_mesh.clone()),
+                (Limb::ArmR, 0.34, 0.42, arm_mesh),
+                (Limb::LegL, -0.15, -0.3, leg_mesh.clone()),
+                (Limb::LegR, 0.15, -0.3, leg_mesh),
+            ] {
+                // arms rest with a slight outward splay (asymmetry sells life)
+                let rest = Transform::from_xyz(x, y, 0.0).with_rotation(
+                    if matches!(limb, Limb::ArmL | Limb::ArmR) {
+                        Quat::from_rotation_z(if x < 0.0 { 0.12 } else { -0.12 })
+                    } else {
+                        Quat::IDENTITY
+                    },
+                );
+                p.spawn((
+                    Joint { limb, rest, lag: 0.0 },
+                    Mesh3d(mesh),
+                    MeshMaterial3d(suit.clone()),
+                    rest,
+                ));
+            }
             // hand tool (whatever weapon is equipped, this is its silhouette)
             let tool_mat = materials.add(StandardMaterial {
                 base_color: Color::srgb(0.25, 0.27, 0.32),
@@ -157,9 +229,10 @@ pub fn spawn_player(
         });
 }
 
-/// A chunky astronaut suit baked into one mesh (suit material multiplies the vertex
-/// colors: WHITE = suit tint, darker = joints/boots/panel).
-fn astronaut_suit_mesh() -> Mesh {
+/// The astronaut's TORSO only — limbs are separate joint entities so they can be
+/// animated (hero-tier rig, per the code-art-animation skill). Suit material
+/// multiplies the vertex colors: WHITE = suit tint, darker = joints/panel.
+fn astronaut_torso_mesh() -> Mesh {
     use crate::meshkit::at;
     let body = Color::WHITE;
     let joint = Color::srgb(0.5, 0.5, 0.56);
@@ -172,18 +245,38 @@ fn astronaut_suit_mesh() -> Mesh {
     m.add_box(Vec3::new(0.26, 0.2, 0.05), at(Vec3::new(0.0, 0.24, -0.19)), dark);
     // neck
     m.add_cylinder(0.11, 0.14, 8, at(Vec3::new(0.0, 0.52, 0.0)), joint);
+    // shoulder caps (the arm joints pivot inside these)
     for s in [-1.0, 1.0] {
-        // shoulder
         m.add_sphere(0.16, 1, at(Vec3::new(0.31 * s, 0.42, 0.0)), joint);
-        // upper arm + forearm + glove
-        m.add_cylinder(0.1, 0.36, 8, Transform::from_translation(Vec3::new(0.34 * s, 0.14, 0.0)).with_rotation(Quat::from_rotation_z(0.15 * s)), body);
-        m.add_cylinder(0.09, 0.34, 8, at(Vec3::new(0.38 * s, -0.18, 0.0)), body);
-        m.add_sphere(0.11, 1, at(Vec3::new(0.4 * s, -0.4, 0.0)), joint);
-        // thigh + shin + boot
-        m.add_cylinder(0.13, 0.36, 8, at(Vec3::new(0.15 * s, -0.45, 0.0)), body);
-        m.add_cylinder(0.11, 0.32, 8, at(Vec3::new(0.15 * s, -0.76, 0.0)), body);
-        m.add_box(Vec3::new(0.2, 0.13, 0.32), at(Vec3::new(0.15 * s, -0.9, -0.06)), dark);
     }
+    m.build()
+}
+
+/// One arm, built pivoting at the SHOULDER (origin) and hanging down -Y so a
+/// rotation about X swings it fore-aft correctly.
+fn astronaut_arm_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let body = Color::WHITE;
+    let joint = Color::srgb(0.5, 0.5, 0.56);
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_cylinder(0.1, 0.36, 8, at(Vec3::new(0.0, -0.19, 0.0)), body); // upper arm
+    m.add_sphere(0.095, 1, at(Vec3::new(0.0, -0.38, 0.0)), joint); // elbow
+    m.add_cylinder(0.09, 0.34, 8, at(Vec3::new(0.0, -0.55, 0.0)), body); // forearm
+    m.add_sphere(0.11, 1, at(Vec3::new(0.0, -0.75, 0.0)), joint); // glove
+    m.build()
+}
+
+/// One leg, pivoting at the HIP (origin), hanging down -Y.
+fn astronaut_leg_mesh() -> Mesh {
+    use crate::meshkit::at;
+    let body = Color::WHITE;
+    let joint = Color::srgb(0.5, 0.5, 0.56);
+    let dark = Color::srgb(0.30, 0.30, 0.36);
+    let mut m = crate::meshkit::MeshData::new();
+    m.add_cylinder(0.13, 0.36, 8, at(Vec3::new(0.0, -0.18, 0.0)), body); // thigh
+    m.add_sphere(0.12, 1, at(Vec3::new(0.0, -0.37, 0.0)), joint); // knee
+    m.add_cylinder(0.11, 0.32, 8, at(Vec3::new(0.0, -0.54, 0.0)), body); // shin
+    m.add_box(Vec3::new(0.2, 0.13, 0.32), at(Vec3::new(0.0, -0.72, -0.06)), dark); // boot
     m.build()
 }
 
@@ -339,6 +432,7 @@ pub fn player_input(
 pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
+    props: Res<crate::planet::PropColliders>,
     mut run: ResMut<RunState>,
     mut q: Query<(&mut Player, &mut Transform)>,
 ) {
@@ -366,10 +460,27 @@ pub fn player_physics(
     p.vel_t = new_vel;
     p.height += p.vel_r * dt;
 
+    // solid props: push out of rocks/boulders/wrecks/beacons and kill the
+    // velocity component heading into them (so you slide along, not stick).
+    if let Some(fixed) = props.resolve(p.dir, p.height, PLAYER_RADIUS, planet.radius) {
+        let push = (fixed - p.dir).normalize_or_zero();
+        p.dir = fixed;
+        if push != Vec3::ZERO {
+            let push_t = (push - p.dir * push.dot(p.dir)).normalize_or_zero();
+            let into = p.vel_t.dot(push_t);
+            if into < 0.0 {
+                p.vel_t -= push_t * into; // remove only the inward component
+            }
+        }
+    }
+
     // terrain contact
     if p.height <= 0.0 {
         if !p.grounded {
             p.land_timer = 0.0;
+            // landing squash scaled by impact speed [recipe R5]
+            p.squash_amt = (p.vel_r.abs() * 0.022).clamp(0.05, 0.28);
+            p.squash = 0.0;
         }
         p.height = 0.0;
         p.vel_r = 0.0;
@@ -385,6 +496,105 @@ pub fn player_physics(
     tf.translation = pos;
     let lean = if p.slide_timer > 0.0 { 0.9 } else { 0.0 };
     tf.rotation = sphere::frame_quat(up, p.facing) * Quat::from_rotation_x(-lean);
+}
+
+/// The astronaut animator — the code-art-animation skill made real.
+/// Layered per the rig rule: start from each joint's REST pose, then add
+/// (1) breathing idle [R1], (2) the distance-driven walk cycle [R2],
+/// (3) lean-into-acceleration [R3], (4) landing squash [R5], (5) head drag.
+/// Never accumulates onto live transforms.
+pub fn animate_player(
+    time: Res<Time>,
+    mut q_player: Query<(&mut Player, &Children)>,
+    mut q_joints: Query<(&mut Joint, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let Ok((mut p, children)) = q_player.single_mut() else { return };
+    let t = time.elapsed_secs();
+
+    // --- drive the gait by DISTANCE travelled (feet don't skate) ---
+    let speed = p.vel_t.length();
+    let stride_len = 2.1;
+    p.stride = (p.stride + speed * dt / stride_len * std::f32::consts::TAU) % std::f32::consts::TAU;
+
+    // blend gait in/out smoothly (framerate-independent smoothing)
+    let target_amp = if p.grounded { (speed / PLAYER_RUN_SPEED).clamp(0.0, 1.15) } else { 0.0 };
+    let k = 1.0 - (-9.0 * dt).exp();
+    p.gait_amp += (target_amp - p.gait_amp) * k;
+    let amp = p.gait_amp;
+
+    // sliding: tuck the limbs instead of walking
+    let slide = if p.slide_timer > 0.0 { 1.0 } else { 0.0 };
+    let slide_k = 1.0 - (-14.0 * dt).exp();
+    p.lean += (slide - p.lean) * slide_k;
+    let tuck = p.lean;
+
+    // landing squash timer [R5]
+    p.squash += dt;
+    let squash_scale = if p.squash < 0.25 && p.squash_amt > 0.0 {
+        let s = p.squash;
+        if s < 0.07 {
+            1.0 - p.squash_amt * (s / 0.07)
+        } else {
+            let e = (s - 0.07) / 0.18;
+            // ease-out-back: overshoot slightly past 1.0 then settle
+            let c1 = 1.70158;
+            let c3 = c1 + 1.0;
+            let eb = 1.0 + c3 * (e - 1.0).powi(3) + c1 * (e - 1.0).powi(2);
+            1.0 - p.squash_amt * (1.0 - eb)
+        }
+    } else {
+        1.0
+    };
+
+    // airborne stretch: lengthen along the fall/rise axis
+    let air_stretch = if !p.grounded { 1.0 + (p.vel_r.abs() * 0.012).min(0.14) } else { 1.0 };
+
+    let lp = p.stride; // left phase
+    let rp = p.stride + std::f32::consts::PI; // right (anti-phase)
+    let breath = (t * 2.1).sin();
+
+    for child in children.iter() {
+        let Ok((joint, mut tf)) = q_joints.get_mut(child) else { continue };
+        // ALWAYS start from rest
+        *tf = joint.rest;
+        match joint.limb {
+            Limb::LegL | Limb::LegR => {
+                let ph = if joint.limb == Limb::LegL { lp } else { rp };
+                // swing fore-aft; tuck up when sliding
+                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.55 * amp - tuck * 0.9);
+                // lift only during the swing half of the cycle
+                tf.translation.y += ph.sin().max(0.0) * 0.09 * amp;
+            }
+            Limb::ArmL | Limb::ArmR => {
+                // arms swing ANTI-phase to the leg on the same side
+                let ph = if joint.limb == Limb::ArmL { rp } else { lp };
+                tf.rotation *= Quat::from_rotation_x(ph.sin() * 0.38 * amp + tuck * 0.5);
+                // subtle idle sway when standing still
+                tf.rotation *= Quat::from_rotation_z((t * 1.3).sin() * 0.03 * (1.0 - amp));
+            }
+            Limb::Body => {
+                // bob twice per cycle (lowest at each footfall) + waddle roll
+                tf.translation.y += (1.0 - lp.sin().abs()) * 0.055 * amp;
+                tf.rotation *= Quat::from_rotation_z((p.stride * 0.5).sin() * 0.045 * amp);
+                // lean forward into the run, deeper while sliding
+                tf.rotation *= Quat::from_rotation_x(-0.12 * amp - tuck * 0.5);
+                // breathing [R1] + landing squash [R5] + air stretch, volume-ish preserved
+                let sy = squash_scale * air_stretch * (1.0 + breath * 0.02 * (1.0 - amp));
+                tf.scale = Vec3::new(1.0 / sy.sqrt(), sy, 1.0 / sy.sqrt());
+            }
+            Limb::Head => {
+                // counter-bob so the helmet stays steadier than the body (drag layer)
+                tf.translation.y += (1.0 - lp.sin().abs()) * 0.02 * amp;
+                tf.rotation *= Quat::from_rotation_x(0.06 * amp + tuck * 0.35);
+                // slow idle scan when standing still — a model at rest is a statue
+                tf.rotation *= Quat::from_rotation_y((t * 0.55).sin() * 0.22 * (1.0 - amp));
+            }
+        }
+    }
 }
 
 /// Mouse-orbit chase camera aligned to the local vertical.

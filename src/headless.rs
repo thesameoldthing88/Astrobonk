@@ -175,6 +175,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::interact::ShopPanel>()
         .init_resource::<crate::comet::Comet>()
         .init_resource::<crate::run::GameRng>()
+        .init_resource::<crate::planet::PropColliders>()
         .init_resource::<crate::events_world::DustStorm>()
         .init_resource::<ButtonInput<KeyCode>>()
         .insert_resource(save)
@@ -306,7 +307,8 @@ fn headless_enter(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
-    crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, Vec3::Y);
     commands.insert_resource(planet);

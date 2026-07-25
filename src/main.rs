@@ -94,6 +94,7 @@ fn main() {
         .init_resource::<interact::ShopPanel>()
         .init_resource::<comet::Comet>()
         .init_resource::<run::GameRng>()
+        .init_resource::<planet::PropColliders>()
         .init_resource::<tutorial::Tutorial>()
         .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
@@ -205,6 +206,7 @@ fn main() {
                 combat::fader_update,
                 enemies::enemy_flash,
                 player::player_physics,
+                player::animate_player,
                 player::player_upkeep,
                 fx::update_particles,
                 director::stage_transition,
@@ -308,7 +310,8 @@ fn enter_run(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
-    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state);
     interact::spawn_interactables(
         &mut commands,

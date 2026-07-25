@@ -184,7 +184,8 @@ pub fn stage_transition(
     game_rng.reseed(stage_seed);
 
     let planet = CurrentPlanet::from_kind(run.planet());
-    planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run);
     interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, Vec3::Y);
     commands.insert_resource(planet);

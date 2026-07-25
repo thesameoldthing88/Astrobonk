@@ -1,5 +1,40 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2i: PROP COLLISION (bug: player walked through rocks)
+- User-reported: props were pure visuals — only the terrain surface was solid, so the
+  player walked straight through rocks/boulders/wrecks/beacons/crystals.
+- Fix: new `PropCollider { dir, radius, height }` + `PropColliders` resource. `spawn_stage`
+  now RETURNS the colliders it placed (rocks >1.1 scale, all boulders, wrecks, beacon
+  masts, crystals); inserted as a resource at every call site (main/director/headless).
+- `PropColliders::resolve()` does the push-out on the sphere's tangent plane (great-circle
+  offset from the prop centre); `player_physics` applies it after the advance step and
+  removes ONLY the inward velocity component, so you slide along a rock instead of sticking.
+- Height-aware: props you've jumped above don't collide, so you can hop onto/over them.
+- Smoke + windowed check green.
+- KNOWN GAP (deliberate): enemies still ignore props — the horde flows through rocks. Fine
+  for now (1200 enemies × N props is the expensive case; would need the spatial hash), but
+  noted for a later pass if it reads badly.
+
+## 2026-07-24 — Session 2h: CODE-ART MASTERCLASS + the astronaut comes alive
+- Built a new chadkit skill `code-art-animation` (SKILL.md + recipes.md) — the reference
+  Chad asked for: shape-language rules for composed-primitive models, animation-principles
+  checklist, math toolkit (easing / springs / framerate-independent smoothing / sine
+  stacking / phase waves / quaternion craft incl. our parallel-transport camera lesson /
+  2-bone IK / gait / impact), three rig tiers by perf budget, review checklist, and 12
+  copy-paste rigs. Mirrored into the plugin cache; memory updated.
+  NOTE: chadkit is NOT a git repo — skill is on disk only (offer `git init`).
+- **Proved it on ASTROBONK.** Rebuilt the astronaut from one baked static mesh into a
+  HERO-TIER JOINT RIG: torso+backpack under a Body joint, helmet+visor under a Head joint,
+  and 4 limb joints (arms pivot at shoulders, legs at hips) with meshes authored to hang
+  from their pivots. New `Joint { limb, rest, lag }` component.
+- New `animate_player` system layering the recipes, always composing from REST:
+  R2 walk cycle driven by DISTANCE (stride_len 2.1m, so feet never skate) with anti-phase
+  arms; body bob twice/cycle + waddle roll + run lean; R1 breathing idle (fades in as the
+  gait fades out) + slow head scan at rest; R5 landing squash scaled by impact speed with
+  ease-out-back settle + airborne stretch, volume-preserved; slide tuck; head counter-bob
+  (drag layer). Gait amplitude smoothed with 1-exp(-rate·dt).
+- Smoke green + windowed render OK.
+
 ## 2026-07-24 — Session 2g: ONBOARDING (first-run Mission-Control tutorial)
 - New `tutorial.rs`: 6 diegetic radio lines from Mission Control, triggered by what the
   player is doing (move → auto-weapons → gems/level-up → slide → day/night+flashlight →
