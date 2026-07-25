@@ -114,24 +114,7 @@ pub fn spawn_player(
     };
     let pos = planet.surface_point(dir) + dir * PLAYER_HEIGHT;
 
-    let suit = materials.add(StandardMaterial {
-        base_color: def.suit,
-        perceptual_roughness: 0.7,
-        ..default()
-    });
-    let visor = materials.add(StandardMaterial {
-        base_color: def.visor,
-        emissive: def.visor.to_linear() * 1.2,
-        perceptual_roughness: 0.15,
-        ..default()
-    });
-    let pack = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.8, 0.8, 0.85),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-
-    commands
+    let root = commands
         .spawn((
             Player {
                 dir,
@@ -162,7 +145,42 @@ pub fn spawn_player(
             StageScoped,
         ))
         .insert_if(LocalPlayer, || is_local)
-        .with_children(|p| {
+        .id();
+    build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor);
+}
+
+/// Build the astronaut's VISUAL rig as children of `root`: torso, helmet, four animated
+/// limbs, tool and flashlight. Deliberately separate from `spawn_player` so a networked
+/// remote player can wear the same look WITHOUT inheriting `Player`, `PlayerState` or
+/// `StageScoped` — a replicated entity is owned by the server, and giving it a `Player`
+/// would both stomp its network-driven transform in `player_physics` and break the many
+/// `.single()` player queries across the codebase.
+pub fn build_astronaut_rig(
+    commands: &mut Commands,
+    root: Entity,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    suit_color: Color,
+    visor_color: Color,
+) {
+    let suit = materials.add(StandardMaterial {
+        base_color: suit_color,
+        perceptual_roughness: 0.7,
+        ..default()
+    });
+    let visor = materials.add(StandardMaterial {
+        base_color: visor_color,
+        emissive: visor_color.to_linear() * 1.2,
+        perceptual_roughness: 0.15,
+        ..default()
+    });
+    let pack = materials.add(StandardMaterial {
+        base_color: Color::srgb(0.8, 0.8, 0.85),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+
+    commands.entity(root).with_children(|p| {
             // ---- BODY joint: torso + backpack ride here so they can bob/lean ----
             let body_rest = Transform::from_xyz(0.0, 0.0, 0.0);
             p.spawn((
@@ -545,63 +563,81 @@ pub fn player_physics(
     }
 }
 
-/// The astronaut animator — the code-art-animation skill made real.
+/// Animation STATE for one astronaut rig. Held by `Player` for the local astronaut and by
+/// `RemoteAstronaut` for networked ones, so both wear the identical walk cycle.
+#[derive(Default, Clone, Copy)]
+pub struct RigAnim {
+    pub stride: f32,
+    pub gait_amp: f32,
+    pub squash: f32,
+    pub squash_amt: f32,
+    pub lean: f32,
+}
+
+/// What the rig is DOING this frame. Locally this comes from physics; for a remote player
+/// it is finite-differenced from replicated motion.
+#[derive(Clone, Copy)]
+pub struct RigDrive {
+    pub speed: f32,
+    pub grounded: bool,
+    pub sliding: bool,
+    pub vel_r: f32,
+}
+
+/// The astronaut animator, independent of where the motion came from.
 /// Layered per the rig rule: start from each joint's REST pose, then add
 /// (1) breathing idle [R1], (2) the distance-driven walk cycle [R2],
 /// (3) lean-into-acceleration [R3], (4) landing squash [R5], (5) head drag.
 /// Never accumulates onto live transforms.
-pub fn animate_player(
-    time: Res<Time>,
-    mut q_player: Query<(&mut Player, &Children)>,
-    mut q_joints: Query<(&mut Joint, &mut Transform)>,
+pub fn animate_rig(
+    a: &mut RigAnim,
+    d: RigDrive,
+    children: &Children,
+    q_joints: &mut Query<(&mut Joint, &mut Transform)>,
+    dt: f32,
+    t: f32,
 ) {
-    let dt = time.delta_secs();
-    if dt <= 0.0 {
-        return;
-    }
-    let t = time.elapsed_secs();
-    for (mut p, children) in &mut q_player {
 
     // --- drive the gait by DISTANCE travelled (feet don't skate) ---
-    let speed = p.vel_t.length();
+    let speed = d.speed;
     let stride_len = 2.1;
-    p.stride = (p.stride + speed * dt / stride_len * std::f32::consts::TAU) % std::f32::consts::TAU;
+    a.stride = (a.stride + speed * dt / stride_len * std::f32::consts::TAU) % std::f32::consts::TAU;
 
     // blend gait in/out smoothly (framerate-independent smoothing)
-    let target_amp = if p.grounded { (speed / PLAYER_RUN_SPEED).clamp(0.0, 1.15) } else { 0.0 };
+    let target_amp = if d.grounded { (speed / PLAYER_RUN_SPEED).clamp(0.0, 1.15) } else { 0.0 };
     let k = 1.0 - (-9.0 * dt).exp();
-    p.gait_amp += (target_amp - p.gait_amp) * k;
-    let amp = p.gait_amp;
+    a.gait_amp += (target_amp - a.gait_amp) * k;
+    let amp = a.gait_amp;
 
     // sliding: tuck the limbs instead of walking
-    let slide = if p.slide_timer > 0.0 { 1.0 } else { 0.0 };
+    let slide = if d.sliding { 1.0 } else { 0.0 };
     let slide_k = 1.0 - (-14.0 * dt).exp();
-    p.lean += (slide - p.lean) * slide_k;
-    let tuck = p.lean;
+    a.lean += (slide - a.lean) * slide_k;
+    let tuck = a.lean;
 
     // landing squash timer [R5]
-    p.squash += dt;
-    let squash_scale = if p.squash < 0.25 && p.squash_amt > 0.0 {
-        let s = p.squash;
+    a.squash += dt;
+    let squash_scale = if a.squash < 0.25 && a.squash_amt > 0.0 {
+        let s = a.squash;
         if s < 0.07 {
-            1.0 - p.squash_amt * (s / 0.07)
+            1.0 - a.squash_amt * (s / 0.07)
         } else {
             let e = (s - 0.07) / 0.18;
             // ease-out-back: overshoot slightly past 1.0 then settle
             let c1 = 1.70158;
             let c3 = c1 + 1.0;
             let eb = 1.0 + c3 * (e - 1.0).powi(3) + c1 * (e - 1.0).powi(2);
-            1.0 - p.squash_amt * (1.0 - eb)
+            1.0 - a.squash_amt * (1.0 - eb)
         }
     } else {
         1.0
     };
 
     // airborne stretch: lengthen along the fall/rise axis
-    let air_stretch = if !p.grounded { 1.0 + (p.vel_r.abs() * 0.012).min(0.14) } else { 1.0 };
+    let air_stretch = if !d.grounded { 1.0 + (d.vel_r.abs() * 0.012).min(0.14) } else { 1.0 };
 
-    let lp = p.stride; // left phase
-    let rp = p.stride + std::f32::consts::PI; // right (anti-phase)
+    let lp = a.stride; // left phase
+    let rp = a.stride + std::f32::consts::PI; // right (anti-phase)
     let breath = (t * 2.1).sin();
 
     for child in children.iter() {
@@ -626,7 +662,7 @@ pub fn animate_player(
             Limb::Body => {
                 // bob twice per cycle (lowest at each footfall) + waddle roll
                 tf.translation.y += (1.0 - lp.sin().abs()) * 0.09 * amp;
-                tf.rotation *= Quat::from_rotation_z((p.stride * 0.5).sin() * 0.075 * amp);
+                tf.rotation *= Quat::from_rotation_z((a.stride * 0.5).sin() * 0.075 * amp);
                 // lean forward into the run, deeper while sliding
                 tf.rotation *= Quat::from_rotation_x(-0.12 * amp - tuck * 0.5);
                 // breathing [R1] + landing squash [R5] + air stretch, volume-ish preserved
@@ -642,6 +678,43 @@ pub fn animate_player(
             }
         }
     }
+}
+
+/// The astronaut animator — the code-art-animation skill made real.
+/// Layered per the rig rule: start from each joint's REST pose, then add
+/// (1) breathing idle [R1], (2) the distance-driven walk cycle [R2],
+/// (3) lean-into-acceleration [R3], (4) landing squash [R5], (5) head drag.
+/// Never accumulates onto live transforms.
+pub fn animate_player(
+    time: Res<Time>,
+    mut q_player: Query<(&mut Player, &Children)>,
+    mut q_joints: Query<(&mut Joint, &mut Transform)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let t = time.elapsed_secs();
+    for (mut p, children) in &mut q_player {
+        let mut a = RigAnim {
+            stride: p.stride,
+            gait_amp: p.gait_amp,
+            squash: p.squash,
+            squash_amt: p.squash_amt,
+            lean: p.lean,
+        };
+        let d = RigDrive {
+            speed: p.vel_t.length(),
+            grounded: p.grounded,
+            sliding: p.slide_timer > 0.0,
+            vel_r: p.vel_r,
+        };
+        animate_rig(&mut a, d, children, &mut q_joints, dt, t);
+        // squash_amt is read-only to the animator; the impact systems own it.
+        p.stride = a.stride;
+        p.gait_amp = a.gait_amp;
+        p.squash = a.squash;
+        p.lean = a.lean;
     }
 }
 
@@ -654,7 +727,7 @@ pub fn camera_rig(
     planet: Res<CurrentPlanet>,
     phase: Res<RunPhase>,
     save: Res<crate::save::MetaSave>,
-    q_player: Query<(&Player, &Transform), Without<PlayerRig>>,
+    q_player: Query<(&Player, &Transform), (With<LocalPlayer>, Without<PlayerRig>)>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
     mut q_proj: Query<&mut Projection, With<PlayerRig>>,
 ) {

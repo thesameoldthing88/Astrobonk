@@ -18,6 +18,13 @@ pub const SPEED_HARD_CAP: f32 = 2.1; // × run speed, bhop chains can't exceed
 pub const CAM_DISTANCE: f32 = 7.5;
 pub const CAM_HEIGHT: f32 = 3.2;
 pub const CAM_STIFFNESS: f32 = 14.0;
+
+/// How hard a co-op teammate's drawn pose chases the last replicated snapshot. Raise it and
+/// motion becomes stuttery in lockstep with the packet rate; lower it and teammates lag.
+pub const REMOTE_SMOOTH_RATE: f32 = 14.0;
+/// Arc metres of error past which we teleport a teammate instead of easing (stage changes,
+/// teleporter use — easing across half a planet would look like a ghost gliding through it).
+pub const REMOTE_SNAP_ARC: f32 = 8.0;
 pub const CAM_SENS: f32 = 0.0032;
 
 pub const ENEMY_CAP: usize = 1200;

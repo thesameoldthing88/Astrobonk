@@ -16,6 +16,7 @@ mod net;
 mod pickups;
 mod planet;
 mod player;
+mod remote;
 mod run;
 mod save;
 mod sphere;
@@ -81,6 +82,7 @@ fn main() {
             ..default()
         })
         .add_plugins(net::NetPlugin)
+        .add_plugins(remote::RemoteVisualsPlugin)
         .init_state::<AppState>()
         .init_resource::<run::RunPhase>()
         .init_resource::<run::ChoicePanel>()

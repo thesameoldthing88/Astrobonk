@@ -28,7 +28,8 @@ use bevy_replicon_renet::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
-use std::time::SystemTime;
+use bevy::time::common_conditions::on_timer;
+use std::time::{Duration, SystemTime};
 
 /// Bumped whenever the wire format changes — mismatched builds refuse to connect
 /// instead of desyncing in confusing ways.
@@ -74,6 +75,22 @@ pub struct PlayerVitals {
     pub level: u32,
     pub down: bool,
 }
+
+/// Host -> client: "you are player N". The client cannot infer this: replicon 0.40 exposes
+/// no local-client-id API, and PlayerId alone can't identify "me" — the client's own
+/// predicted astronaut and the HOST's astronaut are both PlayerId(0). Without this the
+/// client can't tell which replicated astronaut is the server's copy of itself, and would
+/// draw a ghost twin of itself standing wherever the host thinks it is.
+///
+/// Sent on an ORDERED channel (a dropped identity packet would strand the client
+/// permanently) and re-sent on a timer, because a non-independent server message aimed at
+/// a not-yet-`AuthorizedClient` is dropped with only an error log.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct AssignPlayerId(pub u8);
+
+/// Client-side: which PlayerId the host says we are. `None` until the handshake lands.
+#[derive(Resource, Default, Debug)]
+pub struct MyPlayerId(pub Option<u8>);
 
 /// Client -> host input intent. The host is authoritative: it applies these to the
 /// matching astronaut and simulates the result.
@@ -132,8 +149,22 @@ impl Plugin for NetPlugin {
             .replicate::<PlayerVitals>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
+            .add_server_message::<AssignPlayerId>(Channel::Ordered)
+            .init_resource::<MyPlayerId>()
             .add_systems(Startup, apply_cli_net)
             .init_resource::<PeerSlots>()
+            .add_systems(
+                Update,
+                announce_player_ids
+                    .run_if(is_hosting)
+                    .run_if(on_timer(Duration::from_millis(500))),
+            )
+            .add_systems(
+                PreUpdate,
+                receive_player_id
+                    .after(ClientSystems::Receive)
+                    .run_if(is_client),
+            )
             .add_systems(Update, report_connection)
             // CLIENT: our keyboard intent goes up the wire every frame.
             .init_resource::<NetDebug>()
@@ -175,11 +206,44 @@ impl Plugin for NetPlugin {
 fn is_simulating(role: Res<NetRole>) -> bool {
     role.simulates()
 }
-fn is_client(role: Res<NetRole>) -> bool {
+pub fn is_client(role: Res<NetRole>) -> bool {
     matches!(*role, NetRole::Client)
 }
 fn is_hosting(role: Res<NetRole>) -> bool {
     matches!(*role, NetRole::Host)
+}
+
+/// HOST. Keep telling each authorized client which player it is. Deliberately repeated
+/// rather than sent once on connect: replicon buffers server messages until the client is
+/// authorized and only flushes on a ServerTick change, so a one-shot send from the seating
+/// code can vanish on the first frames without any visible error.
+///
+/// `SendTargets::Single`, never `All` — `All` also writes the message into the HOST's own
+/// message queue (for listen-server support), which would make the host think it had been
+/// assigned a client's id.
+fn announce_player_ids(
+    slots: Res<PeerSlots>,
+    clients: Query<Entity, (With<ConnectedClient>, With<AuthorizedClient>)>,
+    mut out: MessageWriter<ToClients<AssignPlayerId>>,
+) {
+    for client in &clients {
+        if let Some(id) = slots.player_id(client) {
+            out.write(ToClients {
+                targets: SendTargets::Single(ClientId::Client(client)),
+                message: AssignPlayerId(id),
+            });
+        }
+    }
+}
+
+/// CLIENT. Latch our identity. Logged only on change, since the host repeats the message.
+fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<MyPlayerId>) {
+    for m in msgs.read() {
+        if mine.0 != Some(m.0) {
+            info!("NET assigned PlayerId {}", m.0);
+            mine.0 = Some(m.0);
+        }
+    }
 }
 
 /// CLIENT -> HOST. We send intent every frame rather than on-change: it's a handful of
@@ -229,17 +293,32 @@ fn log_astronauts(
     // Entities that arrived over the wire: they carry PlayerId/NetTransform but no local
     // `Player` component or mesh yet — that's the next step (remote player visuals).
     replicated: Query<&NetTransform, Without<crate::player::Player>>,
+    rigs: Query<(&PlayerId, &crate::remote::RemoteAstronaut)>,
+    n_players: Query<(), With<crate::player::Player>>,
+    n_states: Query<(), With<crate::run::PlayerState>>,
 ) {
     let now = time.elapsed_secs();
     if now < *next {
         return;
     }
     *next = now + 1.0;
+    // Player/PlayerState counts are the load-bearing invariant: ~30 systems find the player
+    // with .single(), so on a CLIENT these must stay at exactly 1 no matter how many
+    // teammates are drawn. If either climbs above 1 on a client, remote visuals have leaked
+    // a simulation component and the HUD/camera/enemy-targeting have gone silently dead.
     info!(
-        "NET[{:?}] replicated astronauts received: {}",
+        "NET[{:?}] replicated={} local_players={} player_states={}",
         *role,
-        replicated.iter().count()
+        replicated.iter().count(),
+        n_players.iter().count(),
+        n_states.iter().count()
     );
+    for (pid, r) in &rigs {
+        info!(
+            "NET[{:?}] remote rig player {} drawn at ({:.3},{:.3},{:.3}) speed={:.2}",
+            *role, pid.0, r.dir.x, r.dir.y, r.dir.z, r.speed
+        );
+    }
     for (pid, p, local) in &q {
         let tag = if local.is_some() { "local" } else { "remote" };
         info!(
@@ -262,13 +341,26 @@ fn seat_joining_players(
     save: Option<Res<crate::save::MetaSave>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    existing: Query<&PlayerId>,
 ) {
+    let mut respawn: Vec<(u8, Entity)> = Vec::new();
     let (Some(planet), Some(run), Some(save)) = (planet, run, save) else {
         return; // not in a run yet — they'll be seated when the drop happens
     };
+    // Which player ids currently have a body on the surface. Checked every frame rather
+    // than trusting the slot table: astronauts are StageScoped, so the stage transition
+    // despawns peers and respawns only player 0. Without this reconciliation a teammate
+    // vanishes for good after the first planet — and on the client their rig disappears
+    // with the replicated entity, which looks exactly like a netcode fault.
+    let alive: Vec<u8> = existing.iter().map(|pid| pid.0).collect();
+
     for client in &joined {
-        if slots.player_id(client).is_some() {
-            continue; // already seated
+        if let Some(id) = slots.player_id(client) {
+            if alive.contains(&id) {
+                continue; // seated and embodied
+            }
+            respawn.push((id, client));
+            continue;
         }
         let Some(id) = slots.claim(client) else {
             warn!("lobby full — refusing extra client {client}");
@@ -286,6 +378,22 @@ fn seat_joining_players(
             false, // remote: no LocalPlayer marker, no camera, driven by their input
         );
         info!("NET seated client {client} as player {id}");
+    }
+
+    // Re-embody peers whose astronaut was reaped by a stage change.
+    for (id, client) in respawn {
+        crate::player::spawn_player(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &planet,
+            &run,
+            &save,
+            id,
+            run.character,
+            false,
+        );
+        info!("NET re-seated client {client} as player {id} after stage change");
     }
 }
 
@@ -534,14 +642,38 @@ fn push_player_vitals(
 //    desync that looked exactly like a dropped-packet problem. Anything that writes
 //    intent must be `.before(send_local_input)`.
 //
-// 2b. REMOTE PLAYER VISUALS — NEXT, and the smallest useful step. Replication is
-//    confirmed delivering: a client sees 2 entities carrying PlayerId + NetTransform +
-//    PlayerVitals, but with no `Player` component and no mesh, so nothing is drawn.
-//    Needed: (a) on the client, build the astronaut rig for each replicated PlayerId and
-//    drive its Transform from NetTransform (smoothed — raw snapshots will jitter);
-//    (b) tell the client its OWN PlayerId so it can skip the server copy of itself,
-//    otherwise every player sees a ghost twin of themselves standing where the host
-//    thinks they are.
+// 2b. REMOTE PLAYER VISUALS — DONE (see remote.rs). A client draws each teammate with the
+//    real astronaut rig, eased toward the replicated pose and animated by the same
+//    `animate_rig` the local player uses. Verified: client draws exactly ONE rig (the
+//    host's, not its own server-side copy), and its derived speed matches the host's
+//    authoritative |vel_t| within 0.5% — which matters because gait amplitude is
+//    speed/PLAYER_RUN_SPEED, so a wrong speed means skating feet.
+//    Two derivation traps, both silent under-estimates, both cost a measurement cycle:
+//      * integrate with the LOCAL surface radius (planet.surface(dir) + height), the same
+//        one sphere::advance uses — not the nominal planet.radius;
+//      * measure the CHORD, not angle_between: the per-frame angle is ~1e-3 rad, so
+//        acos(dot) lands where dot ~ 1 - 5e-7 and f32 quantizes it toward 1.0.
+//    Identity comes from an AssignPlayerId server message — replicon 0.40 exposes no
+//    local-client-id API, and PlayerId alone can't answer "which one is me?" because the
+//    client's predicted body and the HOST's body are both PlayerId(0).
+//
+// 2c. HOST-SIDE MULTI-PLAYER QUERIES — the next ticket, and currently the biggest hole.
+//    MEASURED, not theoretical: with one client joined the host reports
+//    `local_players=2 player_states=2`. About thirty systems find the player with
+//    `.single()`, so on a 2-player host they all return Err(MultipleEntities) and silently
+//    early-return: HUD, weapon fire, pickups, interaction, level-up panels, enemy
+//    targeting. Two fail even quieter — the Anubot verdict beam and Craterpillar contact
+//    damage just stop dealing damage. The client is unaffected (it keeps exactly one
+//    Player by design), so co-op currently LOOKS right on the joiner and is broken on the
+//    host. Fix: `With<LocalPlayer>` for camera/HUD/panels, iterate for per-player sim, and
+//    nearest-of-many for enemy targeting. Note apply_player_hits needs a message-shape
+//    change, not a query change — PlayerHitMsg carries no victim entity.
+//
+// 2d. Smaller follow-ups: replicate each player's AstronautKind so teammates wear their own
+//    suit (remote.rs currently picks a stable palette by slot, and seat_joining_players
+//    spawns peers with the HOST's character); add slide state to NetTransform so remotes
+//    tuck; cache the rig's meshes/materials and drop shadow-casting on remote flashlights
+//    (each rig currently allocates 8 meshes, 5 materials and a shadow-casting spotlight).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with
