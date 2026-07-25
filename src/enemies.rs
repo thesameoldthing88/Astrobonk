@@ -346,7 +346,7 @@ fn anubot_mesh() -> Mesh {
 
 /// A hulking generic boss silhouette: heavy body, plated shoulders, horned head,
 /// back spikes. Low-count so detail is free. (Per-boss unique meshes are future work.)
-fn boss_mesh() -> Mesh {
+pub fn boss_mesh() -> Mesh {
     use crate::meshkit::at;
     let mut m = crate::meshkit::MeshData::new();
     m.add_ellipsoid(Vec3::new(0.75, 0.85, 0.7), 2, at(Vec3::new(0.0, 0.0, 0.0)), BODY); // torso

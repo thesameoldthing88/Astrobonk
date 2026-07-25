@@ -30,7 +30,10 @@
 use crate::config::*;
 use crate::content::enemies::EnemyKind;
 use crate::enemies::{Enemy, EnemyAssets};
-use crate::net::{EnemySnapMsg, MyPlayerId, NetRole, PeerSlots};
+use crate::content::enemies::BossKind;
+use crate::enemies::{AnubotBeam, Boss};
+use crate::enemies::{EnemyProjectile, MortarShell, Telegraph};
+use crate::net::{BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole, PeerSlots};
 use crate::planet::CurrentPlanet;
 use crate::player::{Player, PlayerId};
 use crate::sphere;
@@ -116,6 +119,19 @@ pub struct NetEnemy {
 #[derive(Resource, Default)]
 pub struct NetEnemyIndex(HashMap<u16, Entity>);
 
+/// A streamed BOSS on a client. Kept separate from NetEnemy because a boss proxy carries a
+/// real `Boss` component, which is what makes `update_boss_bar` and `update_edge_markers`
+/// work unchanged on the joiner.
+#[derive(Component)]
+pub struct NetBoss {
+    pub target: Vec3,
+    pub shown: Vec3,
+    pub last_seen: f32,
+}
+
+#[derive(Resource, Default)]
+pub struct NetBossIndex(HashMap<u16, Entity>);
+
 /// Rolling receive counters, printed under --netlog.
 #[derive(Resource, Default)]
 pub struct NetEnemyStats {
@@ -135,12 +151,32 @@ impl Plugin for EnemyStreamPlugin {
             .init_resource::<ClientResidency>()
             .init_resource::<SnapClock>()
             .init_resource::<NetEnemyIndex>()
+            .init_resource::<NetBossIndex>()
             .init_resource::<NetEnemyStats>()
             .add_systems(
                 Update,
                 assign_net_ids
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
+            )
+            .add_systems(
+                Update,
+                stream_hazards
+                    .run_if(crate::net::is_simulating)
+                    .run_if(is_networked),
+            )
+            .add_systems(Update, receive_hazards.run_if(crate::net::is_client))
+            .add_systems(
+                Update,
+                stream_bosses
+                    .run_if(crate::net::is_simulating)
+                    .run_if(is_networked),
+            )
+            .add_systems(
+                Update,
+                (receive_bosses, drive_boss_proxies)
+                    .chain()
+                    .run_if(crate::net::is_client),
             )
             .add_systems(
                 Update,
@@ -388,6 +424,281 @@ fn stream_enemies(
                 },
             });
         }
+    }
+}
+
+/// Marks a hazard visual a client built from a streamed event. These carry real
+/// `EnemyProjectile` / `Telegraph` / `MortarShell` components so the existing integrators
+/// animate them for free — but always with `damage: 0.0`, because the host resolves all
+/// damage and a client must never invent a hit on itself.
+#[derive(Component)]
+pub struct NetHazard;
+
+/// HOST: turn freshly spawned hazards into events.
+///
+/// Uses `Added<T>` rather than touching all nine spawn sites across enemies.rs — the
+/// component values at spawn are exactly the event payload, so the spawn code stays
+/// untouched and no future hazard can be added without this seeing it.
+fn stream_hazards(
+    added_proj: Query<&EnemyProjectile, Added<EnemyProjectile>>,
+    added_tel: Query<&Telegraph, Added<Telegraph>>,
+    added_mortar: Query<&MortarShell, Added<MortarShell>>,
+    mut out: MessageWriter<ToClients<HazardEventMsg>>,
+) {
+    let mut events: Vec<HazardEvent> = Vec::new();
+    for p in &added_proj {
+        events.push(HazardEvent::Projectile {
+            dir: [p.dir.x, p.dir.y, p.dir.z],
+            heading: [p.heading.x, p.heading.y, p.heading.z],
+            speed: p.speed,
+            life: p.life,
+            // the railbolt is the fast one, and it wears a different material
+            style: if p.speed > 30.0 { 1 } else { 0 },
+        });
+    }
+    for t in &added_tel {
+        events.push(HazardEvent::Telegraph {
+            dir: [t.dir.x, t.dir.y, t.dir.z],
+            radius: t.radius,
+            max: t.max,
+            ring: t.ring,
+        });
+    }
+    for m in &added_mortar {
+        events.push(HazardEvent::Mortar {
+            from: [m.from.x, m.from.y, m.from.z],
+            to: [m.to.x, m.to.y, m.to.z],
+            dur: m.dur,
+        });
+    }
+    if events.is_empty() {
+        return;
+    }
+    out.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: HazardEventMsg { events } });
+}
+
+/// CLIENT: build the visual for each event and let the normal integrators animate it.
+fn receive_hazards(
+    mut commands: Commands,
+    mut msgs: MessageReader<HazardEventMsg>,
+    assets: Option<Res<EnemyAssets>>,
+    planet: Option<Res<CurrentPlanet>>,
+) {
+    let (Some(assets), Some(planet)) = (assets, planet) else { return };
+    for m in msgs.read() {
+        for ev in &m.events {
+            match *ev {
+                HazardEvent::Projectile { dir, heading, speed, life, style } => {
+                    let dir = Vec3::from(dir);
+                    let mat = if style == 1 { assets.ring_mat.clone() } else { assets.proj_mat.clone() };
+                    let mut tf = Transform::from_translation(planet.surface_point(dir) + dir * 1.0);
+                    if style == 1 {
+                        tf = tf.with_scale(Vec3::new(0.5, 0.5, 2.2));
+                    }
+                    commands.spawn((
+                        EnemyProjectile {
+                            dir,
+                            heading: Vec3::from(heading),
+                            speed,
+                            damage: 0.0, // visual only — the host owns damage
+                            life,
+                            hover: 1.0,
+                        },
+                        NetHazard,
+                        Mesh3d(assets.proj_mesh.clone()),
+                        MeshMaterial3d(mat),
+                        tf,
+                        crate::planet::StageScoped,
+                    ));
+                }
+                HazardEvent::Telegraph { dir, radius, max, ring } => {
+                    let dir = Vec3::from(dir);
+                    commands.spawn((
+                        Telegraph { timer: max, max, radius, damage: 0.0, dir, ring },
+                        NetHazard,
+                        Mesh3d(assets.ring_mesh.clone()),
+                        MeshMaterial3d(assets.ring_mat.clone()),
+                        Transform::from_translation(planet.surface_point(dir) + dir * 0.15)
+                            .with_rotation(
+                                sphere::frame_quat(dir, sphere::tangent_frame(dir).0)
+                                    * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                            ),
+                        crate::planet::StageScoped,
+                    ));
+                }
+                HazardEvent::Mortar { from, to, dur } => {
+                    let from = Vec3::from(from);
+                    commands.spawn((
+                        MortarShell { from, to: Vec3::from(to), t: 0.0, dur },
+                        NetHazard,
+                        Mesh3d(assets.proj_mesh.clone()),
+                        MeshMaterial3d(assets.proj_mat.clone()),
+                        Transform::from_translation(planet.surface_point(from))
+                            .with_scale(Vec3::splat(1.6)),
+                        crate::planet::StageScoped,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn boss_code(k: BossKind) -> u8 {
+    match k {
+        BossKind::CraterpillarJr => 0,
+        BossKind::RoverGoneWrong => 1,
+        BossKind::Craterpillar => 2,
+        BossKind::Anubot => 3,
+    }
+}
+fn boss_from_code(c: u8) -> BossKind {
+    match c {
+        1 => BossKind::RoverGoneWrong,
+        2 => BossKind::Craterpillar,
+        3 => BossKind::Anubot,
+        _ => BossKind::CraterpillarJr,
+    }
+}
+
+/// HOST: broadcast every boss to every client, never interest-culled — the HUD edge marker
+/// must point at a boss from the far side of the planet. CLIENTS_ONLY so the host does not
+/// receive its own snapshot back on top of the authoritative fight.
+fn stream_bosses(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    q: Query<(&Enemy, &NetId, &Boss, Option<&AnubotBeam>)>,
+    mut out: MessageWriter<ToClients<BossSnapMsg>>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 / 20.0 {
+        return;
+    }
+    *acc = 0.0;
+    let bosses: Vec<BossRec> = q
+        .iter()
+        .map(|(e, nid, b, beam)| BossRec {
+            id: nid.0,
+            kind: boss_code(b.kind),
+            dir: [e.dir.x, e.dir.y, e.dir.z],
+            hp_frac: if e.max_hp > 0.0 { (e.hp / e.max_hp).clamp(0.0, 1.0) } else { 0.0 },
+            phase: b.phase,
+            beam_angle: beam.map(|x| x.angle).unwrap_or(0.0),
+            beam_state: beam.map(|x| x.state).unwrap_or(0),
+        })
+        .collect();
+    // Sent even when empty: an empty list is how a client learns the boss died.
+    out.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: BossSnapMsg { bosses } });
+}
+
+/// CLIENT: reconcile boss proxies. The proxy carries `Enemy` with max_hp = 1.0 and
+/// hp = the streamed fraction, which is exactly what the boss bar divides.
+fn receive_bosses(
+    mut commands: Commands,
+    mut msgs: MessageReader<BossSnapMsg>,
+    mut index: ResMut<NetBossIndex>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    assets: Option<Res<EnemyAssets>>,
+    planet: Option<Res<CurrentPlanet>>,
+    time: Res<Time>,
+    mut q: Query<(&mut Enemy, &mut Boss, &mut NetBoss)>,
+) {
+    let (Some(assets), Some(planet)) = (assets, planet) else { return };
+    let now = time.elapsed_secs();
+
+    for m in msgs.read() {
+        let mut seen: HashSet<u16> = HashSet::new();
+        for r in &m.bosses {
+            seen.insert(r.id);
+            let dir = Vec3::from(r.dir);
+            let kind = boss_from_code(r.kind);
+            if let Some(ent) = index.0.get(&r.id).copied() {
+                if let Ok((mut e, mut b, mut nb)) = q.get_mut(ent) {
+                    nb.target = dir;
+                    nb.last_seen = now;
+                    e.hp = r.hp_frac;
+                    b.phase = r.phase;
+                }
+                continue;
+            }
+            // Mesh comes from BossKind, NOT Enemy.kind: spawn_boss hardcodes Enemy.kind to
+            // Bruiser and selects the real look from BossKind, so trusting the crowd path
+            // here would draw THE CRATERPILLAR as a grunt.
+            let def = kind.def();
+            let (mesh, mat) = match kind {
+                BossKind::Craterpillar | BossKind::CraterpillarJr => {
+                    (assets.worm_head_mesh.clone(), assets.worm_mat.clone())
+                }
+                BossKind::Anubot => (assets.anubot_mesh.clone(), assets.anubot_mat.clone()),
+                _ => (meshes.add(crate::enemies::boss_mesh()), assets.boss_mat.clone()),
+            };
+            let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
+            let ent = commands
+                .spawn((
+                    Enemy {
+                        kind: crate::content::enemies::EnemyKind::Bruiser,
+                        dir,
+                        hover: 0.0,
+                        speed: def.speed,
+                        damage: 0.0,
+                        xp: 0.0,
+                        hp: r.hp_frac,
+                        max_hp: 1.0,
+                        elite: true,
+                        contact_cd: 0.0,
+                        slow: 0.0,
+                        knock: Vec3::ZERO,
+                        flash: 0.0,
+                        scale: def.scale,
+                        wobble: 0.0,
+                        stride: 0.0,
+                    },
+                    // INERT timers: 0.0 would make `boss_attacks` fire every frame on the client.
+                    // The host owns attack scheduling; the proxy only wears the marker.
+                    Boss { kind, attack_timer: f32::INFINITY, burst_timer: f32::INFINITY, phase: r.phase },
+                    NetBoss { target: dir, shown: dir, last_seen: now },
+                    NetId(r.id),
+                    Mesh3d(mesh),
+                    MeshMaterial3d(mat),
+                    Transform::from_translation(pos).with_scale(Vec3::splat(def.scale)),
+                    crate::planet::StageScoped,
+                ))
+                .id();
+            index.0.insert(r.id, ent);
+            info!("NET boss proxy spawned: {:?} (id {})", kind, r.id);
+        }
+        let gone: Vec<u16> = index.0.keys().copied().filter(|k| !seen.contains(k)).collect();
+        for id in gone {
+            if let Some(ent) = index.0.remove(&id) {
+                commands.entity(ent).despawn();
+            }
+        }
+    }
+}
+
+/// CLIENT: ease boss proxies toward their streamed position.
+fn drive_boss_proxies(
+    time: Res<Time>,
+    planet: Option<Res<CurrentPlanet>>,
+    mut q: Query<(&mut Enemy, &mut NetBoss, &mut Transform, &Boss)>,
+) {
+    let Some(planet) = planet else { return };
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    let k = 1.0 - (-NET_ENEMY_SMOOTH_RATE * dt).exp();
+    for (mut e, mut nb, mut tf, b) in &mut q {
+        let ang = nb.shown.angle_between(nb.target);
+        nb.shown = if ang * planet.radius > NET_ENEMY_SNAP_ARC {
+            nb.target
+        } else {
+            sphere::step_toward(nb.shown, nb.target, ang * k)
+        };
+        e.dir = nb.shown;
+        let up = nb.shown;
+        let def = b.kind.def();
+        tf.translation = planet.surface_point(up) + up * def.scale * 0.8;
+        tf.rotation = sphere::frame_quat(up, sphere::tangent_frame(up).0);
     }
 }
 
@@ -640,6 +951,8 @@ pub fn log_stream_stats(
     breakdown: Query<(&Enemy, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>)>,
     anchors: Query<(&PlayerId, &Player)>,
     with_id: Query<(), (With<Enemy>, With<NetId>)>,
+    n_boss: Query<(), With<crate::enemies::Boss>>,
+    n_hazard: Query<(), Or<(With<crate::enemies::EnemyProjectile>, With<crate::enemies::Telegraph>)>>,
     planet: Option<Res<CurrentPlanet>>,
     mine: Res<MyPlayerId>,
 ) {
@@ -674,9 +987,11 @@ pub fn log_stream_stats(
                 })
                 .collect();
             info!(
-                "NETENEMY[Host] total={} mobile={} with_netid={} in_interest[{}] resident_sent={}",
+                "NETENEMY[Host] total={} mobile={} bosses={} hazards={} with_netid={} in_interest[{}] resident_sent={}",
                 enemies.iter().count(),
                 mobile,
+                n_boss.iter().count(),
+                n_hazard.iter().count(),
                 with_id.iter().count(),
                 reach.join(" "),
                 resident
@@ -684,8 +999,10 @@ pub fn log_stream_stats(
         }
         NetRole::Client => {
             info!(
-                "NETENEMY[Client] proxies={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} bosses={} hazards={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
+                n_boss.iter().count(),
+                n_hazard.iter().count(),
                 stats.records,
                 stats.chunks,
                 stats.bytes,

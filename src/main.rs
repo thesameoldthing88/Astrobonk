@@ -147,6 +147,7 @@ fn main() {
         .add_systems(OnExit(AppState::Results), ui::menus::despawn_menu)
         // ------------- menu inputs
         .add_systems(Update, client_follow_host_run)
+        .add_systems(Update, dev_fast_boss.run_if(in_state(AppState::InRun)))
         .add_systems(Update, ui::menus::main_menu_input.run_if(in_state(AppState::MainMenu)))
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
@@ -159,8 +160,8 @@ fn main() {
                 enemies::director_spawn,
                 enemies::enemy_move,
                 enemies::craterpillar_update,
-                enemies::anubot_beam_system,
-                enemies::boss_phase_system,
+                enemies::anubot_beam_system.run_if(net::is_simulating),
+                enemies::boss_phase_system.run_if(net::is_simulating),
                 enemies::burrower_emerge,
                 enemies::enemy_contact,
                 enemies::spitter_attack,
@@ -168,7 +169,7 @@ fn main() {
                 enemies::lobber_attack,
                 enemies::mortar_shells,
                 enemies::enemy_projectiles,
-                enemies::boss_attacks,
+                enemies::boss_attacks.run_if(net::is_simulating),
                 enemies::telegraphs,
             )
                 .chain()
@@ -221,8 +222,8 @@ fn main() {
         .add_systems(
             Update,
             (
-                combat::apply_hits,
-                combat::apply_player_hits,
+                combat::apply_hits.run_if(net::is_simulating),
+                combat::apply_player_hits.run_if(net::is_simulating),
                 pickups::kill_drops,
                 combat::fader_update,
                 enemies::enemy_flash,
@@ -389,6 +390,26 @@ fn enter_run(
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
     *phase = run::RunPhase::Playing;
+}
+
+/// `--bossnow`: wind the clock to just before the boss mark so the boss lane can be tested
+/// live without waiting out a full stage. Host/solo only — a client adopts the host's clock.
+fn dev_fast_boss(
+    mut run: ResMut<run::RunState>,
+    role: Res<net::NetRole>,
+    mut done: Local<bool>,
+) {
+    if *done || matches!(*role, net::NetRole::Client) {
+        return;
+    }
+    if std::env::args().any(|a| a == "--bossnow") {
+        run.timer = config::BOSS_MARK + 4.0;
+        // Winding past MINIBOSS_MARKS would fire BOTH minibosses on the next tick as well,
+        // burying a level-1 test player under three bosses at once. Mark them done.
+        run.minibosses_spawned = [true; 2];
+        info!("DEV --bossnow: clock wound to {:.0}s (minibosses skipped)", run.timer);
+    }
+    *done = true;
 }
 
 /// Close any leftover modal state when leaving a run.

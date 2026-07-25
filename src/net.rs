@@ -126,6 +126,71 @@ pub struct RunSync {
     pub world_built: bool,
 }
 
+/// One boss on the wire. Bosses get their OWN lane rather than riding the crowd stream for
+/// two reasons: `spawn_boss` hardcodes `Enemy.kind = Bruiser` and picks the mesh from
+/// `BossKind` instead, so a crowd record would draw THE CRATERPILLAR as a Bruiser; and the
+/// HUD edge marker has to point at a boss from the far side of the planet, so bosses must
+/// never be interest-culled.
+///
+/// There are at most three at once, so this lane uses exact f32 positions and plain
+/// postcard encoding — quantizing would save bytes nobody is short of.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct BossRec {
+    pub id: u16,
+    pub kind: u8,
+    pub dir: [f32; 3],
+    /// Fraction of max HP. The client's proxy carries max_hp = 1.0, so the boss bar
+    /// (which reads Enemy.hp / Enemy.max_hp) is correct without sending absolute numbers.
+    pub hp_frac: f32,
+    pub phase: u8,
+    /// Anubot's verdict beam: angle plus state (0 idle, 1 charging, 2 firing).
+    pub beam_angle: f32,
+    pub beam_state: u8,
+}
+
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct BossSnapMsg {
+    pub bosses: Vec<BossRec>,
+}
+
+/// Transient attack visuals: shots, telegraph rings, mortar arcs.
+///
+/// An EVENT lane, not a state lane. Every one of these is fully determined by its spawn
+/// conditions plus time, and a client already has the identical `CurrentPlanet` (same seed
+/// via RunSnapMsg) and the same `sphere::advance` math — so one event lets it integrate the
+/// whole flight locally instead of streaming positions every frame. A boss slam ring costs
+/// one packet rather than 1.4 seconds of updates.
+///
+/// Reliable (Unordered) on purpose: a telegraph is the tell for an attack that kills you,
+/// so it must never be the packet that gets dropped.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum HazardEvent {
+    Projectile {
+        dir: [f32; 3],
+        heading: [f32; 3],
+        speed: f32,
+        life: f32,
+        /// 0 = spitter/UFO needle, 1 = beamer railbolt (different material and scale)
+        style: u8,
+    },
+    Telegraph {
+        dir: [f32; 3],
+        radius: f32,
+        max: f32,
+        ring: bool,
+    },
+    Mortar {
+        from: [f32; 3],
+        to: [f32; 3],
+        dur: f32,
+    },
+}
+
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct HazardEventMsg {
+    pub events: Vec<HazardEvent>,
+}
+
 /// One chunk of a crowd snapshot. The records are HAND-PACKED into `data` rather than
 /// serialized as a Vec of structs: postcard would varint-encode every field, making record
 /// size data-dependent, and we need it exact to keep each chunk under renet's 1200-byte
@@ -216,6 +281,10 @@ impl Plugin for NetPlugin {
             .add_server_message::<RunSnapMsg>(Channel::Unordered)
             .make_message_independent::<RunSnapMsg>()
             .init_resource::<RunSync>()
+            .add_server_message::<HazardEventMsg>(Channel::Unordered)
+            .make_message_independent::<HazardEventMsg>()
+            .add_server_message::<BossSnapMsg>(Channel::Unreliable)
+            .make_message_independent::<BossSnapMsg>()
             .add_server_message::<EnemySnapMsg>(Channel::Unreliable)
             // Without this the stream is gated on ServerTick and silently dropped for any
             // client that isn't AuthorizedClient yet.
