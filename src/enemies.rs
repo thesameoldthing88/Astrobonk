@@ -31,6 +31,9 @@ pub struct Enemy {
     pub flash: f32,
     pub scale: f32,
     pub wobble: f32,
+    /// Gait phase, advanced by DISTANCE travelled so the waddle matches real movement
+    /// (code-art-animation skill, crowd tier — whole-transform animation only).
+    pub stride: f32,
 }
 
 #[derive(Component)]
@@ -506,6 +509,7 @@ fn spawn_enemy(
             flash: 0.0,
             scale,
             wobble: rng.gen_range(0.0..6.28),
+            stride: rng.gen_range(0.0..6.28),
         },
         Mesh3d(assets.meshes[&kind].clone()),
         MeshMaterial3d(mat.clone()),
@@ -652,6 +656,7 @@ pub fn spawn_boss(
                 flash: 0.0,
                 scale: def.scale,
                 wobble: 0.0,
+                stride: 0.0,
             },
             Boss { kind, attack_timer: 4.0, burst_timer: 7.0, phase: 0 },
             Mesh3d(mesh),
@@ -770,7 +775,7 @@ pub fn anubot_beam_system(
     assets: Res<EnemyAssets>,
     run: Res<RunState>,
     q_player: Query<&Transform, (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
-    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam)>,
+    mut q_boss: Query<(Entity, &mut Transform, &Enemy, &Boss, &mut AnubotBeam)>,
     mut q_vis: Query<
         (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
         (Without<AnubotBeam>, Without<Player>),
@@ -782,9 +787,10 @@ pub fn anubot_beam_system(
         return;
     }
     let ppos = q_player.single().ok().map(|t| t.translation);
+    let t_now = time.elapsed_secs();
     // pass 1: advance each beam, apply damage, snapshot for the visuals
     let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
-    for (e, tf, enemy, boss, mut beam) in &mut q_boss {
+    for (e, mut tf, enemy, boss, mut beam) in &mut q_boss {
         beam.timer -= dt;
         let ph = boss.phase as f32;
         // rotate: slow while charging (telegraph), fast while firing; faster each phase
@@ -831,6 +837,25 @@ pub fn anubot_beam_system(
                 }
             }
         }
+        // Hero-tier body tell (code-art-animation skill): the boss's POSE announces the
+        // attack, not just the light — anticipation while charging, follow-through firing.
+        // Layers on top of enemy_move's write, which ran earlier in the chain.
+        match beam.state {
+            1 => {
+                // rear up as the charge builds (anticipation)
+                let wind = 1.0 - (beam.timer / (1.3 - 0.3 * ph).max(0.2)).clamp(0.0, 1.0);
+                tf.rotation *= Quat::from_rotation_x(0.24 * wind);
+                let s = 1.0 + 0.07 * wind;
+                tf.scale.y *= s;
+            }
+            2 => {
+                // lurch into the sweep + a high-frequency shudder while it fires
+                tf.rotation *= Quat::from_rotation_x(-0.14);
+                tf.rotation *= Quat::from_rotation_z((t_now * 34.0).sin() * 0.022);
+            }
+            _ => {}
+        }
+
         snap.insert(e, (tf.translation, heading, beam.state, up.dot(Vec3::Y)));
         let _ = up;
     }
@@ -888,6 +913,7 @@ pub fn debug_spawn_boss(
 #[allow(clippy::type_complexity)]
 pub fn craterpillar_update(
     mut commands: Commands,
+    time: Res<Time>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<&Transform, (With<Player>, Without<CraterpillarSegment>, Without<CraterpillarHead>)>,
@@ -898,6 +924,7 @@ pub fn craterpillar_update(
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     use std::collections::HashMap;
+    let t_now = time.elapsed_secs();
     // 1) extend each head's trail (distance-based so it's framerate-independent)
     let mut snapshots: HashMap<Entity, Vec<Vec3>> = HashMap::new();
     for (e, tf, mut head) in &mut set.p0() {
@@ -925,12 +952,22 @@ pub fn craterpillar_update(
         }
         let i = (seg.idx * WORM_STRIDE).min(trail.len() - 1);
         let dir = trail[i];
-        let pos = planet.surface_point(dir) + dir * seg.scale * 0.6;
+        // ---- undulation: a wave travelling down the body (skill recipe R6).
+        // Each segment lags the one ahead by a fixed phase, so the worm ripples
+        // instead of sliding along the trail like a flat train.
+        let phase = t_now * 4.2 - seg.idx as f32 * 0.7;
+        let ripple = phase.sin();
+        let lift = ripple * 0.28 * seg.scale;
+        let pos = planet.surface_point(dir) + dir * (seg.scale * 0.6 + lift);
         stf.translation = pos;
         // orient along the trail toward the next-newer point
         let ahead = trail[i.saturating_sub(1)];
         let fwd = (planet.surface_point(ahead) - pos).normalize_or_zero();
-        stf.rotation = sphere::frame_quat(dir, if fwd == Vec3::ZERO { sphere::tangent_frame(dir).0 } else { fwd });
+        let base = sphere::frame_quat(dir, if fwd == Vec3::ZERO { sphere::tangent_frame(dir).0 } else { fwd });
+        // roll into the wave + squash on the down-beat (volume preserved)
+        stf.rotation = base * Quat::from_rotation_z(ripple * 0.22);
+        let sy = 1.0 + ripple * 0.10;
+        stf.scale = Vec3::new(seg.scale / sy.sqrt(), seg.scale * sy, seg.scale / sy.sqrt());
 
         if run.iframes <= 0.0 {
             if let Some(pp) = ptf {
@@ -1030,18 +1067,55 @@ pub fn enemy_move(
 
         e.dir = new_dir;
         let up = e.dir;
-        let bob = if e.hover > 0.0 { (t_now * 2.2 + e.wobble).sin() * 0.35 } else { 0.0 };
+
+        // ---- crowd-tier animation (code-art-animation skill: whole-transform only,
+        // so 1200 enemies still batch into one draw call per kind) ----
+        // gait advances by DISTANCE travelled, so the waddle always matches real motion
+        let moved = eff_speed * dt;
+        e.stride = (e.stride + moved * 2.3) % std::f32::consts::TAU;
+        let gait = (e.stride + e.wobble).sin();
+        let speed_frac = (eff_speed / 6.0).clamp(0.0, 1.4);
+        // just-attacked lunge, decaying — the follow-through of a contact hit
+        let lunge = (e.contact_cd / CONTACT_TICK).clamp(0.0, 1.0);
+
+        let bob = if e.hover > 0.0 {
+            // fliers: stacked sines never visibly loop
+            (t_now * 2.2 + e.wobble).sin() * 0.35 + (t_now * 3.7 + e.wobble * 2.0).sin() * 0.1
+        } else {
+            match e.kind {
+                // sprinters bound: a real hop arc, twice per stride
+                EnemyKind::Sprinter => (gait * 2.0).sin().max(0.0) * 0.30 * e.scale * speed_frac,
+                // everything else rises between footfalls
+                _ => (1.0 - gait.abs()) * 0.10 * e.scale * speed_frac,
+            }
+        };
         let pos = planet.surface_point(up) + up * (e.hover + bob + e.scale * 0.6);
         tf.translation = pos;
 
         let face = (player_pos - pos).normalize_or_zero();
         let mut rot = sphere::frame_quat(up, face);
-        if e.hover == 0.0 {
-            rot *= Quat::from_rotation_z((t_now * (3.0 + e.speed) + e.wobble).sin() * 0.09);
+        if e.hover > 0.0 {
+            // fliers bank lazily instead of walking
+            rot *= Quat::from_rotation_z((t_now * 1.9 + e.wobble).sin() * 0.10);
+            rot *= Quat::from_rotation_x(-0.12 * speed_frac);
+        } else {
+            // waddle roll + lean into the chase + lunge pitch on a fresh hit
+            let waddle = match e.kind {
+                EnemyKind::Bruiser => 0.20, // heavy things rock more
+                EnemyKind::Sprinter => 0.07,
+                _ => 0.13,
+            };
+            rot *= Quat::from_rotation_z(gait * waddle * speed_frac);
+            rot *= Quat::from_rotation_x(-0.18 * speed_frac - lunge * 0.45);
         }
         tf.rotation = rot;
+
+        // squash & stretch: compress on the lunge, stretch a touch at speed.
+        // volume-preserved so nothing looks like it's melting.
         let flash_pulse = 1.0 + e.flash * 0.25;
-        tf.scale = Vec3::splat(e.scale * flash_pulse);
+        let sy = (1.0 + gait.abs() * 0.05 * speed_frac - lunge * 0.12).max(0.6);
+        let sxz = 1.0 / sy.sqrt();
+        tf.scale = Vec3::new(e.scale * sxz, e.scale * sy, e.scale * sxz) * flash_pulse;
     }
 }
 

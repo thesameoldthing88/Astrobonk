@@ -1,5 +1,20 @@
 # ASTROBONK DEVLOG
 
+## 2026-07-24 — Session 2j: the HORDE and BOSSES come alive (masterclass, part 2)
+- **Enemies (crowd tier — whole-transform only, so 1200 still batch to one draw call/kind):**
+  new `Enemy.stride` advanced by DISTANCE travelled → waddle roll + inter-footfall bob that
+  always matches real movement. Per-kind character: Sprinters *bound* (hop arc twice/stride),
+  Bruisers rock heavily (0.20 waddle), fliers bank + use stacked sines instead of a gait.
+  Lean into the chase; **lunge pitch + squash on a fresh contact hit** (reads as "it just
+  swung at you" — an actual gameplay tell). Volume-preserved squash/stretch throughout.
+- **Craterpillar:** segments now UNDULATE — a phase-lagged wave travels down the body
+  (recipe R6): per-segment lift, roll into the wave, and squash on the down-beat. It ripples
+  like a worm instead of sliding like a flat train.
+- **Judge Anubot:** hero-tier body tell layered over enemy_move — he REARS UP as the Verdict
+  Beam charges (anticipation, scaling with the windup) and lurches forward + shudders while
+  it fires. His pose announces the attack, not just the light.
+- All 3 smoke variants green (moon worm / mars anubot / normal), windowed render OK.
+
 ## 2026-07-24 — Session 2i: PROP COLLISION (bug: player walked through rocks)
 - User-reported: props were pure visuals — only the terrain surface was solid, so the
   player walked straight through rocks/boulders/wrecks/beacons/crystals.

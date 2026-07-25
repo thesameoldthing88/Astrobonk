@@ -181,6 +181,7 @@ pub fn spawn_interactables(
                 flash: 0.0,
                 scale: 1.0,
                 wobble: 0.0,
+                stride: 0.0,
             },
             Mesh3d(pot_mesh.clone()),
             MeshMaterial3d(if silverish { silver_pot_mat.clone() } else { pot_mat.clone() }),
