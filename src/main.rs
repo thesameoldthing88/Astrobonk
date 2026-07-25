@@ -172,6 +172,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                player::gather_local_input,
                 player::player_input,
                 combat::weapon_fire,
                 combat::projectile_move,
@@ -297,7 +298,13 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     );
     commands.insert_resource(save);
     commands.insert_resource(run_state);
-    next.set(AppState::MainMenu);
+    // Dev/co-op harness: drop straight into a run so two instances can be tested
+    // without a human clicking through menus in each window.
+    if std::env::args().any(|a| a == "--autodrop") {
+        next.set(AppState::InRun);
+    } else {
+        next.set(AppState::MainMenu);
+    }
 }
 
 fn enter_run(

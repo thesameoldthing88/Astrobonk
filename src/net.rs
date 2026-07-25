@@ -14,7 +14,8 @@
 //!
 //! Enemies are NOT replicated per-entity yet; see `NETCODE NOTES` at the bottom.
 
-use crate::player::PlayerId;
+use crate::player::{InputIntent, LocalPlayer, PlayerId};
+use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_replicon::prelude::*;
 use bevy_replicon_renet::{
@@ -87,6 +88,38 @@ pub struct PlayerInputMsg {
     pub interact: bool,
 }
 
+/// Host-side: which `PlayerId` we handed to each connected client entity.
+/// Slots are reused when someone leaves, so a 4-player lobby never runs out of ids.
+#[derive(Resource, Default)]
+pub struct PeerSlots {
+    map: HashMap<Entity, u8>,
+}
+
+impl PeerSlots {
+    /// Lowest free id in 1..MAX_PLAYERS (0 is always the host's own astronaut).
+    fn claim(&mut self, client: Entity) -> Option<u8> {
+        let taken: Vec<u8> = self.map.values().copied().collect();
+        let id = (1..MAX_PLAYERS as u8).find(|i| !taken.contains(i))?;
+        self.map.insert(client, id);
+        Some(id)
+    }
+    fn release(&mut self, client: Entity) -> Option<u8> {
+        self.map.remove(&client)
+    }
+    pub fn player_id(&self, client: Entity) -> Option<u8> {
+        self.map.get(&client).copied()
+    }
+}
+
+/// Dev harness. `--botinput` makes this instance walk without a human at the keyboard,
+/// so two launched instances can prove input routing end-to-end. `--netlog` prints each
+/// astronaut's surface position once a second on the host.
+#[derive(Resource, Default)]
+pub struct NetDebug {
+    pub bot: bool,
+    pub log: bool,
+}
+
 pub struct NetPlugin;
 
 impl Plugin for NetPlugin {
@@ -100,7 +133,38 @@ impl Plugin for NetPlugin {
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_systems(Startup, apply_cli_net)
+            .init_resource::<PeerSlots>()
             .add_systems(Update, report_connection)
+            // CLIENT: our keyboard intent goes up the wire every frame.
+            .init_resource::<NetDebug>()
+            .add_systems(
+                Update,
+                bot_input
+                    .after(crate::player::gather_local_input)
+                    .before(crate::player::player_input)
+                    .run_if(|d: Res<NetDebug>| d.bot),
+            )
+            .add_systems(Update, log_astronauts.run_if(|d: Res<NetDebug>| d.log))
+            .add_systems(
+                Update,
+                send_local_input
+                    // Must be the LAST touch of InputIntent before movement — anything
+                    // that writes intent after this point would move us locally but
+                    // never reach the host, which desyncs silently.
+                    .after(crate::player::gather_local_input)
+                    .after(bot_input)
+                    .before(crate::player::player_input)
+                    .run_if(is_client),
+            )
+            // HOST: seat/unseat joining players, then apply their intent to their astronaut.
+            // Ordered before movement so intent lands the same frame it arrives.
+            .add_systems(
+                Update,
+                (seat_joining_players, unseat_leaving_players, apply_remote_input)
+                    .chain()
+                    .before(crate::player::player_input)
+                    .run_if(is_hosting),
+            )
             .add_systems(
                 Update,
                 (push_net_transform, push_player_vitals).run_if(is_simulating),
@@ -110,6 +174,185 @@ impl Plugin for NetPlugin {
 
 fn is_simulating(role: Res<NetRole>) -> bool {
     role.simulates()
+}
+fn is_client(role: Res<NetRole>) -> bool {
+    matches!(*role, NetRole::Client)
+}
+fn is_hosting(role: Res<NetRole>) -> bool {
+    matches!(*role, NetRole::Host)
+}
+
+/// CLIENT -> HOST. We send intent every frame rather than on-change: it's a handful of
+/// bytes on an unreliable channel, and a dropped "I'm still holding W" packet would
+/// otherwise read as a stutter-stop on the host.
+fn send_local_input(
+    q: Query<&InputIntent, With<LocalPlayer>>,
+    mut out: MessageWriter<PlayerInputMsg>,
+    time: Res<Time>,
+    dbg: Res<NetDebug>,
+    mut next: Local<f32>,
+    mut sent: Local<u32>,
+) {
+    let Ok(intent) = q.single() else { return };
+    *sent += 1;
+    if dbg.log && time.elapsed_secs() >= *next {
+        *next = time.elapsed_secs() + 1.0;
+        info!("NET tx: {} input msgs, wish=({:.2},{:.2},{:.2})", *sent, intent.wish.x, intent.wish.y, intent.wish.z);
+        *sent = 0;
+    }
+    out.write(PlayerInputMsg {
+        wish: intent.wish,
+        forward: intent.forward,
+        jump: intent.jump,
+        slide: intent.slide,
+        interact: intent.interact,
+    });
+}
+
+/// Dev harness: override the local intent with a slow circle-strafe. Runs after the
+/// keyboard gather, so it stands in for a human holding W and easing the stick over.
+fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
+    let Ok((p, mut intent)) = q.single_mut() else { return };
+    let (t, b) = crate::sphere::tangent_frame(p.dir);
+    let a = time.elapsed_secs() * 0.35;
+    intent.wish = (t * a.cos() + b * a.sin()).normalize_or_zero();
+    intent.forward = t;
+}
+
+/// Dev harness: once a second, print where every astronaut actually is. This is how we
+/// check a remote player is being MOVED by their input, not merely connected.
+fn log_astronauts(
+    time: Res<Time>,
+    role: Res<NetRole>,
+    mut next: Local<f32>,
+    q: Query<(&PlayerId, &crate::player::Player, Option<&LocalPlayer>)>,
+    // Entities that arrived over the wire: they carry PlayerId/NetTransform but no local
+    // `Player` component or mesh yet — that's the next step (remote player visuals).
+    replicated: Query<&NetTransform, Without<crate::player::Player>>,
+) {
+    let now = time.elapsed_secs();
+    if now < *next {
+        return;
+    }
+    *next = now + 1.0;
+    info!(
+        "NET[{:?}] replicated astronauts received: {}",
+        *role,
+        replicated.iter().count()
+    );
+    for (pid, p, local) in &q {
+        let tag = if local.is_some() { "local" } else { "remote" };
+        info!(
+            "NET[{:?}] player {} ({tag}) dir=({:.3},{:.3},{:.3}) speed={:.2}",
+            *role, pid.0, p.dir.x, p.dir.y, p.dir.z, p.vel_t.length()
+        );
+    }
+}
+
+/// HOST. Give each newly-connected client a PlayerId and an astronaut on the surface.
+fn seat_joining_players(
+    mut commands: Commands,
+    mut slots: ResMut<PeerSlots>,
+    // NOT `Added<ConnectedClient>`: a client can connect while the host is still in the
+    // menu, and a one-shot Added event would be consumed and never retried. Reconciling
+    // against the live set instead means they get seated whenever the run actually starts.
+    joined: Query<Entity, With<ConnectedClient>>,
+    planet: Option<Res<crate::planet::CurrentPlanet>>,
+    run: Option<Res<crate::run::RunState>>,
+    save: Option<Res<crate::save::MetaSave>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let (Some(planet), Some(run), Some(save)) = (planet, run, save) else {
+        return; // not in a run yet — they'll be seated when the drop happens
+    };
+    for client in &joined {
+        if slots.player_id(client).is_some() {
+            continue; // already seated
+        }
+        let Some(id) = slots.claim(client) else {
+            warn!("lobby full — refusing extra client {client}");
+            continue;
+        };
+        crate::player::spawn_player(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &planet,
+            &run,
+            &save,
+            id,
+            run.character,
+            false, // remote: no LocalPlayer marker, no camera, driven by their input
+        );
+        info!("NET seated client {client} as player {id}");
+    }
+}
+
+/// HOST. Someone dropped: free their slot and remove their astronaut.
+fn unseat_leaving_players(
+    mut commands: Commands,
+    mut slots: ResMut<PeerSlots>,
+    connected: Query<Entity, With<ConnectedClient>>,
+    astronauts: Query<(Entity, &PlayerId)>,
+) {
+    let live: Vec<Entity> = connected.iter().collect();
+    let gone: Vec<Entity> = slots
+        .map
+        .keys()
+        .copied()
+        .filter(|c| !live.contains(c))
+        .collect();
+    for client in gone {
+        let Some(id) = slots.release(client) else { continue };
+        for (e, pid) in &astronauts {
+            if pid.0 == id {
+                commands.entity(e).despawn();
+            }
+        }
+        info!("NET client {client} left — freed player {id}");
+    }
+}
+
+/// HOST. Route each client's intent onto the astronaut it owns. This is the whole point
+/// of `InputIntent`: from here down, a remote player is indistinguishable from the local
+/// one, so movement/physics/combat need no networking awareness at all.
+fn apply_remote_input(
+    slots: Res<PeerSlots>,
+    mut incoming: MessageReader<FromClient<PlayerInputMsg>>,
+    mut astronauts: Query<(&PlayerId, &mut InputIntent), Without<LocalPlayer>>,
+    time: Res<Time>,
+    dbg: Res<NetDebug>,
+    mut next: Local<f32>,
+    mut got: Local<u32>,
+) {
+    if dbg.log && time.elapsed_secs() >= *next {
+        *next = time.elapsed_secs() + 1.0;
+        info!("NET rx: {} input msgs this second", *got);
+        *got = 0;
+    }
+    for FromClient { client_id, message } in incoming.read() {
+        *got += 1;
+        let Some(client) = client_id.entity() else {
+            warn!("NET rx: message from ClientId::Server (listen-server loopback?)");
+            continue;
+        };
+        let Some(id) = slots.player_id(client) else {
+            warn!("NET rx: no slot for client {client}");
+            continue;
+        };
+        for (pid, mut intent) in &mut astronauts {
+            if pid.0 == id {
+                intent.wish = message.wish;
+                intent.forward = message.forward;
+                // Edge-triggered actions are OR-ed in rather than assigned: several input
+                // packets can arrive in one host frame, and a jump in any of them counts.
+                intent.jump |= message.jump;
+                intent.slide |= message.slide;
+                intent.interact |= message.interact;
+            }
+        }
+    }
 }
 
 /// Log real connection state transitions so "it connected" is verifiable, not assumed.
@@ -218,6 +461,10 @@ pub fn disconnect(commands: &mut Commands) {
 /// Convenience for the CLI/test path: `--host` or `--join <ip>` at startup.
 pub fn apply_cli_net(mut commands: Commands, channels: Res<RepliconChannels>) {
     let args: Vec<String> = std::env::args().collect();
+    commands.insert_resource(NetDebug {
+        bot: args.iter().any(|a| a == "--botinput"),
+        log: args.iter().any(|a| a == "--netlog"),
+    });
     if args.iter().any(|a| a == "--host") {
         let port = args
             .iter()
@@ -272,13 +519,29 @@ fn push_player_vitals(
 // ─────────────────────────────────────────────────────────────────────────────
 // NETCODE NOTES — the remaining work, in the order it should be tackled
 //
-// 1. TRANSPORT WIRING: open a renet server socket on Host / connect on Client.
-//    Replicon is transport-agnostic; bevy_replicon_renet provides the sockets but the
-//    host/join flow (address entry, lobby) is still ours to build.
+// 1. TRANSPORT WIRING — DONE. Verified handshake over UDP with two live instances.
 //
-// 2. INPUT ROUTING: on Client, stop running `player_input` locally against the sim and
-//    instead send `PlayerInputMsg` each frame while predicting our own astronaut. On
-//    Host, drain `FromClient<PlayerInputMsg>` and apply to the matching PlayerId.
+// 2. INPUT ROUTING — DONE. Verified: a bot-driven client walks a circle and the HOST's
+//    astronaut for that player traces the same path, while the host's own astronaut sits
+//    still. Repro:
+//        astrobonk.exe --host --autodrop --netlog
+//        astrobonk.exe --join 127.0.0.1 --autodrop --botinput --netlog
+//    The shape that made this simple is `InputIntent`: hardware input and network input
+//    both write the same component, so movement/physics/combat contain zero net code.
+//    ORDERING TRAP (cost a debug cycle): the send system must run AFTER everything that
+//    writes intent. It was ordered after the keyboard gather but not after the bot
+//    harness, so it shipped an empty wish while the client moved locally — a silent
+//    desync that looked exactly like a dropped-packet problem. Anything that writes
+//    intent must be `.before(send_local_input)`.
+//
+// 2b. REMOTE PLAYER VISUALS — NEXT, and the smallest useful step. Replication is
+//    confirmed delivering: a client sees 2 entities carrying PlayerId + NetTransform +
+//    PlayerVitals, but with no `Player` component and no mesh, so nothing is drawn.
+//    Needed: (a) on the client, build the astronaut rig for each replicated PlayerId and
+//    drive its Transform from NetTransform (smoothed — raw snapshots will jitter);
+//    (b) tell the client its OWN PlayerId so it can skip the server copy of itself,
+//    otherwise every player sees a ghost twin of themselves standing where the host
+//    thinks they are.
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

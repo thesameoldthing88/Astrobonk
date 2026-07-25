@@ -41,6 +41,19 @@ pub struct PlayerId(pub u8);
 #[derive(Component)]
 pub struct LocalPlayer;
 
+/// One frame of movement intent for an astronaut. The LOCAL player's is filled from
+/// keyboard/mouse; a REMOTE player's is filled from their PlayerInputMsg on the host.
+/// Movement then consumes this identically either way, so there is exactly one
+/// authoritative copy of the movement rules.
+#[derive(Component, Clone, Copy, Default, Debug)]
+pub struct InputIntent {
+    pub wish: Vec3,      // desired move dir, world-space tangent, normalized
+    pub forward: Vec3,   // camera forward (tangent) — drives facing/aim
+    pub jump: bool,      // edge-triggered (true only on the frame pressed)
+    pub slide: bool,     // edge-triggered
+    pub interact: bool,  // edge-triggered
+}
+
 #[derive(Component)]
 pub struct PlayerRig; // camera
 
@@ -140,6 +153,7 @@ pub fn spawn_player(
             },
             PlayerState::new(character, save),
             PlayerId(id),
+            InputIntent::default(),
             crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0 },
             crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
             bevy_replicon::prelude::Replicated,
@@ -320,21 +334,14 @@ fn backpack_mesh() -> Mesh {
 }
 
 /// WASD + jump + slide, in the camera's tangent frame.
-pub fn player_input(
-    mut commands: Commands,
+/// Read keyboard/mouse into the LOCAL astronaut's intent. This is the only place
+/// hardware input is read; everything downstream consumes `InputIntent`.
+pub fn gather_local_input(
     keys: Res<ButtonInput<KeyCode>>,
-    time: Res<Time>,
     rig: Res<CamRig>,
-    planet: Res<CurrentPlanet>,
-    particles: Option<Res<crate::fx::ParticleAssets>>,
-    mut sfx: MessageWriter<crate::messages::SfxMsg>,
-    mut q: Query<(&mut Player, &mut PlayerState, &Transform)>,
+    mut q: Query<(&Player, &mut InputIntent), With<LocalPlayer>>,
 ) {
-    let Ok((mut p, mut run, ptf)) = q.single_mut() else { return };
-    let dt = time.delta_secs();
-
-    // Use the camera's persistent forward (reprojected onto the current tangent plane)
-    // so movement always matches where the camera looks.
+    let Ok((p, mut intent)) = q.single_mut() else { return };
     let up = p.dir;
     let mut fwd = rig.forward - up * rig.forward.dot(up);
     if fwd.length_squared() < 1e-6 {
@@ -356,7 +363,26 @@ pub fn player_input(
     if keys.pressed(KeyCode::KeyA) {
         wish -= right;
     }
-    let wish = wish.normalize_or_zero();
+    intent.wish = wish.normalize_or_zero();
+    intent.forward = fwd;
+    intent.jump = keys.just_pressed(KeyCode::Space);
+    intent.slide = keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC);
+    intent.interact = keys.just_pressed(KeyCode::KeyE);
+}
+
+/// Apply intent -> motion for EVERY astronaut we simulate (all of them on the host;
+/// just the local one on a client, as prediction).
+pub fn player_input(
+    mut commands: Commands,
+    time: Res<Time>,
+    planet: Res<CurrentPlanet>,
+    particles: Option<Res<crate::fx::ParticleAssets>>,
+    mut sfx: MessageWriter<crate::messages::SfxMsg>,
+    mut q: Query<(&mut Player, &mut PlayerState, &Transform, &InputIntent)>,
+) {
+    for (mut p, mut run, ptf, intent) in &mut q {
+    let dt = time.delta_secs();
+    let wish = intent.wish;
 
     let speed_mult = run.move_speed_mult();
     let sliding = p.slide_timer > 0.0;
@@ -385,7 +411,7 @@ pub fn player_input(
 
     // jump
     let max_jumps = 1 + run.stats.extra_jumps;
-    if keys.just_pressed(KeyCode::Space) {
+    if intent.jump {
         let can_ground = p.grounded || p.coyote > 0.0;
         if can_ground || p.jumps_used < max_jumps {
             // successful bunny-hop: jumped inside the landing window with speed kept
@@ -418,10 +444,7 @@ pub fn player_input(
     }
 
     // slide
-    if (keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC))
-        && p.slide_cd <= 0.0
-        && p.grounded
-    {
+    if intent.slide && p.slide_cd <= 0.0 && p.grounded {
         p.slide_timer = SLIDE_TIME;
         p.slide_cd = SLIDE_COOLDOWN;
         let boost_dir = if wish != Vec3::ZERO { wish } else { p.facing };
@@ -449,7 +472,7 @@ pub fn player_input(
     } else if p.vel_t.length() > 0.5 {
         p.facing = p.vel_t.normalize();
     }
-
+    }
     let _ = planet; // used by physics
 }
 
@@ -460,12 +483,11 @@ pub fn player_physics(
     props: Res<crate::planet::PropColliders>,
     mut q: Query<(&mut Player, &mut PlayerState, &mut Transform)>,
 ) {
-    let Ok((mut p, mut run, mut tf)) = q.single_mut() else { return };
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-
+    for (mut p, mut run, mut tf) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
     p.coyote = (p.coyote - dt).max(0.0);
@@ -520,6 +542,7 @@ pub fn player_physics(
     tf.translation = pos;
     let lean = if p.slide_timer > 0.0 { 0.9 } else { 0.0 };
     tf.rotation = sphere::frame_quat(up, p.facing) * Quat::from_rotation_x(-lean);
+    }
 }
 
 /// The astronaut animator — the code-art-animation skill made real.
@@ -536,8 +559,8 @@ pub fn animate_player(
     if dt <= 0.0 {
         return;
     }
-    let Ok((mut p, children)) = q_player.single_mut() else { return };
     let t = time.elapsed_secs();
+    for (mut p, children) in &mut q_player {
 
     // --- drive the gait by DISTANCE travelled (feet don't skate) ---
     let speed = p.vel_t.length();
@@ -618,6 +641,7 @@ pub fn animate_player(
                 tf.rotation *= Quat::from_rotation_y((t * 0.55).sin() * 0.22 * (1.0 - amp));
             }
         }
+    }
     }
 }
 
