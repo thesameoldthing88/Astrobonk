@@ -10,7 +10,7 @@ use crate::run::{PlayerState, PowerupKind, RunState};
 use bevy::prelude::*;
 use rand::Rng;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PickupKind {
     Xp(f32),
     Gold(u64),
@@ -118,6 +118,8 @@ pub fn pickup_update(
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
+    mut grants: MessageWriter<crate::net::GrantOut>,
+    q_ids: Query<&crate::player::PlayerId>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -209,13 +211,24 @@ pub fn pickup_update(
                     ps.gain_xp(v);
                 }
             }
+            // Every client applies the same grant to its own PlayerState, which is what
+            // keeps card picks local while the pool stays shared.
+            grants.write(crate::net::GrantOut::Xp(v));
             if is_local {
                 sfx.write(SfxMsg(Sfx::Pickup));
             }
             continue;
         }
+        let owner_id = q_player.get(collector).map(|(_, _, _, _, _)| ()).ok();
+        let _ = owner_id;
         if let Ok((_, _, mut ps, _, _)) = q_player.get_mut(collector) {
             collect(&mut run, &mut ps, kind, pos, is_local, &mut numbers, &mut sfx, &mut banners);
+        }
+        if !is_local {
+            // loot picked up by a REMOTE astronaut has to reach that player's machine
+            if let Ok(pid) = q_ids.get(collector) {
+                grants.write(crate::net::GrantOut::Loot(pid.0, kind));
+            }
         }
     }
 }

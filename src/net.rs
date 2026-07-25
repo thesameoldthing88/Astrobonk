@@ -153,6 +153,46 @@ pub struct BossSnapMsg {
     pub bosses: Vec<BossRec>,
 }
 
+/// LOCAL (never networked): the simulation says "someone earned this". A relay turns it
+/// into the right wire message. Keeps pickups.rs free of any notion of clients or channels.
+#[derive(Message, Clone, Copy, Debug)]
+pub enum GrantOut {
+    /// shared pool — every machine applies it
+    Xp(f32),
+    /// collector-only — addressed to whichever machine drives that PlayerId
+    Loot(u8, crate::pickups::PickupKind),
+}
+
+/// Loot on the wire. Like hazards this is an EVENT lane, not a state lane: an idle
+/// pickup's transform is a pure function of (dir, time, bob), and the fly-to-player phase
+/// is derived locally, so a spawn and a despawn are all a client needs to draw the whole
+/// life of a gem. Reliable (Unordered): a lost despawn leaves a ghost gem forever.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub enum PickupEvent {
+    Spawn { id: u16, kind: u8, value: u32, dir: [f32; 3], bob: f32 },
+    Despawn { id: u16 },
+}
+
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct PickupEventMsg {
+    pub events: Vec<PickupEvent>,
+}
+
+/// XP is a SHARED pool (the project's own rule, GDD: shared pool, individual level curve),
+/// so a grant goes to every client. Each machine applies it to its OWN PlayerState, which
+/// is what keeps level-ups local: a player still picks their own cards on their own screen.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct XpGrantMsg(pub f32);
+
+/// Gold, food and powerups belong to whoever picked them up, so this one is addressed.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct LootGrantMsg {
+    pub gold: u64,
+    pub heal: f32,
+    /// 0 = none, 1 = Damage2x, 2 = Magnet, 3 = Speed
+    pub powerup: u8,
+}
+
 /// Transient attack visuals: shots, telegraph rings, mortar arcs.
 ///
 /// An EVENT lane, not a state lane. Every one of these is fully determined by its spawn
@@ -248,6 +288,11 @@ impl PeerSlots {
     fn release(&mut self, client: Entity) -> Option<u8> {
         self.map.remove(&client)
     }
+    /// Reverse lookup: which connected client owns this PlayerId. Needed to address
+    /// collector-only loot at the right machine.
+    pub fn client_for(&self, id: u8) -> Option<Entity> {
+        self.map.iter().find(|(_, v)| **v == id).map(|(k, _)| *k)
+    }
     pub fn player_id(&self, client: Entity) -> Option<u8> {
         self.map.get(&client).copied()
     }
@@ -281,6 +326,20 @@ impl Plugin for NetPlugin {
             .add_server_message::<RunSnapMsg>(Channel::Unordered)
             .make_message_independent::<RunSnapMsg>()
             .init_resource::<RunSync>()
+            .add_message::<GrantOut>()
+            .add_systems(Update, relay_grants.run_if(is_hosting))
+            .add_systems(
+                PreUpdate,
+                (apply_xp_grant, apply_loot_grant)
+                    .after(ClientSystems::Receive)
+                    .run_if(is_client),
+            )
+            .add_server_message::<PickupEventMsg>(Channel::Unordered)
+            .make_message_independent::<PickupEventMsg>()
+            .add_server_message::<XpGrantMsg>(Channel::Unordered)
+            .make_message_independent::<XpGrantMsg>()
+            .add_server_message::<LootGrantMsg>(Channel::Unordered)
+            .make_message_independent::<LootGrantMsg>()
             .add_server_message::<HazardEventMsg>(Channel::Unordered)
             .make_message_independent::<HazardEventMsg>()
             .add_server_message::<BossSnapMsg>(Channel::Unreliable)
@@ -466,6 +525,82 @@ fn planet_from_code(c: u8) -> crate::content::planets::PlanetKind {
         1 => Mars,
         2 => DarkMoon,
         _ => Moon,
+    }
+}
+
+/// HOST: turn simulation grants into addressed wire messages.
+fn relay_grants(
+    mut inbox: MessageReader<GrantOut>,
+    slots: Res<PeerSlots>,
+    mut xp: MessageWriter<ToClients<XpGrantMsg>>,
+    mut loot: MessageWriter<ToClients<LootGrantMsg>>,
+) {
+    use crate::pickups::PickupKind;
+    use crate::run::PowerupKind;
+    for g in inbox.read() {
+        match *g {
+            GrantOut::Xp(v) => {
+                xp.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: XpGrantMsg(v) });
+            }
+            GrantOut::Loot(pid, kind) => {
+                let Some(client) = slots.client_for(pid) else { continue };
+                let msg = match kind {
+                    PickupKind::Gold(g) => LootGrantMsg { gold: g, heal: 0.0, powerup: 0 },
+                    PickupKind::Food => LootGrantMsg { gold: 0, heal: -1.0, powerup: 0 },
+                    PickupKind::Powerup(k) => LootGrantMsg {
+                        gold: 0,
+                        heal: 0.0,
+                        powerup: match k {
+                            PowerupKind::Damage2x => 1,
+                            PowerupKind::Magnet => 2,
+                            PowerupKind::Speed => 3,
+                        },
+                    },
+                    // Silver is banked run-globally and rides RunSnapMsg; XP has its own lane.
+                    _ => continue,
+                };
+                loot.write(ToClients { targets: SendTargets::Single(ClientId::Client(client)), message: msg });
+            }
+        }
+    }
+}
+
+/// CLIENT: shared XP lands on OUR PlayerState, so our own level-up panel fires locally.
+fn apply_xp_grant(
+    mut msgs: MessageReader<XpGrantMsg>,
+    mut q: Query<&mut crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+) {
+    let Ok(mut ps) = q.single_mut() else { return };
+    for m in msgs.read() {
+        if !ps.dead {
+            ps.gain_xp(m.0);
+        }
+    }
+}
+
+/// CLIENT: our own loot.
+fn apply_loot_grant(
+    mut msgs: MessageReader<LootGrantMsg>,
+    mut q: Query<&mut crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+) {
+    use crate::run::PowerupKind;
+    let Ok(mut ps) = q.single_mut() else { return };
+    for m in msgs.read() {
+        ps.gold += m.gold;
+        if m.heal < 0.0 {
+            let heal = ps.stats.max_hp * 0.2;
+            ps.hp = (ps.hp + heal).min(ps.stats.max_hp);
+        }
+        let k = match m.powerup {
+            1 => Some((PowerupKind::Damage2x, 20.0)),
+            2 => Some((PowerupKind::Magnet, 12.0)),
+            3 => Some((PowerupKind::Speed, 15.0)),
+            _ => None,
+        };
+        if let Some((pk, secs)) = k {
+            ps.powerups.retain(|(x, _)| *x != pk);
+            ps.powerups.push((pk, secs));
+        }
     }
 }
 

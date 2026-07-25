@@ -235,6 +235,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<ButtonInput<KeyCode>>()
         .insert_resource(save)
         .insert_resource(run)
+        .add_message::<crate::net::GrantOut>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()

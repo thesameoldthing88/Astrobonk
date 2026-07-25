@@ -33,7 +33,11 @@ use crate::enemies::{Enemy, EnemyAssets};
 use crate::content::enemies::BossKind;
 use crate::enemies::{AnubotBeam, Boss, CraterpillarHead, CraterpillarSegment, WORM_SEGMENTS};
 use crate::enemies::{EnemyProjectile, MortarShell, Telegraph};
-use crate::net::{BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole, PeerSlots};
+use crate::net::{
+    BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole,
+    PeerSlots, PickupEvent, PickupEventMsg,
+};
+use crate::pickups::{Pickup, PickupAssets, PickupKind};
 use crate::planet::CurrentPlanet;
 use crate::player::{Player, PlayerId};
 use crate::sphere;
@@ -152,6 +156,8 @@ impl Plugin for EnemyStreamPlugin {
             .init_resource::<SnapClock>()
             .init_resource::<NetEnemyIndex>()
             .init_resource::<NetBossIndex>()
+            .init_resource::<PickupIds>()
+            .init_resource::<NetPickupIndex>()
             .init_resource::<NetEnemyStats>()
             .add_systems(
                 Update,
@@ -159,6 +165,13 @@ impl Plugin for EnemyStreamPlugin {
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
+            .add_systems(
+                Update,
+                stream_pickups
+                    .run_if(crate::net::is_simulating)
+                    .run_if(is_networked),
+            )
+            .add_systems(Update, receive_pickups.run_if(crate::net::is_client))
             .add_systems(
                 Update,
                 stream_hazards
@@ -537,6 +550,136 @@ fn receive_hazards(
                             .with_scale(Vec3::splat(1.6)),
                         crate::planet::StageScoped,
                     ));
+                }
+            }
+        }
+    }
+}
+
+/// Wire identity for a pickup, mirroring NetId for enemies.
+#[derive(Component, Clone, Copy)]
+pub struct PickupNetId(pub u16);
+
+#[derive(Resource, Default)]
+pub struct PickupIds {
+    next: u16,
+}
+
+#[derive(Resource, Default)]
+pub struct NetPickupIndex(HashMap<u16, Entity>);
+
+/// HOST: announce every pickup spawn and despawn.
+///
+/// Only the two endpoints cross the wire: an idle pickup's transform is a pure function of
+/// (dir, time, bob), and the fly-to-collector phase is derived locally, so a client can draw
+/// the entire life of a gem from these two events. `gem_merge` needs no special case — it
+/// reads as N despawns plus one spawn, which is exactly what it is.
+fn stream_pickups(
+    mut commands: Commands,
+    mut ids: ResMut<PickupIds>,
+    fresh: Query<(Entity, &Pickup), Without<PickupNetId>>,
+    mut known: Local<HashMap<Entity, u16>>,
+    live: Query<(Entity, &PickupNetId)>,
+    mut out: MessageWriter<ToClients<PickupEventMsg>>,
+) {
+    let mut events: Vec<PickupEvent> = Vec::new();
+
+    for (e, p) in &fresh {
+        ids.next = ids.next.wrapping_add(1).max(1);
+        let id = ids.next;
+        commands.entity(e).insert(PickupNetId(id));
+        let (kind, value) = match p.kind {
+            PickupKind::Xp(v) => (0u8, v.to_bits()),
+            PickupKind::Gold(g) => (1, g as u32),
+            PickupKind::Silver(v) => (2, v as u32),
+            PickupKind::Food => (3, 0),
+            PickupKind::Powerup(k) => (
+                4,
+                match k {
+                    crate::run::PowerupKind::Damage2x => 1,
+                    crate::run::PowerupKind::Magnet => 2,
+                    crate::run::PowerupKind::Speed => 3,
+                },
+            ),
+        };
+        events.push(PickupEvent::Spawn {
+            id,
+            kind,
+            value,
+            dir: [p.dir.x, p.dir.y, p.dir.z],
+            bob: p.bob,
+        });
+    }
+
+    // Same deferred-command trap as enemy ids: track only what ACTUALLY carries the
+    // component, never what was just queued, or a despawn is announced for a pickup that
+    // was merely still waiting for its insert to flush.
+    let now: HashMap<Entity, u16> = live.iter().map(|(e, n)| (e, n.0)).collect();
+    for (e, id) in known.iter() {
+        if !now.contains_key(e) {
+            events.push(PickupEvent::Despawn { id: *id });
+        }
+    }
+    *known = now;
+
+    if !events.is_empty() {
+        out.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: PickupEventMsg { events } });
+    }
+}
+
+/// CLIENT: draw the loot. Visual only — collection and XP are the host's, and arrive as
+/// grants, so these carry no gameplay value the client could double-count.
+fn receive_pickups(
+    mut commands: Commands,
+    mut msgs: MessageReader<PickupEventMsg>,
+    mut index: ResMut<NetPickupIndex>,
+    assets: Option<Res<PickupAssets>>,
+    planet: Option<Res<CurrentPlanet>>,
+) {
+    let (Some(assets), Some(planet)) = (assets, planet) else { return };
+    for m in msgs.read() {
+        for ev in &m.events {
+            match *ev {
+                PickupEvent::Spawn { id, kind, value, dir, bob } => {
+                    if index.0.contains_key(&id) {
+                        continue;
+                    }
+                    let dir = Vec3::from(dir);
+                    let k = match kind {
+                        0 => PickupKind::Xp(f32::from_bits(value)),
+                        1 => PickupKind::Gold(value as u64),
+                        2 => PickupKind::Silver(value as u64),
+                        3 => PickupKind::Food,
+                        _ => PickupKind::Powerup(match value {
+                            1 => crate::run::PowerupKind::Damage2x,
+                            2 => crate::run::PowerupKind::Magnet,
+                            _ => crate::run::PowerupKind::Speed,
+                        }),
+                    };
+                    let (mesh, mat, scale) = match k {
+                        PickupKind::Xp(_) => (assets.gem_mesh.clone(), assets.gem_mat.clone(), 1.0),
+                        PickupKind::Gold(_) => (assets.coin_mesh.clone(), assets.coin_mat.clone(), 1.0),
+                        PickupKind::Silver(_) => (assets.coin_mesh.clone(), assets.silver_mat.clone(), 1.0),
+                        PickupKind::Food => (assets.food_mesh.clone(), assets.food_mat.clone(), 1.0),
+                        PickupKind::Powerup(_) => (assets.power_mesh.clone(), assets.power_mat.clone(), 1.0),
+                    };
+                    let e = commands
+                        .spawn((
+                            Pickup { kind: k, dir, flying: false, speed: 0.0, bob, target: None },
+                            PickupNetId(id),
+                            Mesh3d(mesh),
+                            MeshMaterial3d(mat),
+                            Transform::from_translation(planet.surface_point(dir) + dir * 0.35)
+                                .with_scale(Vec3::splat(scale)),
+                            crate::planet::StageScoped,
+                        ))
+                        .id();
+                    index.0.insert(id, e);
+                }
+                PickupEvent::Despawn { id } => {
+                    if let Some(e) = index.0.remove(&id) {
+                        commands.entity(e).despawn();
+                    }
                 }
             }
         }
@@ -976,13 +1119,19 @@ pub fn log_stream_stats(
     breakdown: Query<(&Enemy, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>)>,
     anchors: Query<(&PlayerId, &Player)>,
     with_id: Query<(), (With<Enemy>, With<NetId>)>,
-    n_boss: Query<(), With<crate::enemies::Boss>>,
-    n_segs: Query<(), With<CraterpillarSegment>>,
-    seg_pos: Query<&Transform, With<CraterpillarSegment>>,
-    n_hazard: Query<(), Or<(With<crate::enemies::EnemyProjectile>, With<crate::enemies::Telegraph>)>>,
+    // Bundled into one param: this diagnostic hit Bevy's 16-system-param cap.
+    counts: (
+        Query<(), With<crate::enemies::Boss>>,
+        Query<(), With<CraterpillarSegment>>,
+        Query<&Transform, With<CraterpillarSegment>>,
+        Query<(), With<crate::pickups::Pickup>>,
+        Query<&crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+        Query<(), Or<(With<crate::enemies::EnemyProjectile>, With<crate::enemies::Telegraph>)>>,
+    ),
     planet: Option<Res<CurrentPlanet>>,
     mine: Res<MyPlayerId>,
 ) {
+    let (n_boss, n_segs, seg_pos, n_pick, my_ps, n_hazard) = &counts;
     let Some(planet) = planet else { return };
     let anchors: Vec<(u8, Vec3)> = anchors.iter().map(|(id, p)| (id.0, p.dir)).collect();
     let now = time.elapsed_secs();
@@ -1014,11 +1163,12 @@ pub fn log_stream_stats(
                 })
                 .collect();
             info!(
-                "NETENEMY[Host] total={} mobile={} bosses={} hazards={} with_netid={} in_interest[{}] resident_sent={}",
+                "NETENEMY[Host] total={} mobile={} bosses={} hazards={} pickups={} with_netid={} in_interest[{}] resident_sent={}",
                 enemies.iter().count(),
                 mobile,
                 n_boss.iter().count(),
                 n_hazard.iter().count(),
+                n_pick.iter().count(),
                 with_id.iter().count(),
                 reach.join(" "),
                 resident
@@ -1026,7 +1176,7 @@ pub fn log_stream_stats(
         }
         NetRole::Client => {
             info!(
-                "NETENEMY[Client] proxies={} bosses={} worm_segs={} worm_len={:.1}m hazards={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} gold={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
                 n_boss.iter().count(),
                 n_segs.iter().count(),
@@ -1042,6 +1192,10 @@ pub fn log_stream_stats(
                     d
                 },
                 n_hazard.iter().count(),
+                n_pick.iter().count(),
+                my_ps.iter().next().map(|p| p.level).unwrap_or(0),
+                my_ps.iter().next().map(|p| p.xp).unwrap_or(0.0),
+                my_ps.iter().next().map(|p| p.gold).unwrap_or(0),
                 stats.records,
                 stats.chunks,
                 stats.bytes,
