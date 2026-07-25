@@ -659,7 +659,9 @@ fn push_player_vitals(
 //    local-client-id API, and PlayerId alone can't answer "which one is me?" because the
 //    client's predicted body and the HOST's body are both PlayerId(0).
 //
-// 2c. HOST-SIDE MULTI-PLAYER QUERIES — the next ticket, and currently the biggest hole.
+// 2c. HOST-SIDE MULTI-PLAYER QUERIES — DONE (Stage 3). Was the biggest hole; see the
+//    commit for the full list. Repro any regression with `--headless --coop2`.
+//    HISTORICAL NOTE, kept because it explains the shape of the fix:
 //    MEASURED, not theoretical: with one client joined the host reports
 //    `local_players=2 player_states=2`. About thirty systems find the player with
 //    `.single()`, so on a 2-player host they all return Err(MultipleEntities) and silently
@@ -669,7 +671,8 @@ fn push_player_vitals(
 //    Player by design), so co-op currently LOOKS right on the joiner and is broken on the
 //    host. Fix: `With<LocalPlayer>` for camera/HUD/panels, iterate for per-player sim, and
 //    nearest-of-many for enemy targeting. Note apply_player_hits needs a message-shape
-//    change, not a query change — PlayerHitMsg carries no victim entity.
+//    change, not a query change — PlayerHitMsg carries no victim entity. (Done: it does
+//    now.)
 //
 // 2d. Smaller follow-ups: replicate each player's AstronautKind so teammates wear their own
 //    suit (remote.rs currently picks a stable palette by slot, and seat_joining_players

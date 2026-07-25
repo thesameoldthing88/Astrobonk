@@ -62,13 +62,25 @@ either pulls Bevy 0.19 and you get two engines in one binary.
 - Remote player visuals (`remote.rs`): teammates get the real rig, eased toward the
   replicated pose, animated by the same `animate_rig` the local player uses
 
-**Not working yet — co-op looks right on the JOINER and is broken on the HOST.**
-MEASURED: with one client joined the host holds `local_players=2 player_states=2`, and
-~30 systems find the player with `.single()`, so they return `Err(MultipleEntities)` and
-silently early-return — HUD, weapon fire, pickups, interaction, level-up panels, enemy
-targeting. Two fail quieter still: Anubot's verdict beam and Craterpillar contact damage
-just stop dealing damage. **This is the next co-op ticket.** The client is unaffected by
-design (it keeps exactly one `Player`; remotes are visual only).
+- **Host correctness with 2 players** (Stage 3). 89 sites classified and converted:
+  presentation → `With<LocalPlayer>`, simulation → per-player, enemies → nearest-by-arc.
+  `PlayerHitMsg` carries a `victim`; `HitMsg` a `source`; projectiles/drones/beams/auras an
+  `owner`. XP is a shared pool on individual curves, gold stays individual, horde scales
+  1.0/1.75/2.4/3.0, and the run ends only when EVERY player is down.
+  Repro: `--headless --coop2` (was: clock frozen, 0 kills → now level 6, 113 kills).
+
+**Known gaps (each deliberately left SAFE, not broken):**
+- A peer gets no level-up card panel — they accrue levels and `pending_levelups` from
+  shared XP, but picking a card needs a client↔host round trip. Nothing auto-picks.
+- A peer cannot use interactables (chest/shop/shrine/teleporter). `interact_system` is at
+  Bevy's exact 16-system-param cap, so the prompt/action split that would allow it does not
+  fit; a peer pressing E is a no-op.
+- **A client still runs its own full local horde**, unreplicated, so its enemies/loot/clock
+  diverge from the host. This is deliberate for now: gating enemy systems off on the client
+  would leave it looking at an EMPTY planet until enemy streaming exists. Fix the streaming
+  first, then gate.
+- A remote player standing in a dust storm is not yet hidden from ranged enemies
+  (`DustStorm.player_inside` is local-only); needs a per-astronaut `InStorm` marker.
 
 Still open after that: enemy streaming with interest management (1,200 enemies cannot
 replicate per-entity — this is the real perf risk and could still change the design),
