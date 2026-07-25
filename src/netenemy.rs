@@ -208,8 +208,25 @@ impl Plugin for EnemyStreamPlugin {
                 (receive_enemies, drive_proxies)
                     .chain()
                     .run_if(crate::net::is_client),
-            );
+            )
+            // Every proxy carries StageScoped, so `despawn_stage` eats them on OnExit(InRun)
+            // — but the id->entity maps survive. Left uncleared, every id stays pointing at a
+            // dead entity, `receive_enemies` sees `contains_key` and silently refuses to
+            // respawn it, and the joiner lands on an empty planet while the host is buried in
+            // a horde. The grace reaper cannot save us: it needs the entity to still exist.
+            .add_systems(OnExit(crate::AppState::InRun), clear_stream_indices);
     }
+}
+
+/// Drop every id->entity mapping when the stage teardown despawns the proxies themselves.
+fn clear_stream_indices(
+    mut enemies: ResMut<NetEnemyIndex>,
+    mut bosses: ResMut<NetBossIndex>,
+    mut pickups: ResMut<NetPickupIndex>,
+) {
+    enemies.0.clear();
+    bosses.0.clear();
+    pickups.0.clear();
 }
 
 fn is_networked(role: Res<NetRole>) -> bool {
@@ -683,7 +700,10 @@ fn receive_pickups(
                 }
                 PickupEvent::Despawn { id } => {
                     if let Some(e) = index.0.remove(&id) {
-                        commands.entity(e).despawn();
+                        // tolerate an entity despawn_stage already reaped
+                        if let Ok(mut ec) = commands.get_entity(e) {
+                            ec.despawn();
+                        }
                     }
                 }
             }
@@ -889,7 +909,9 @@ fn receive_bosses(
         let gone: Vec<u16> = index.0.keys().copied().filter(|k| !seen.contains(k)).collect();
         for id in gone {
             if let Some(ent) = index.0.remove(&id) {
-                commands.entity(ent).despawn();
+                if let Ok(mut ec) = commands.get_entity(ent) {
+                    ec.despawn();
+                }
             }
         }
     }
@@ -1089,7 +1111,9 @@ fn receive_enemies(
             let id = u16::from_le_bytes([d[off], d[off + 1]]) & ID_MASK;
             off += 2;
             if let Some(ent) = index.0.remove(&id) {
-                commands.entity(ent).despawn();
+                if let Ok(mut ec) = commands.get_entity(ent) {
+                    ec.despawn();
+                }
             }
         }
     }

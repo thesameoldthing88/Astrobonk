@@ -142,7 +142,14 @@ fn main() {
         )
         .add_systems(
             OnEnter(AppState::Results),
-            (director::bank_results, ui::menus::spawn_results).chain(),
+            (
+                // A client must never bank a run it did not simulate: its RunState is
+                // adopted from the host, so this would write the HOST's kills and silver
+                // into the joiner's own save file.
+                director::bank_results.run_if(net::is_simulating),
+                ui::menus::spawn_results,
+            )
+                .chain(),
         )
         .add_systems(OnExit(AppState::Results), ui::menus::despawn_menu)
         // ------------- menu inputs
@@ -231,7 +238,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            pickups::gem_merge.run_if(
+            pickups::gem_merge.run_if(net::is_simulating).run_if(
                 in_state(AppState::InRun)
                     .and(playing)
                     .and(on_timer(Duration::from_secs(1))),
@@ -256,8 +263,10 @@ fn main() {
                 player::player_upkeep.run_if(net::is_simulating),
                 fx::update_particles,
                 director::stage_transition,
-                director::downed_watch,
-                director::death_watch,
+                // Run-end is the host's call. On a client `all(dead)` is a one-element
+                // check over its own sheet and fires while the host plays on.
+                director::downed_watch.run_if(net::is_simulating),
+                director::death_watch.run_if(net::is_simulating),
             )
                 .run_if(in_state(AppState::InRun)),
         )
@@ -343,7 +352,9 @@ fn client_follow_host_run(
         }
         return;
     }
-    if *state.get() != AppState::InRun {
+    // Only pull IN from a menu state. Without this guard the client fights death_watch and
+    // results_input for NextState and ping-pongs between Results and a rebuilt world.
+    if matches!(*state.get(), AppState::MainMenu | AppState::Boot) {
         next.set(AppState::InRun);
     }
 }
