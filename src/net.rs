@@ -124,6 +124,10 @@ pub struct RunSnapMsg {
 pub struct RunSync {
     pub seeded: bool,
     pub world_built: bool,
+    /// Set when the host's snapshot reports a stage we are not on yet. A client cannot
+    /// reach `stage_transition` on its own — that runs off the teleporter interaction,
+    /// which is host-only — so this is the only signal it gets that the world changed.
+    pub pending_stage: Option<usize>,
 }
 
 /// One boss on the wire. Bosses get their OWN lane rather than riding the crowd stream for
@@ -522,6 +526,11 @@ fn apply_run_snapshot(
     for m in msgs.read() {
         let first = !sync.seeded;
         run.run_seed = m.run_seed;
+        // Compare BEFORE assigning: this is the edge that triggers the client's rebuild.
+        // Only after the world has been built once, or the initial build would double up.
+        if sync.world_built && run.stage != m.stage as usize {
+            sync.pending_stage = Some(m.stage as usize);
+        }
         run.stage = m.stage as usize;
         if !m.chain.is_empty() {
             run.chain = m.chain.iter().map(|c| planet_from_code(*c)).collect();

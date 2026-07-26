@@ -171,31 +171,21 @@ impl Plugin for EnemyStreamPlugin {
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
-            .add_systems(
-                Update,
-                (receive_pickups, animate_net_pickups)
-                    .chain()
-                    .run_if(crate::net::is_client),
-            )
+
             .add_systems(
                 Update,
                 stream_hazards
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
-            .add_systems(Update, receive_hazards.run_if(crate::net::is_client))
+
             .add_systems(
                 Update,
                 stream_bosses
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
-            .add_systems(
-                Update,
-                (receive_bosses, drive_boss_proxies)
-                    .chain()
-                    .run_if(crate::net::is_client),
-            )
+
             .add_systems(
                 Update,
                 stream_enemies
@@ -203,9 +193,22 @@ impl Plugin for EnemyStreamPlugin {
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
+            // ONE ordered chain. `client_stage_transition` MUST come first: it swaps
+            // CurrentPlanet, and every decode below converts wire offsets to positions using
+            // that planet's RADIUS. Decoding a Mars snapshot against Moon's 140 m would put
+            // the whole horde at the wrong arc scale — floating or sunk.
             .add_systems(
                 Update,
-                (receive_enemies, drive_proxies)
+                (
+                    client_stage_transition,
+                    receive_bosses,
+                    receive_pickups,
+                    receive_hazards,
+                    receive_enemies,
+                    drive_boss_proxies,
+                    drive_proxies,
+                    animate_net_pickups,
+                )
                     .chain()
                     .run_if(crate::net::is_client),
             )
@@ -756,6 +759,83 @@ fn animate_net_pickups(
             tf.rotation = Quat::from_axis_angle(up, t_now * 1.5 + p.bob);
         }
     }
+}
+
+/// CLIENT: rebuild the world when the host moves to the next planet.
+///
+/// `director::stage_transition` is unreachable on a client — its only trigger is the
+/// teleporter interaction, which is host-only — so without this the joiner keeps the entire
+/// previous planet (terrain, rocks, chests, shrines) while its HUD describes the new one,
+/// and every streamed enemy decodes against the wrong planet radius.
+///
+/// This deliberately mirrors only the TEARDOWN+REBUILD half of stage_transition. The victory
+/// branch and the `save.counters.cleared` writes stay host-only: a client must never bank
+/// progress for a stage it did not simulate.
+#[allow(clippy::too_many_arguments)]
+fn client_stage_transition(
+    mut commands: Commands,
+    mut sync: ResMut<crate::net::RunSync>,
+    run: Res<crate::run::RunState>,
+    save: Res<crate::save::MetaSave>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut game_rng: ResMut<crate::run::GameRng>,
+    mut phase: ResMut<crate::run::RunPhase>,
+    mut indices: (ResMut<NetEnemyIndex>, ResMut<NetBossIndex>, ResMut<NetPickupIndex>),
+    scoped: Query<Entity, With<crate::planet::StageScoped>>,
+    mine: Query<&crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
+) {
+    let Some(stage) = sync.pending_stage.take() else { return };
+
+    // Carry our build across, exactly as the host carries every player's.
+    let carried = mine.single().ok().cloned();
+
+    // Tear the old stage down. This eats our astronaut and every streamed proxy too —
+    // they are all StageScoped — so the id maps must be cleared or `receive_*` would
+    // refuse to respawn those ids for the rest of the run.
+    for e in &scoped {
+        commands.entity(e).despawn();
+    }
+    indices.0 .0.clear();
+    indices.1 .0.clear();
+    indices.2 .0.clear();
+
+    let stage_seed = run.run_seed.wrapping_add(stage as u64);
+    game_rng.reseed(stage_seed);
+    let planet = CurrentPlanet::from_kind(run.planet());
+    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    commands.insert_resource(props);
+    crate::player::spawn_player(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &planet,
+        &run,
+        &save,
+        0,
+        carried.as_ref().map(|p| p.character).unwrap_or(run.character),
+        true,
+        carried,
+    );
+    crate::interact::spawn_interactables(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &planet,
+        &run,
+        &crate::run::PlayerState::new(run.character, &save),
+        &save,
+        Vec3::Y,
+    );
+    commands.insert_resource(planet);
+    *phase = crate::run::RunPhase::Playing;
+    banners.write(crate::messages::BannerMsg(format!(
+        "STAGE {} — {}",
+        stage + 1,
+        run.planet().def().name
+    )));
+    info!("NET client rebuilt world for stage {stage}");
 }
 
 fn boss_code(k: BossKind) -> u8 {

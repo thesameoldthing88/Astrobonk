@@ -157,6 +157,12 @@ fn main() {
         .add_systems(Update, dev_fast_boss.run_if(in_state(AppState::InRun)))
         .add_systems(
             Update,
+            dev_stage_now
+                .run_if(in_state(AppState::InRun))
+                .run_if(|| std::env::args().any(|a| a == "--stagenow")),
+        )
+        .add_systems(
+            Update,
             dev_autopick
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| std::env::args().any(|a| a == "--autopick")),
@@ -362,10 +368,15 @@ fn client_follow_host_run(
 /// Load the save; a placeholder RunState keeps Res<RunState> alive in menus.
 fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     let save = save::MetaSave::load();
+    // --stagenow needs a MULTI-planet chain to advance into: tier 1 is Moon-only, so
+    // advancing from it hits the victory branch instead. Tier 3 gives Moon -> Mars ->
+    // DarkMoon, which also exercises the planet RADIUS change (140 -> 160) that would
+    // otherwise decode the streamed horde at the wrong arc scale.
+    let dev_tier = if std::env::args().any(|a| a == "--stagenow") { 3 } else { 1 };
     let run_state = run::RunState::new(
         content::characters::AstronautKind::Buzz,
         content::planets::PlanetKind::Moon,
-        1,
+        dev_tier,
         &save,
     );
     commands.insert_resource(save);
@@ -456,6 +467,26 @@ fn dev_autopick(
     chest.open = false;
     shop.open = false;
     *phase = run::RunPhase::Playing;
+}
+
+/// `--stagenow`: host-side dev trigger that advances a stage ~20s in, so the client's
+/// world rebuild can be tested without killing a boss and walking to a teleporter first.
+fn dev_stage_now(
+    time: Res<Time>,
+    role: Res<net::NetRole>,
+    run: Res<run::RunState>,
+    mut pending: ResMut<director::PendingStage>,
+    mut fired: Local<f32>,
+) {
+    if matches!(*role, net::NetRole::Client) || pending.0.is_some() {
+        return;
+    }
+    *fired += time.delta_secs();
+    if *fired > 20.0 && run.stage == 0 {
+        *fired = -1.0e9; // once
+        pending.0 = Some(1);
+        info!("DEV --stagenow: advancing to stage 2");
+    }
 }
 
 /// `--bossnow`: wind the clock to just before the boss mark so the boss lane can be tested
