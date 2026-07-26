@@ -748,6 +748,7 @@ fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<M
 /// otherwise read as a stutter-stop on the host.
 fn send_local_input(
     q: Query<&InputIntent, With<LocalPlayer>>,
+    phase: Res<crate::run::RunPhase>,
     mut out: MessageWriter<PlayerInputMsg>,
     time: Res<Time>,
     dbg: Res<NetDebug>,
@@ -755,6 +756,20 @@ fn send_local_input(
     mut sent: Local<u32>,
 ) {
     let Ok(intent) = q.single() else { return };
+    // While a panel is up, `gather_local_input` stops running but this does not — so we
+    // would re-send the last intent forever, and the host ASSIGNS wish. A joiner who was
+    // holding W when their level-up opened kept sprinting on the host. Send a neutral
+    // intent instead of the stale one; this also stops the interact bit latching.
+    if *phase != crate::run::RunPhase::Playing {
+        out.write(PlayerInputMsg {
+            wish: Vec3::ZERO,
+            forward: intent.forward,
+            jump: false,
+            slide: false,
+            interact: false,
+        });
+        return;
+    }
     *sent += 1;
     if dbg.log && time.elapsed_secs() >= *next {
         *next = time.elapsed_secs() + 1.0;
@@ -795,6 +810,7 @@ fn log_astronauts(
     n_states: Query<(), With<crate::run::PlayerState>>,
     props: Option<Res<crate::planet::PropColliders>>,
     run: Res<crate::run::RunState>,
+    q_inter: Query<&Transform, Or<(With<crate::interact::Interactable>, With<crate::interact::ChargeShrine>)>>,
 ) {
     let now = time.elapsed_secs();
     if now < *next {
@@ -816,13 +832,23 @@ fn log_astronauts(
             )
         })
         .unwrap_or((0, 0));
+    // Interactables are drawn from the same seeded stream as the props, but from a
+    // DIFFERENT code path, so they can desync independently (the cage's conditional draw did
+    // exactly that). Checksumming them separately is what makes "we are standing in the same
+    // ring" checkable instead of assumed.
+    let inter_sum: i64 = q_inter
+        .iter()
+        .map(|t| (t.translation.x as f64 * 1e3) as i64 + (t.translation.z as f64 * 1e3) as i64)
+        .sum();
     info!(
-        "NET[{:?}] seed={} stage={} props={} layout_sum={} timer={:.1} kills={}",
+        "NET[{:?}] seed={} stage={} props={} layout_sum={} inter={} inter_sum={} timer={:.1} kills={}",
         *role,
         run.run_seed,
         run.stage,
         n_props,
         layout,
+        q_inter.iter().count(),
+        inter_sum,
         run.timer,
         run.kills
     );

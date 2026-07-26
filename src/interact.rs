@@ -260,9 +260,15 @@ pub fn spawn_interactables(
     spawn_simple(commands, InteractKind::Moai, dir, Vec::new(), None);
     let dir = place_dir(&mut rng, planet, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Microwave, dir, Vec::new(), None);
+    // The draw happens UNCONDITIONALLY even though the cage itself is conditional.
+    // `place_dir` consumes a variable number of rng draws (it retries up to 40 times), so
+    // skipping it shifts every later draw — which moved all five charge shrines. Two players
+    // whose saves disagree about `chimp_freed` would then stand in DIFFERENT rings, and
+    // "converge on the shrine together" silently cannot work. The cage stays per-machine
+    // (it is a per-machine unlock); only the rng stream is made machine-independent.
+    let cage_dir = place_dir(&mut rng, planet, player_dir, 25.0);
     if planet.kind == crate::content::planets::PlanetKind::Moon && !save.counters.chimp_freed {
-        let dir = place_dir(&mut rng, planet, player_dir, 25.0);
-        spawn_simple(commands, InteractKind::Cage, dir, Vec::new(), None);
+        spawn_simple(commands, InteractKind::Cage, cage_dir, Vec::new(), None);
     }
 
     // Charge shrines (stand in the ring)
@@ -332,7 +338,7 @@ pub fn spawn_teleporter(
 pub fn charge_shrines(
     time: Res<Time>,
     mut run: ResMut<RunState>,
-    q_ps: Query<&PlayerState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     save: Res<MetaSave>,
