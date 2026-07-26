@@ -260,7 +260,13 @@ pub fn main_menu_input(
                 // character and planet as usual and joiners arrive once it is in a run.
                 match crate::net::start_host(&mut commands, &channels, crate::net::DEFAULT_PORT) {
                     Ok(()) => {
-                        coop_note.0 = format!("HOSTING on port {}", crate::net::DEFAULT_PORT);
+                        // Show the address a machine on the SAME NETWORK must type.
+                        // Without this the other player has to go find ipconfig.
+                        coop_note.0 = format!(
+                            "HOSTING — tell the other player to join:  {}   (port {})",
+                            crate::net::local_ip(),
+                            crate::net::DEFAULT_PORT
+                        );
                         next.set(AppState::CharSelect);
                     }
                     Err(e) => coop_note.0 = format!("HOST FAILED: {e}"),

@@ -1018,6 +1018,21 @@ fn report_connection(
     }
 }
 
+/// This machine's address on the local network, for the "tell your friend what to type"
+/// line. Uses the standard UDP trick: connecting a datagram socket sends NOTHING, it just
+/// makes the OS pick the interface it would route through, which is exactly the address a
+/// machine on the same LAN needs. Falls back to loopback if there is no route.
+pub fn local_ip() -> String {
+    let probe = |target: &str| -> Option<String> {
+        let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+        sock.connect(target).ok()?;
+        Some(sock.local_addr().ok()?.ip().to_string())
+    };
+    probe("8.8.8.8:80")
+        .or_else(|| probe("192.168.1.1:80"))
+        .unwrap_or_else(|| "127.0.0.1".into())
+}
+
 /// Start hosting on `port`. The host keeps simulating locally — it's a listen server,
 /// so the hosting player plays too (no dedicated box needed).
 pub fn start_host(commands: &mut Commands, channels: &RepliconChannels, port: u16) -> Result<(), String> {
