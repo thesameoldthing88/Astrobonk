@@ -53,6 +53,42 @@ pub enum MenuBtn {
     Quests,
     Settings,
     Quit,
+    /// Open this machine to joiners, then play as normal — it is a listen server, so the
+    /// host is a player too.
+    HostCoop,
+    /// Open the address entry.
+    JoinCoop,
+    JoinConfirm,
+    JoinCancel,
+}
+
+/// Is the address entry showing?
+#[derive(Resource, Default)]
+pub struct JoinOpen(pub bool);
+
+/// A line of feedback under the co-op buttons — "HOSTING on port 5011", "JOIN FAILED: ...".
+/// Without this, a failed host (port already taken) is completely silent to the player.
+#[derive(Resource, Default)]
+pub struct CoopNote(pub String);
+
+#[derive(Component)]
+pub struct CoopNoteText;
+
+/// The address-entry overlay shown after JOIN CO-OP.
+#[derive(Component)]
+pub struct JoinPanel;
+#[derive(Component)]
+pub struct JoinAddrText;
+
+/// What the player has typed so far. Pre-filled with localhost because the overwhelmingly
+/// common first test is two instances on one machine.
+#[derive(Resource)]
+pub struct JoinAddr(pub String);
+
+impl Default for JoinAddr {
+    fn default() -> Self {
+        Self("127.0.0.1".into())
+    }
 }
 #[derive(Component)]
 pub struct SidePanel;
@@ -99,6 +135,33 @@ pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
                 .with_children(|b| {
                     b.spawn(txt("LAUNCH", FONT_BIG, Color::WHITE));
                 });
+
+            // ---- CO-OP ----
+            root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
+                row.spawn((
+                    MenuBtn::HostCoop,
+                    Button,
+                    button_node(),
+                    BackgroundColor(BTN_BG),
+                    BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
+                ))
+                .with_children(|b| {
+                    b.spawn(txt("HOST CO-OP", FONT_MED, Color::WHITE));
+                });
+                row.spawn((
+                    MenuBtn::JoinCoop,
+                    Button,
+                    button_node(),
+                    BackgroundColor(BTN_BG),
+                    BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
+                ))
+                .with_children(|b| {
+                    b.spawn(txt("JOIN CO-OP", FONT_MED, Color::WHITE));
+                });
+            });
+            // Feedback line: without it a failed host (port already in use) or a bad address
+            // is completely silent and the player just sees nothing happen.
+            root.spawn((CoopNoteText, txt("", FONT_SMALL, Color::srgb(0.5, 0.9, 1.0))));
 
             // Daily seeded planet — same tiny world for everyone today.
             let day = crate::run::today();
@@ -164,13 +227,55 @@ pub fn main_menu_input(
     mut sfx: MessageWriter<SfxMsg>,
     panel: Query<Entity, With<SidePanel>>,
     mut dirty: Local<bool>,
+    // Bundled: this system is at Bevy's 16-system-param cap and already uses this trick.
+    mut coop: (
+        Res<bevy_replicon::prelude::RepliconChannels>,
+        Res<JoinAddr>,
+        ResMut<JoinOpen>,
+        ResMut<CoopNote>,
+        Res<crate::net::NetRole>,
+    ),
 ) {
+    let (channels, addr, join_open, coop_note, role) = &mut coop;
     let mut changed = false;
     for (i, btn) in &menu_btns {
         if *i != Interaction::Pressed {
             continue;
         }
+        // A full-screen overlay does not block the buttons behind it — Bevy still delivers
+        // Interaction to them. Without this guard, clicking CONNECT also pressed HOST CO-OP
+        // underneath, and the machine became a client AND a host at once.
+        if join_open.0 && !matches!(btn, MenuBtn::JoinConfirm | MenuBtn::JoinCancel) {
+            continue;
+        }
         match btn {
+            MenuBtn::HostCoop if role.is_networked() => {
+                coop_note.0 = "already in a co-op session — restart to change role".into();
+            }
+            MenuBtn::JoinCoop if role.is_networked() => {
+                coop_note.0 = "already in a co-op session — restart to change role".into();
+            }
+            MenuBtn::HostCoop => {
+                // Start listening, then fall through to the normal flow — the host picks a
+                // character and planet as usual and joiners arrive once it is in a run.
+                match crate::net::start_host(&mut commands, &channels, crate::net::DEFAULT_PORT) {
+                    Ok(()) => {
+                        coop_note.0 = format!("HOSTING on port {}", crate::net::DEFAULT_PORT);
+                        next.set(AppState::CharSelect);
+                    }
+                    Err(e) => coop_note.0 = format!("HOST FAILED: {e}"),
+                }
+            }
+            MenuBtn::JoinCoop => {
+                join_open.0 = true;
+            }
+            MenuBtn::JoinCancel => {
+                join_open.0 = false;
+            }
+            MenuBtn::JoinConfirm => {
+                let a = addr.0.clone();
+                try_join(&mut commands, channels, &a, coop_note, join_open, **role);
+            }
             MenuBtn::Launch => {
                 selected.daily = false;
                 next.set(AppState::CharSelect);
@@ -547,5 +652,158 @@ pub fn results_input(
     }
     if go {
         next.set(AppState::MainMenu);
+    }
+}
+
+/// Build / tear down the address entry, and show the co-op status line.
+pub fn join_panel_sync(
+    mut commands: Commands,
+    open: Res<JoinOpen>,
+    addr: Res<JoinAddr>,
+    note: Res<CoopNote>,
+    panel: Query<Entity, With<JoinPanel>>,
+    mut addr_text: Query<&mut Text, (With<JoinAddrText>, Without<CoopNoteText>)>,
+    mut note_text: Query<&mut Text, (With<CoopNoteText>, Without<JoinAddrText>)>,
+) {
+    // status line under the co-op buttons
+    if let Ok(mut t) = note_text.single_mut() {
+        if t.0 != note.0 {
+            t.0 = note.0.clone();
+        }
+    }
+
+    let shown = !panel.is_empty();
+    if open.0 && !shown {
+        commands
+            .spawn((
+                JoinPanel,
+                overlay_root(),
+                BackgroundColor(Color::srgba(0.02, 0.02, 0.06, 0.94)),
+            ))
+            .with_children(|root| {
+                root.spawn(txt("JOIN CO-OP", FONT_BIG, Color::srgb(0.4, 0.9, 1.0)));
+                root.spawn(txt(
+                    "type the host's IP address, then ENTER",
+                    FONT_MED,
+                    Color::srgb(0.6, 0.65, 0.8),
+                ));
+                root.spawn((JoinAddrText, txt(addr.0.clone(), FONT_BIG, Color::WHITE)));
+                root.spawn(txt(
+                    "same machine: 127.0.0.1   ·   same house: the host's local IP   ·   ESC to cancel",
+                    FONT_SMALL,
+                    Color::srgb(0.5, 0.55, 0.7),
+                ));
+                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
+                    row.spawn((
+                        MenuBtn::JoinConfirm,
+                        Button,
+                        button_node(),
+                        BackgroundColor(BTN_BG),
+                        BorderColor::all(Color::srgb(0.4, 1.0, 0.6)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn(txt("CONNECT", FONT_MED, Color::WHITE));
+                    });
+                    row.spawn((
+                        MenuBtn::JoinCancel,
+                        Button,
+                        button_node(),
+                        BackgroundColor(BTN_BG),
+                        BorderColor::all(Color::srgb(1.0, 0.5, 0.5)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn(txt("CANCEL", FONT_MED, Color::WHITE));
+                    });
+                });
+            });
+    } else if !open.0 && shown {
+        for e in &panel {
+            commands.entity(e).despawn();
+        }
+    }
+
+    if open.0 {
+        if let Ok(mut t) = addr_text.single_mut() {
+            if t.0 != addr.0 {
+                t.0 = addr.0.clone();
+            }
+        }
+    }
+}
+
+/// Shared by the CONNECT button and the ENTER key, so the two cannot drift apart.
+pub fn try_join(
+    commands: &mut Commands,
+    channels: &bevy_replicon::prelude::RepliconChannels,
+    addr: &str,
+    note: &mut CoopNote,
+    open: &mut JoinOpen,
+    role: crate::net::NetRole,
+) {
+    if role.is_networked() {
+        note.0 = "already in a co-op session — restart to change role".into();
+        open.0 = false;
+        return;
+    }
+    match addr.trim().parse::<std::net::IpAddr>() {
+        Ok(ip) => match crate::net::start_join(commands, channels, ip, crate::net::DEFAULT_PORT) {
+            Ok(()) => {
+                // Deliberately NO state change: a client must not build a world from its own
+                // seed. `client_follow_host_run` enters the run once the host's snapshot lands.
+                note.0 = format!("CONNECTING to {ip} — waiting for the host's world…");
+                open.0 = false;
+            }
+            Err(e) => note.0 = format!("JOIN FAILED: {e}"),
+        },
+        Err(_) => note.0 = format!("'{}' is not a valid IP address", addr.trim()),
+    }
+}
+
+/// Type an address. Digits and dots only — this is an IP field, so filtering here is
+/// simpler than validating a mess later, and it makes a typo impossible to submit.
+pub fn join_addr_input(
+    mut commands: Commands,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut open: ResMut<JoinOpen>,
+    mut addr: ResMut<JoinAddr>,
+    mut note: ResMut<CoopNote>,
+    channels: Res<bevy_replicon::prelude::RepliconChannels>,
+    role: Res<crate::net::NetRole>,
+) {
+    if !open.0 {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        open.0 = false;
+        return;
+    }
+    if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
+        let a = addr.0.clone();
+        try_join(&mut commands, &channels, &a, &mut note, &mut open, *role);
+        return;
+    }
+    for k in keys.get_just_pressed() {
+        let ch = match k {
+            KeyCode::Digit0 | KeyCode::Numpad0 => Some('0'),
+            KeyCode::Digit1 | KeyCode::Numpad1 => Some('1'),
+            KeyCode::Digit2 | KeyCode::Numpad2 => Some('2'),
+            KeyCode::Digit3 | KeyCode::Numpad3 => Some('3'),
+            KeyCode::Digit4 | KeyCode::Numpad4 => Some('4'),
+            KeyCode::Digit5 | KeyCode::Numpad5 => Some('5'),
+            KeyCode::Digit6 | KeyCode::Numpad6 => Some('6'),
+            KeyCode::Digit7 | KeyCode::Numpad7 => Some('7'),
+            KeyCode::Digit8 | KeyCode::Numpad8 => Some('8'),
+            KeyCode::Digit9 | KeyCode::Numpad9 => Some('9'),
+            KeyCode::Period | KeyCode::NumpadDecimal => Some('.'),
+            _ => None,
+        };
+        if let Some(c) = ch {
+            if addr.0.len() < 15 {
+                addr.0.push(c);
+            }
+        }
+        if matches!(k, KeyCode::Backspace) {
+            addr.0.pop();
+        }
     }
 }

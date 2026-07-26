@@ -167,7 +167,15 @@ fn main() {
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| std::env::args().any(|a| a == "--autopick")),
         )
+        .init_resource::<ui::menus::JoinAddr>()
+        .init_resource::<ui::menus::JoinOpen>()
+        .init_resource::<ui::menus::CoopNote>()
         .add_systems(Update, ui::menus::main_menu_input.run_if(in_state(AppState::MainMenu)))
+        .add_systems(
+            Update,
+            (ui::menus::join_panel_sync, ui::menus::join_addr_input)
+                .run_if(in_state(AppState::MainMenu)),
+        )
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
         .add_systems(Update, ui::menus::results_input.run_if(in_state(AppState::Results)))
