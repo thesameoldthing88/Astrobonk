@@ -737,6 +737,7 @@ fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<M
     for m in msgs.read() {
         if mine.0 != Some(m.0) {
             info!("NET assigned PlayerId {}", m.0);
+            crate::playlog::line(format!("NET assigned PlayerId {}", m.0));
             mine.0 = Some(m.0);
         }
     }
@@ -1002,6 +1003,7 @@ fn report_connection(
         let now = *cs.get();
         if last_client.map(|p| p != now).unwrap_or(true) {
             info!("NET client state -> {now:?}");
+            crate::playlog::line(format!("NET client state -> {now:?}"));
             *last_client = Some(now);
         }
     }
@@ -1010,6 +1012,7 @@ fn report_connection(
         if peers != *last_peers {
             let running = server_state.map(|s| *s.get() == ServerState::Running).unwrap_or(false);
             info!("NET peers connected: {peers} (server running: {running})");
+            crate::playlog::line(format!("NET peers connected: {peers}"));
             *last_peers = peers;
         }
     }
@@ -1045,6 +1048,7 @@ pub fn start_host(commands: &mut Commands, channels: &RepliconChannels, port: u1
     commands.insert_resource(transport);
     commands.insert_resource(NetRole::Host);
     info!("hosting on port {port}");
+    crate::playlog::line(format!("NET hosting on port {port}"));
     Ok(())
 }
 
@@ -1080,6 +1084,7 @@ pub fn start_join(
     commands.insert_resource(transport);
     commands.insert_resource(NetRole::Client);
     info!("joining {addr}:{port}");
+    crate::playlog::line(format!("NET joining {addr}:{port}"));
     Ok(())
 }
 

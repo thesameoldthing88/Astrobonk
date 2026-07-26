@@ -17,6 +17,7 @@ mod pickups;
 mod planet;
 mod player;
 mod netenemy;
+mod playlog;
 mod remote;
 mod run;
 mod save;
@@ -85,6 +86,7 @@ fn main() {
         .add_plugins(net::NetPlugin)
         .add_plugins(remote::RemoteVisualsPlugin)
         .add_plugins(netenemy::EnemyStreamPlugin)
+        .add_plugins(playlog::PlayLogPlugin)
         .init_state::<AppState>()
         .init_resource::<run::RunPhase>()
         .init_resource::<run::ChoicePanel>()

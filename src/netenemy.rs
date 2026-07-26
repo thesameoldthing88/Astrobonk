@@ -836,6 +836,7 @@ fn client_stage_transition(
         run.planet().def().name
     )));
     info!("NET client rebuilt world for stage {stage}");
+    crate::playlog::line(format!("NET client rebuilt world for stage {stage}"));
 }
 
 fn boss_code(k: BossKind) -> u8 {
