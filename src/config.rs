@@ -537,9 +537,52 @@ pub const TELEGRAPH_PULSE_AMP: f32 = 0.07;
 /// line is still tracking. A locked line stops marching — the "dodge now" tell.
 pub const AIM_DASHES: usize = 12;
 pub const AIM_DASH_SPEED: f32 = 9.0;
-/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
-pub const BLOOM_INTENSITY: f32 = 0.15;
+/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15). The toon look
+/// keeps it sparing: flat cel colors read cleaner without a haze over them.
+pub const BLOOM_INTENSITY: f32 = 0.1;
 pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
+/// ...and only the brightest pixels feed it (soft knee), so a lit suit or a pale rock never
+/// glows — suns, stars, glows and hit flashes still do.
+pub const BLOOM_THRESHOLD: f32 = 0.6;
+pub const BLOOM_THRESHOLD_SOFTNESS: f32 = 0.5;
+
+// ── Toon look (locked direction #7, `toon.rs`) ────────────────────────────────
+/// Cel bands on N·L for every lit StandardMaterial: below the first edge a face gets no
+/// direct light (ambient only), between the edges the MID level, above the second FULL.
+/// Each step is smoothed over ±TOON_BAND_SOFT of N·L so a band edge isn't a jagged pixel stair.
+pub const TOON_BAND_EDGES: (f32, f32) = (0.06, 0.38);
+pub const TOON_BAND_MID: f32 = 0.3;
+pub const TOON_BAND_FULL: f32 = 0.72;
+pub const TOON_BAND_SOFT: f32 = 0.035;
+/// A lit rim just inside every silhouette turned toward the sun (drawn by the ink pass, so
+/// only real edges get it, never a grazing stretch of ground): brightens the surface by this
+/// share. Scales with the sun (a shrunken sun, a lower rim); the night side never has one.
+pub const TOON_RIM_STRENGTH: f32 = 0.35;
+/// Specular turns into a hard cel highlight: glossy parts (visors) keep a crisp spot above
+/// this brightness, rough ones (rock, dust, cloth) lose their soft sheen.
+pub const TOON_SPEC_EDGE: (f32, f32) = (0.08, 0.14);
+/// How much of the terrain's own bumpy normal the ground shades with (the rest is the
+/// planet's radial normal), so cel bands follow the world's curve and its big hills instead
+/// of speckling across every small bump.
+pub const TOON_TERRAIN_NORMAL_DETAIL: f32 = 0.55;
+/// The flashlight cone in two cel steps: a dimmer outer ring at this share, the full core.
+/// Edges are in the spot's own 0..1 falloff (1 = inside the inner angle).
+pub const TOON_CONE_RING: f32 = 0.4;
+pub const TOON_CONE_EDGES: (f32, f32) = (0.03, 0.4);
+/// Ink outlines (post-process over the depth + normal prepass): line width in pixels at
+/// 720p (scaled with the window height), and ×this in the §13 high-contrast mode.
+pub const TOON_INK_PX: f32 = 1.0;
+pub const TOON_INK_HIGH_CONTRAST: f32 = 2.0;
+/// A silhouette is inked where the depth's second difference, relative to the pixel's own
+/// depth, exceeds this (planes are linear in reverse-Z depth, so they never trip it)...
+pub const TOON_INK_DEPTH_EDGE: f32 = 0.06;
+/// ...and a crease where neighbouring normals turn by more than this (1 − cos), at this
+/// opacity — lighter than the silhouette, so an outline still reads as the outside.
+pub const TOON_INK_NORMAL_EDGE: f32 = 0.35;
+pub const TOON_INK_CREASE_ALPHA: f32 = 0.65;
+/// Ink fades out between these view distances (m): the planet's far limb is well inside,
+/// the starfield and the sun disc (1400 m+) never get a line.
+pub const TOON_INK_FADE: (f32, f32) = (180.0, 320.0);
 /// Every glow below lives on UNLIT materials, which draw their base color and ignore
 /// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
 /// the camera bloom then has less to spread, too.
