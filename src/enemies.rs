@@ -229,6 +229,9 @@ pub struct EnemyAssets {
     pub worm_mat: Handle<StandardMaterial>,
     pub anubot_mesh: Handle<Mesh>,
     pub anubot_mat: Handle<StandardMaterial>,
+    /// §4 "The Static is near-invisible at night": a ghost of The Static standing in the
+    /// night wears this faint copy of its material (`daynight::night_static`).
+    pub ghost_night_mat: Handle<StandardMaterial>,
     pub beam_mesh: Handle<Mesh>,
     pub beam_charge_mat: Handle<StandardMaterial>,
     pub beam_fire_mat: Handle<StandardMaterial>,
@@ -556,7 +559,16 @@ pub fn setup_enemy_assets(
         );
     }
 
+    let ghost = EnemyKind::Ghost.def().color;
+    let ghost_night_mat = materials.add(StandardMaterial {
+        base_color: ghost.with_alpha(GHOST_NIGHT_ALPHA),
+        emissive: ghost.to_linear() * 0.6,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
     commands.insert_resource(EnemyAssets {
+        ghost_night_mat,
         meshes: mesh_map,
         mats: mat_map,
         elite_mat: materials.add(StandardMaterial {
