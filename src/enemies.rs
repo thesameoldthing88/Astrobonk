@@ -3,11 +3,14 @@
 //! minibosses, stage bosses, and THE STATIC.
 
 use crate::config::*;
-use crate::content::enemies::{time_scaling, BossKind, EliteMods, EnemyKind};
+use crate::content::enemies::{BossKind, EliteMods, EnemyKind};
+use crate::content::palettes::Palette;
+use crate::events_world::InStorm;
 use crate::fx::{self, Pcolor, ParticleAssets, Shake};
 use crate::messages::*;
 use crate::planet::{random_dir, CurrentPlanet, StageScoped};
 use crate::player::Player;
+use crate::run::scaling::{self, Scaling};
 use crate::run::RunState;
 use crate::sphere;
 use bevy::prelude::*;
@@ -36,6 +39,25 @@ pub struct Enemy {
     pub stride: f32,
 }
 
+/// Reeling from a Sonic Whoopee / BROWN NOTE shove (`combat::apply_hits`): a stunned foe
+/// neither advances nor attacks — every attacker query filters it out — though it still
+/// slides with its knockback. HOST-only (a joiner sees its proxy stop). Bosses are immune.
+#[derive(Component)]
+pub struct Stunned {
+    pub secs: f32,
+}
+
+/// HOST: stuns wear off.
+pub fn tick_stuns(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut Stunned)>) {
+    let dt = time.delta_secs();
+    for (e, mut s) in &mut q {
+        s.secs -= dt;
+        if s.secs <= 0.0 {
+            commands.entity(e).remove::<Stunned>();
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct Boss {
     pub kind: BossKind,
@@ -43,6 +65,11 @@ pub struct Boss {
     pub burst_timer: f32,
     pub phase: u8, // 0 = P1 (>66% HP), 1 = P2 (33-66%), 2 = P3 (<33%)
 }
+
+/// Which stage mark a miniboss was summoned for (0 = the 7:00 spike, 1 = the 2:00 one).
+/// Host-only: it decides the guaranteed chest (§3), which reaches clients via RunSnapMsg.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinibossSlot(pub u8);
 
 /// The Craterpillar's head records the ground it has crossed so its body can
 /// follow — a worm that literally laps the tiny planet.
@@ -78,6 +105,35 @@ impl Default for AnubotBeam {
     }
 }
 
+impl AnubotBeam {
+    /// Sweep speed in rad/s: slow while charging (the telegraph), fast while firing, and
+    /// faster each phase. Shared with the co-op client, which spins its copy of the beam
+    /// between boss snapshots with exactly these numbers.
+    pub fn spin(state: u8, phase: u8) -> f32 {
+        let ph = phase as f32;
+        match state {
+            1 => 0.5,
+            2 => 1.15 * (1.0 + 0.3 * ph),
+            _ => 0.25,
+        }
+    }
+    /// How long a state lasts once entered. The client restarts its local timer from this
+    /// when a snapshot reports a new state, which is all the charge-up pose needs.
+    pub fn state_secs(state: u8, phase: u8) -> f32 {
+        let ph = phase as f32;
+        match state {
+            1 => 1.3 - 0.3 * ph,          // shorter telegraph as he enrages
+            2 => 3.0 + 0.6 * ph,          // longer sweep
+            _ => (2.6 - 0.7 * ph).max(0.8), // shorter rest
+        }
+    }
+    /// World-space heading of the beam for a boss standing at `up`.
+    pub fn heading(&self, up: Vec3) -> Vec3 {
+        let base = sphere::tangent_frame(up).0;
+        (Quat::from_axis_angle(up, self.angle) * base).normalize_or_zero()
+    }
+}
+
 #[derive(Component)]
 pub struct AnubotBeamVis {
     pub boss: Entity,
@@ -103,10 +159,38 @@ pub struct Beamer {
     pub target: Option<Entity>,
 }
 
-/// The visible aim line while a Beamer charges.
+/// The visible aim line while a Beamer charges: a row of dashes that MARCH toward the
+/// target while the beamer tracks, then freeze and thicken once it locks (§13: the tell
+/// reads by motion and shape, never by color alone).
 #[derive(Component)]
 pub struct AimLine {
     pub owner: Entity,
+    /// Dash phase, 0..1 of one dash period. Stored (not derived from the clock) so a lock
+    /// can freeze the pattern where it stands instead of snapping it.
+    pub march: f32,
+}
+
+/// A Burrower's approach: a crack decal spreading across the ground over the spot it will
+/// erupt from — the §13 "Burrower = cracking decal" tell. Host-spawned with the burrower,
+/// streamed to joiners on the hazard lane, integrated by `crack_decals` everywhere.
+#[derive(Component)]
+pub struct CrackDecal {
+    pub dir: Vec3,
+    pub timer: f32,
+    pub max: f32,
+}
+
+/// Presentation-only children that make a hazard readable without color: the sweep that
+/// fills a telegraph toward impact, the inner safe ring of a slam, and the white outline
+/// hull of high-contrast mode. Built by `decorate_hazards`; never simulated.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum HazardDecor {
+    /// Grows from the center (disc) or the safe edge (ring) to the lethal edge at impact.
+    Sweep,
+    /// A slam's inner edge: inside it is safe.
+    SafeRing,
+    /// White inverted hull (high-contrast "danger = white outline").
+    Outline,
 }
 
 /// Artillery: mortars the player's position with an AoE telegraph.
@@ -164,6 +248,9 @@ pub struct EnemyAssets {
     pub worm_mat: Handle<StandardMaterial>,
     pub anubot_mesh: Handle<Mesh>,
     pub anubot_mat: Handle<StandardMaterial>,
+    /// §4 "The Static is near-invisible at night": a ghost of The Static standing in the
+    /// night wears this faint copy of its material (`daynight::night_static`).
+    pub ghost_night_mat: Handle<StandardMaterial>,
     pub beam_mesh: Handle<Mesh>,
     pub beam_charge_mat: Handle<StandardMaterial>,
     pub beam_fire_mat: Handle<StandardMaterial>,
@@ -171,49 +258,166 @@ pub struct EnemyAssets {
     pub proj_mat: Handle<StandardMaterial>,
     pub ring_mesh: Handle<Mesh>,
     pub ring_mat: Handle<StandardMaterial>,
+    /// See-through fill for the sweep disc inside a telegraph ring.
+    pub ring_fill_mat: Handle<StandardMaterial>,
+    pub disc_mesh: Handle<Mesh>,
+    /// A Beamer's dashed aim line (and its outline hull).
+    pub aim_mesh: Handle<Mesh>,
+    pub aim_outline_mesh: Handle<Mesh>,
+    /// The Burrower's crack decal (and its outline hull).
+    pub crack_mesh: Handle<Mesh>,
+    pub crack_outline_mesh: Handle<Mesh>,
+    /// Outline hulls for the telegraph ring and enemy shots.
+    pub ring_outline_mesh: Handle<Mesh>,
+    pub proj_outline_mesh: Handle<Mesh>,
+    /// Flat white, front faces culled: drawn slightly larger than a hazard, only its far
+    /// side shows — a white rim around the shape (the inverted-hull outline).
+    pub outline_mat: Handle<StandardMaterial>,
 }
 
 /// Original material to restore after a hit-flash.
 #[derive(Component)]
 pub struct BaseMat(pub Handle<StandardMaterial>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SpatialHash {
     pub map: HashMap<IVec3, Vec<(Entity, Vec3)>>,
+    /// The shell the members live in: the least and greatest distance from the planet's
+    /// centre over every member at the last rebuild. The horde is a skin a few metres thick
+    /// on a sphere, so most cells of a query's cube hold nothing and need no probe.
+    pub shell: (f32, f32),
+}
+
+impl Default for SpatialHash {
+    fn default() -> Self {
+        Self { map: HashMap::new(), shell: (f32::INFINITY, f32::NEG_INFINITY) }
+    }
+}
+
+/// Distance from `p` to the cell span `[k·cell, (k+1)·cell)` along one axis (0 inside it).
+fn axis_gap(p: f32, k: i32) -> f32 {
+    let lo = k as f32 * ENEMY_SEPARATION_CELL;
+    (lo - p).max(p - (lo + ENEMY_SEPARATION_CELL)).max(0.0)
 }
 
 impl SpatialHash {
     pub fn key(pos: Vec3) -> IVec3 {
         (pos / ENEMY_SEPARATION_CELL).floor().as_ivec3()
     }
-    /// All enemies within `radius` of `pos` (approximate, cell-based).
+
+    /// Every member that could lie within `radius` of `pos` (cell-based: a superset, never
+    /// missing one). Probes only the cells that both touch the query ball and cross the
+    /// members' shell (M18: the old full-cube scan was 3,375 probes for a homing seeker's
+    /// 14 m and 9,261 for the comet's 22 m; `spatial_hash_self_check` reports the new ones).
     pub fn near<'a>(&'a self, pos: Vec3, radius: f32) -> impl Iterator<Item = (Entity, Vec3)> + 'a {
-        let r = (radius / ENEMY_SEPARATION_CELL).ceil() as i32;
-        let c = Self::key(pos);
-        (-r..=r).flat_map(move |x| {
-            (-r..=r).flat_map(move |y| {
-                (-r..=r).flat_map(move |z| {
-                    self.map
-                        .get(&(c + IVec3::new(x, y, z)))
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                })
-            })
-        })
+        self.cells(pos, radius).flat_map(move |k| self.map.get(&k).into_iter().flatten().copied())
     }
+
+    /// The cells a `near` query probes.
+    fn cells(&self, pos: Vec3, radius: f32) -> impl Iterator<Item = IVec3> {
+        let cell = ENEMY_SEPARATION_CELL;
+        let r = (radius / cell).ceil() as i32;
+        let c = Self::key(pos);
+        let (lo, hi) = self.shell;
+        (-r..=r)
+            .flat_map(move |x| (-r..=r).map(move |y| (c.x + x, c.y + y)))
+            .flat_map(move |(kx, ky)| {
+                // the z cells of this column the ball reaches (none if it misses the column)
+                let (gx, gy) = (axis_gap(pos.x, kx), axis_gap(pos.y, ky));
+                let rest = radius * radius - gx * gx - gy * gy;
+                let (z0, z1) = if rest < 0.0 {
+                    (1, 0)
+                } else {
+                    let s = rest.sqrt();
+                    (((pos.z - s) / cell).floor() as i32, ((pos.z + s) / cell).floor() as i32)
+                };
+                (z0..=z1).map(move |kz| IVec3::new(kx, ky, kz))
+            })
+            .filter(move |k| {
+                // the cell's nearest and farthest points from the planet's centre
+                let min = k.as_vec3() * cell;
+                let max = min + Vec3::splat(cell);
+                let near = Vec3::ZERO.clamp(min, max).length();
+                let far = min.abs().max(max.abs()).length();
+                far >= lo && near <= hi
+            })
+    }
+}
+
+/// Headless self-check (M18): `SpatialHash::near` finds exactly what a brute-force scan
+/// finds within the radius, on a crowd scattered over a planet's skin, for the radii the
+/// game queries — and says how much of the old cube scan it skips.
+pub fn spatial_hash_self_check() -> Result<String, String> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5A7);
+    let radius_planet = 140.0;
+    let mut hash = SpatialHash::default();
+    let mut all: Vec<(Entity, Vec3)> = Vec::new();
+    for i in 0..1200u32 {
+        let dir = random_dir(&mut rng);
+        let pos = dir * (radius_planet + rng.gen_range(-3.0..4.5));
+        all.push((Entity::from_raw_u32(i + 1).unwrap(), pos));
+    }
+    // cluster a third of them around one spot, like a horde on the player
+    let hot = Vec3::Y * radius_planet;
+    for (_, p) in all.iter_mut().take(400) {
+        let jitter = Vec3::new(rng.gen_range(-18.0..18.0), 0.0, rng.gen_range(-18.0..18.0));
+        *p = (hot + jitter).normalize() * (radius_planet + rng.gen_range(-1.0..3.0));
+    }
+    hash.fill(all.iter().copied());
+    let mut report = Vec::new();
+    for (q, radius) in [(hot, 14.0), (hot, 22.0), (hot + Vec3::X * 7.0, 2.2), (hot, 0.8), (Vec3::X * 141.0, 22.0)] {
+        let mut got: Vec<Entity> = hash.near(q, radius).filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| e).collect();
+        let mut want: Vec<Entity> = all.iter().filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| *e).collect();
+        got.sort();
+        want.sort();
+        if got != want {
+            return Err(format!("near({radius} m) found {} of the {} within reach", got.len(), want.len()));
+        }
+        let cube = (2 * (radius / ENEMY_SEPARATION_CELL).ceil() as usize + 1).pow(3);
+        report.push(format!("{radius}m {}/{cube}", hash.cells(q, radius).count()));
+    }
+    Ok(report.join(", "))
 }
 
 #[derive(Resource)]
 pub struct Director {
     pub spawn_bank: f32,
+    /// Seconds to the next elite roll (`ELITE_ROLL_SECS` cadence).
     pub elite_timer: f32,
+    /// Seconds since the last elite — the pity guarantee's clock.
+    pub since_elite: f32,
+    /// A roll succeeded: the next crowd spawn comes out elite.
+    pub elite_pending: bool,
+    /// Seconds of post-kill "exhale" left (§3 run arc).
+    pub exhale: f32,
+    /// Bosses alive last tick; a drop means one just fell and the horde exhales.
+    pub bosses_alive: usize,
     pub tick: f32,
+    /// The overflow valve (GDD §9 "overflow merges into The Static"): spawns the live cap
+    /// had no room for, banked this stage instead of discarded. They come back as extra
+    /// ghosts once The Static rises (`STATIC_BACKLOG_DRAIN` a second, when there is room).
+    pub static_backlog: f32,
+    /// Far stragglers the valve has handed to The Static this stage (see `director_spawn`).
+    pub static_recycled: u32,
+    /// The "THE STATIC IS GATHERING" line has been shown this stage.
+    pub gathering_told: bool,
 }
 
 impl Default for Director {
     fn default() -> Self {
-        Self { spawn_bank: 0.0, elite_timer: 45.0, tick: 0.0 }
+        Self {
+            spawn_bank: 0.0,
+            elite_timer: ELITE_ROLL_SECS,
+            since_elite: 0.0,
+            elite_pending: false,
+            exhale: 0.0,
+            bosses_alive: 0,
+            tick: 0.0,
+            static_backlog: 0.0,
+            static_recycled: 0,
+            gathering_told: false,
+        }
     }
 }
 
@@ -293,6 +497,159 @@ fn enemy_mesh(kind: EnemyKind) -> Mesh {
             m.add_sphere(0.22, 1, at(Vec3::new(0.0, 0.48, 0.0)), BODY);
             m.add_box(Vec3::new(0.24, 0.12, 0.08), at(Vec3::new(0.0, 0.48, -0.18)), DARK); // visor
         }
+        // ---- batch 1 (P08): each a silhouette you can name at a glance, one glowing
+        // accent (`set_glow`), front at local -Z like the rest ----
+        Rollo => {
+            // a curled armadillo: a ball banded with plates around its roll axis (local X)
+            m.add_sphere(0.52, 2, at(Vec3::ZERO), BODY);
+            for i in 0..6 {
+                let a = i as f32 / 6.0 * std::f32::consts::TAU;
+                m.add_box(
+                    Vec3::new(1.12, 0.1, 0.34),
+                    Transform::from_translation(Vec3::new(0.0, a.cos() * 0.5, a.sin() * 0.5)).with_rotation(Quat::from_rotation_x(a)),
+                    MID,
+                ); // armour band
+            }
+            m.add_sphere(0.2, 1, at(Vec3::new(0.0, -0.18, -0.46)), DARK); // tucked snout
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.08, 0.22, 4, at(Vec3::new(0.16 * s, 0.56, -0.1)), DARK); // ear
+                m.set_glow(true);
+                m.add_sphere(0.065, 0, at(Vec3::new(0.11 * s, -0.08, -0.6)), BODY); // eye in the curl
+                m.set_glow(false);
+            }
+        }
+        Trencher => {
+            // a low digging beast: wide body, a finned spine (all that shows under the
+            // crust), shovel claws with glowing tips
+            m.add_ellipsoid(Vec3::new(0.58, 0.36, 0.74), 1, at(Vec3::new(0.0, -0.06, 0.0)), BODY);
+            for (z, h) in [(-0.34, 0.38), (0.02, 0.46), (0.38, 0.32)] {
+                m.add_box(Vec3::new(0.1, h, 0.3), at(Vec3::new(0.0, 0.28 + h * 0.4, z)), MID); // spine fin
+            }
+            m.add_cone(0.16, 0.4, 5, Transform::from_translation(Vec3::new(0.0, -0.04, -0.82)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // snout
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.3, 0.08, 0.42),
+                    Transform::from_translation(Vec3::new(0.34 * s, -0.26, -0.66)).with_rotation(Quat::from_rotation_y(0.25 * s)),
+                    DARK,
+                ); // shovel claw
+                m.set_glow(true);
+                for c in [-0.08, 0.08] {
+                    m.add_cone(
+                        0.05,
+                        0.2,
+                        4,
+                        Transform::from_translation(Vec3::new(0.34 * s + c - 0.06 * s, -0.26, -0.94)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                        BODY,
+                    ); // hot claw tip
+                }
+                m.set_glow(false);
+                m.add_cylinder(0.08, 0.32, 5, at(Vec3::new(0.32 * s, -0.38, 0.3)), MID); // hind leg
+            }
+        }
+        AegisDrone => {
+            // a drone core behind a curved shield wall whose rim glows: the side it faces
+            // is the side you cannot hurt
+            m.add_sphere(0.34, 1, at(Vec3::new(0.0, 0.0, 0.14)), BODY);
+            m.add_box(Vec3::new(0.86, 0.96, 0.08), at(Vec3::new(0.0, 0.0, -0.4)), MID); // shield face
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.42, 0.9, 0.08),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.0, -0.26)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    MID,
+                ); // shield wing
+                m.add_box(Vec3::new(0.06, 0.32, 0.26), at(Vec3::new(0.26 * s, 0.0, 0.46)), DARK); // stabilizer
+            }
+            m.add_cylinder(0.025, 0.4, 4, at(Vec3::new(0.0, 0.5, 0.18)), DARK); // antenna
+            m.set_glow(true);
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, 0.5, -0.42)), BODY); // lit rim
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, -0.5, -0.42)), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.06, 0.9, 0.12),
+                    Transform::from_translation(Vec3::new(0.76 * s, 0.0, -0.13)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    BODY,
+                );
+            }
+            m.set_glow(false);
+        }
+        Sunskimmer => {
+            // a swept manta dart burning a little sun under its belly
+            m.add_ellipsoid(Vec3::new(0.24, 0.15, 0.68), 1, at(Vec3::ZERO), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.95, 0.05, 0.42),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.02, 0.12))
+                        .with_rotation(Quat::from_rotation_y(0.4 * s) * Quat::from_rotation_z(0.14 * s)),
+                    MID,
+                ); // swept wing
+            }
+            m.add_cone(0.1, 0.7, 5, Transform::from_translation(Vec3::new(0.0, 0.0, 0.78)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // tail
+            m.add_cone(0.13, 0.4, 5, Transform::from_translation(Vec3::new(0.0, 0.0, -0.78)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // nose
+            m.set_glow(true);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.13, 0.04)), BODY); // the sun core
+            m.set_glow(false);
+        }
+        BeaconTick => {
+            // a bloated little tick with a tall antenna and a red tracker bulb
+            m.add_ellipsoid(Vec3::new(0.44, 0.32, 0.54), 1, at(Vec3::new(0.0, 0.0, 0.1)), BODY);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.04, -0.44)), DARK); // head
+            for s in [-1.0, 1.0] {
+                for z in [-0.25, 0.05, 0.35] {
+                    m.add_cylinder(0.04, 0.5, 4, Transform::from_translation(Vec3::new(0.46 * s, -0.18, z)).with_rotation(Quat::from_rotation_z(1.0 * s)), MID); // leg
+                }
+            }
+            m.add_cylinder(0.03, 0.62, 4, at(Vec3::new(0.0, 0.58, 0.06)), MID); // antenna
+            m.set_glow(true);
+            m.add_sphere(0.13, 1, at(Vec3::new(0.0, 0.92, 0.06)), BODY); // tracker bulb
+            m.set_glow(false);
+        }
+        Mimic => {
+            // the chest, lid up, teeth out, eyes in the dark — on stubby running legs
+            m.add_box(Vec3::new(1.0, 0.52, 0.7), at(Vec3::new(0.0, -0.1, 0.0)), BODY); // box
+            m.add_box(
+                Vec3::new(1.04, 0.2, 0.74),
+                Transform::from_translation(Vec3::new(0.0, 0.34, 0.14)).with_rotation(Quat::from_rotation_x(0.55)),
+                BODY,
+            ); // gaping lid
+            for x in [-0.36, -0.12, 0.12, 0.36] {
+                m.add_cone(0.07, 0.2, 4, at(Vec3::new(x, 0.24, -0.33)), BODY); // lower teeth
+                m.add_cone(
+                    0.07,
+                    0.2,
+                    4,
+                    Transform::from_translation(Vec3::new(x + 0.12, 0.45, -0.22)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)),
+                    BODY,
+                ); // upper teeth
+            }
+            m.add_box(Vec3::new(0.3, 0.06, 0.45), Transform::from_translation(Vec3::new(0.0, 0.18, -0.45)).with_rotation(Quat::from_rotation_x(0.35)), Color::srgb(0.75, 0.15, 0.15)); // tongue
+            m.add_box(Vec3::new(1.03, 0.08, 0.73), at(Vec3::new(0.0, -0.2, 0.0)), DARK); // iron band
+            for (x, z) in [(-0.38, -0.24), (0.38, -0.24), (-0.38, 0.24), (0.38, 0.24)] {
+                m.add_cylinder(0.08, 0.26, 5, at(Vec3::new(x, -0.44, z)), DARK); // stubby leg
+            }
+            m.set_glow(true);
+            for s in [-1.0, 1.0] {
+                m.add_sphere(0.075, 0, at(Vec3::new(0.2 * s, 0.34, -0.02)), BODY); // eye
+            }
+            m.set_glow(false);
+        }
+        BeamerPrime => {
+            // the Beamer's crystal grown into a sniper: tripod, twin crystal, a long barrel
+            // and a glowing scope lens at its tip
+            m.add_cone(0.3, 1.5, 5, at(Vec3::new(0.0, 0.1, 0.1)), BODY); // main crystal
+            m.add_cone(0.2, 0.9, 5, Transform::from_translation(Vec3::new(0.0, -0.35, 0.1)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)), BODY); // keel
+            m.add_sphere(0.16, 1, at(Vec3::new(0.0, 0.28, 0.05)), DARK); // core
+            m.add_cylinder(0.065, 1.3, 6, Transform::from_translation(Vec3::new(0.0, 0.3, -0.62)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // barrel
+            for i in 0..3 {
+                let a = i as f32 / 3.0 * std::f32::consts::TAU + 0.5;
+                m.add_cylinder(0.05, 0.7, 4, Transform::from_translation(Vec3::new(a.cos() * 0.34, -0.5, a.sin() * 0.34 + 0.1)).with_rotation(Quat::from_rotation_z(a.cos() * 0.4) * Quat::from_rotation_x(-a.sin() * 0.4)), MID); // tripod leg
+            }
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.1, 0.6, 4, Transform::from_translation(Vec3::new(0.24 * s, 0.35, 0.15)).with_rotation(Quat::from_rotation_z(-0.45 * s)), MID); // shard
+            }
+            m.set_glow(true);
+            m.add_sphere(0.12, 1, at(Vec3::new(0.0, 0.3, -1.3)), BODY); // scope lens
+            m.set_glow(false);
+        }
     }
     m.build()
 }
@@ -363,36 +720,92 @@ pub fn boss_mesh() -> Mesh {
     m.build()
 }
 
+/// A Beamer's aim line: AIM_DASHES dashes along local -Z (the `frame_quat` forward) over one
+/// unit of length, unit cross-section — the transform stretches it to the line's length and
+/// thickness, and slides it forward by the march phase. `pad` fattens every dash for the
+/// outline hull.
+fn aim_dash_mesh(pad: f32) -> Mesh {
+    let mut m = crate::meshkit::MeshData::new();
+    let period = 1.0 / AIM_DASHES as f32;
+    let dash = period * 0.55;
+    for i in 0..AIM_DASHES {
+        let z = -(i as f32 * period + dash * 0.5);
+        m.add_box(Vec3::new(1.0 + pad, 1.0 + pad, dash + pad * 0.02), crate::meshkit::at(Vec3::new(0.0, 0.0, z)), Color::WHITE);
+    }
+    m.build()
+}
+
+/// The Burrower's crack decal: seven jagged three-segment cracks radiating from a small
+/// hub, flat in the local XZ plane (the ground once `frame_quat` stands it on the surface),
+/// radius 1. Hand-laid rather than random so every machine draws the same crack.
+fn crack_mesh(width: f32) -> Mesh {
+    let mut m = crate::meshkit::MeshData::new();
+    const CRACKS: [(f32, [f32; 3]); 7] = [
+        (0.0, [0.25, -0.30, 0.20]),
+        (0.95, [-0.20, 0.35, -0.10]),
+        (1.75, [0.30, 0.10, -0.35]),
+        (2.60, [-0.25, -0.20, 0.30]),
+        (3.45, [0.15, 0.30, -0.25]),
+        (4.40, [-0.30, 0.05, 0.25]),
+        (5.35, [0.20, -0.25, -0.20]),
+    ];
+    for (base, bends) in CRACKS {
+        let mut from = Vec2::ZERO;
+        let mut ang = base;
+        for (k, bend) in bends.iter().enumerate() {
+            ang += bend;
+            let len = [0.38, 0.34, 0.28][k];
+            let to = from + Vec2::new(ang.cos(), ang.sin()) * len;
+            let mid = (from + to) * 0.5;
+            let w = width * (1.0 - 0.25 * k as f32); // cracks taper toward their tips
+            m.add_box(
+                Vec3::new(w, 0.02 + width * 0.2, len + w * 0.5),
+                Transform::from_translation(Vec3::new(mid.x, 0.0, mid.y))
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 - ang)),
+                Color::WHITE,
+            );
+            from = to;
+        }
+    }
+    m.add_cylinder(0.12 + width, 0.03 + width * 0.2, 7, crate::meshkit::at(Vec3::ZERO), Color::WHITE);
+    m.build()
+}
+
+/// Danger material colors in a palette: ring, ring fill, shot, beam charge, beam fire. The
+/// materials are unlit — they draw exactly this base color — and the Standard palette keeps
+/// the exact canon look.
+fn danger_looks(p: Palette) -> [Color; 5] {
+    let d = p.danger();
+    [d, d.with_alpha(0.2), p.danger_shot(), p.danger_charge(), p.beam_fire()]
+}
+
 pub fn setup_enemy_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    // absent headless (no renderer): the accents then simply don't glow
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     let mut mesh_map = HashMap::new();
     let mut mat_map = HashMap::new();
-    for kind in [
-        EnemyKind::Shambler,
-        EnemyKind::Sprinter,
-        EnemyKind::Bruiser,
-        EnemyKind::Spitter,
-        EnemyKind::Ufo,
-        EnemyKind::Burrower,
-        EnemyKind::Beamer,
-        EnemyKind::Lobber,
-        EnemyKind::Ghost,
-    ] {
+    let glow_mask = images.map(|mut i| i.add(crate::meshkit::glow_mask_image()));
+    for kind in EnemyKind::ALL {
         let def = kind.def();
         mesh_map.insert(kind, meshes.add(enemy_mesh(kind)));
         let ghost = kind == EnemyKind::Ghost;
+        // A kind with an accent glows ONLY there (the mask's white texel), bright enough
+        // to read on the night side; the built eight keep their faint all-over glow.
+        let (emissive, emissive_texture) = match (kind.accent(), &glow_mask) {
+            (Some(accent), Some(mask)) => (accent.to_linear() * ENEMY_ACCENT_GLOW, Some(mask.clone())),
+            _ if ghost => (def.color.to_linear() * 1.8, None),
+            _ => (def.color.to_linear() * 0.15, None),
+        };
         mat_map.insert(
             kind,
             materials.add(StandardMaterial {
                 base_color: if ghost { def.color.with_alpha(0.55) } else { def.color },
-                emissive: if ghost {
-                    def.color.to_linear() * 1.8
-                } else {
-                    def.color.to_linear() * 0.15
-                },
+                emissive,
+                emissive_texture,
                 alpha_mode: if ghost { AlphaMode::Blend } else { AlphaMode::Opaque },
                 perceptual_roughness: 0.8,
                 ..default()
@@ -400,7 +813,16 @@ pub fn setup_enemy_assets(
         );
     }
 
+    let ghost = EnemyKind::Ghost.def().color;
+    let ghost_night_mat = materials.add(StandardMaterial {
+        base_color: ghost.with_alpha(GHOST_NIGHT_ALPHA),
+        emissive: ghost.to_linear() * 0.6,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
     commands.insert_resource(EnemyAssets {
+        ghost_night_mat,
         meshes: mesh_map,
         mats: mat_map,
         elite_mat: materials.add(StandardMaterial {
@@ -460,27 +882,104 @@ pub fn setup_enemy_assets(
             ..default()
         }),
         ring_mesh: meshes.add(Mesh::from(Torus::new(0.9, 1.0))),
+        // Telegraph looks are (re)applied from the palette by `apply_danger_palette`; these
+        // are the canon values the Standard palette keeps. The depth bias keeps a flat ring
+        // readable where it crosses a bump in the terrain instead of vanishing into it.
         ring_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.25, 0.1),
             emissive: LinearRgba::rgb(3.0, 0.5, 0.1),
             unlit: true,
             alpha_mode: AlphaMode::Blend,
+            depth_bias: 40.0,
+            ..default()
+        }),
+        ring_fill_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.25, 0.1, 0.2),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            depth_bias: 20.0,
+            ..default()
+        }),
+        disc_mesh: meshes.add(Mesh::from(Cylinder::new(1.0, 0.004))),
+        aim_mesh: meshes.add(aim_dash_mesh(0.0)),
+        aim_outline_mesh: meshes.add(aim_dash_mesh(0.45)),
+        crack_mesh: meshes.add(crack_mesh(0.07)),
+        crack_outline_mesh: meshes.add(crack_mesh(0.11)),
+        ring_outline_mesh: meshes.add(Mesh::from(Torus::new(0.88, 1.02))),
+        proj_outline_mesh: meshes.add(Mesh::from(Sphere::new(0.38))),
+        outline_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            unlit: true,
+            cull_mode: Some(bevy::render::render_resource::Face::Front),
+            depth_bias: 30.0,
             ..default()
         }),
     });
 }
 
-pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform), With<Enemy>>) {
-    for v in hash.map.values_mut() {
-        v.clear();
-    }
-    for (e, tf) in &q {
-        hash.map.entry(SpatialHash::key(tf.translation)).or_default().push((e, tf.translation));
-    }
-    hash.map.retain(|_, v| !v.is_empty());
+pub fn rebuild_hash(
+    mut hash: ResMut<SpatialHash>,
+    planet: Option<Res<CurrentPlanet>>,
+    q: Query<(Entity, &Transform, &Enemy, Has<Buried>)>,
+) {
+    hash.fill(q.iter().filter_map(|(e, tf, en, buried)| {
+        // A Trencher tunnelling under the crust is out of reach — its ridge is the tell,
+        // not a target.
+        if buried && en.kind == EnemyKind::Trencher {
+            return None;
+        }
+        // Column-hitbox fliers are filed where the weapons fly: under their body.
+        let at = match &planet {
+            Some(p) if en.kind.column_hitbox() => p.surface_point(en.dir) + en.dir * COLUMN_HIT_HEIGHT,
+            _ => tf.translation,
+        };
+        Some((e, at))
+    }));
 }
 
-fn spawn_enemy(
+impl SpatialHash {
+    /// Replace the contents (keeping the cells' allocations) and re-measure the shell.
+    pub fn fill(&mut self, members: impl Iterator<Item = (Entity, Vec3)>) {
+        for v in self.map.values_mut() {
+            v.clear();
+        }
+        let mut shell = (f32::INFINITY, f32::NEG_INFINITY);
+        for (e, pos) in members {
+            let d = pos.length();
+            shell = (shell.0.min(d), shell.1.max(d));
+            self.map.entry(Self::key(pos)).or_default().push((e, pos));
+        }
+        self.map.retain(|_, v| !v.is_empty());
+        self.shell = shell;
+    }
+}
+
+/// One crowd enemy of any kind, sized by a run's `Scaling` — THE entry point for anything
+/// that adds to the horde outside the director: boss phase adds (P13's Sandstorm Court
+/// Aegis Drones and Final Judgment Beamer Primes), a sprung Mimic, the headless probes.
+/// Everything a kind needs to behave (its `bestiary` components, a Burrower's crack) comes
+/// with it. Returns the new enemy.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy_at(
+    commands: &mut Commands,
+    assets: &EnemyAssets,
+    planet: &CurrentPlanet,
+    kind: EnemyKind,
+    dir: Vec3,
+    elite: bool,
+    sc: &Scaling,
+    rng: &mut impl Rng,
+) -> Entity {
+    let (hp, dmg) = if kind == EnemyKind::Ghost { (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg) } else { (sc.hp, sc.dmg) };
+    spawn_enemy(commands, assets, planet, kind, dir, elite, hp, dmg, rng)
+}
+
+/// One crowd enemy with explicit HP/damage multipliers (see `spawn_enemy_at`). Public so the
+/// headless probes can stage an exact scene (a comet tail).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy(
     commands: &mut Commands,
     assets: &EnemyAssets,
     planet: &CurrentPlanet,
@@ -490,7 +989,7 @@ fn spawn_enemy(
     hp_mult: f32,
     dmg_mult: f32,
     rng: &mut impl Rng,
-) {
+) -> Entity {
     let def = kind.def();
     let scale = def.scale * if elite { EliteMods::SCALE } else { 1.0 } * rng.gen_range(0.92..1.1);
     let hp = def.hp * hp_mult * if elite { EliteMods::HP } else { 1.0 };
@@ -525,7 +1024,7 @@ fn spawn_enemy(
         cmd.insert(Spitter { cd: rng.gen_range(1.0..3.0) });
     }
     if kind == EnemyKind::Burrower {
-        cmd.insert(Buried { timer: 1.3 });
+        cmd.insert(Buried { timer: BURROW_SECS });
     }
     if kind == EnemyKind::Beamer {
         cmd.insert(Beamer { cd: rng.gen_range(2.0..4.0), charging: 0.0, aim: Vec3::ZERO, target: None });
@@ -533,9 +1032,31 @@ fn spawn_enemy(
     if kind == EnemyKind::Lobber {
         cmd.insert(Lobber { cd: rng.gen_range(2.5..5.0) });
     }
+    // the §9 batch-1 kinds carry their behaviour (and the look a client streams)
+    crate::bestiary::attach(&mut cmd, kind, dir, rng);
+    let id = cmd.id();
+    if kind == EnemyKind::Burrower {
+        // the ground cracks over the burrow for exactly as long as it stays under
+        spawn_crack_decal(commands, assets, planet, dir, BURROW_SECS);
+    }
+    id
 }
 
 /// Timer-driven wave spawner. Runs while playing.
+///
+/// Budget per second = `Rate_base` (the §3 arc beats) × the breathing modifier (hold while a
+/// miniboss is up, exhale after a boss falls) × `Scaling::spawn` (run time, depth, Δ, party).
+///
+/// The live cap counts the CROWD only — pots are scenery and bosses arrive on the clock, so
+/// neither takes a horde slot (L16). A budget the cap has no room for is not thrown away
+/// (M16, GDD §9 "overflow merges into The Static"):
+/// 1. crowd enemies stranded far from every astronaut — beyond `STATIC_RECYCLE_ARC`, over
+///    any horizon, adding nothing but a filled slot — dissolve into The Static, farthest
+///    first, and the same budget spawns fresh over the players' horizon: the pressure stays
+///    where the fighting is instead of piling up behind a kite;
+/// 2. whatever still does not fit is banked in `Director::static_backlog` and pours out as
+///    extra ghosts once The Static rises — the ones the planet could not hold are waiting.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
@@ -544,39 +1065,82 @@ pub fn director_spawn(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<&Player>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_player: Query<(&Player, &crate::run::PlayerState)>,
+    q_crowd: Query<(Entity, &Enemy, Has<Buried>), (Without<crate::interact::Pot>, Without<Boss>)>,
+    q_boss: Query<&Boss>,
+    (crawl, mut gimmicks): (Res<crate::gimmicks::Crawl>, ResMut<crate::gimmicks::GimmickTelemetry>),
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
     // Anchors to spawn around — one per living astronaut, round-robined below so each
-    // player gets their own share of the horde arriving over THEIR horizon.
-    let anchors: Vec<Vec3> = q_player.iter().map(|p| p.dir).collect();
+    // player gets their own share of the horde arriving over THEIR horizon. A Signal Flare
+    // carrier (§7: "enemies always know where you are") is listed twice — a double share —
+    // and theirs lands closer (the flag).
+    let mut anchors: Vec<(Vec3, bool)> = Vec::new();
+    // Standing astronauts only: a Tumbling Beacon (or a body The Static claimed) is no
+    // longer where the horde arrives, and doesn't keep it at full party size (L17).
+    for (p, ps) in q_player.iter().filter(|(_, ps)| !ps.dead) {
+        anchors.push((p.dir, ps.revealed()));
+        if ps.revealed() {
+            anchors.push((p.dir, true));
+        }
+    }
     if anchors.is_empty() {
         return;
     }
+    let party = scaling::living_party(q_player.iter().map(|(_, ps)| ps));
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
-    let alive = q_enemies.iter().count();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
+    let alive = q_crowd.iter().count();
+    // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
+    // sub-linearly — a full budget per player doubles density and blows the cap, while no
+    // bump at all gives each player half a horde.
+    let sc = Scaling::for_run(&run, party);
+    // §4: a wave aimed at an astronaut standing in the night lands closer
+    let sun = crate::daynight::Sun::of(&run);
 
-    // Party scaling (GDD): more players means more horde, but sub-linearly — a full
-    // budget per player doubles density and blows the cap, while no bump at all gives
-    // each player half a horde.
-    let player_scale = [1.0, 1.75, 2.4, 3.0][anchors.len().clamp(1, 4) - 1];
+    // Breathing: a boss count that dropped since last tick means one just fell.
+    let bosses_now = q_boss.iter().count();
+    if bosses_now < director.bosses_alive {
+        director.exhale = SPAWN_EXHALE_SECS;
+    }
+    director.bosses_alive = bosses_now;
+    director.exhale = (director.exhale - dt).max(0.0);
+    let miniboss_alive = q_boss.iter().any(|b| !b.kind.def().is_stage_boss);
 
-    let rate = if run.static_active {
-        10.0 + run.static_timer * 0.15
-    } else {
-        // gentler opening so a level-1 player can learn; ramp still bites by mid-game.
-        let t = run.elapsed / 60.0;
-        (1.0 + t * 2.1) * (1.0 + run.difficulty)
-    } * player_scale;
+    let rate = scaling::spawn_rate_base(run.timer, run.static_active, run.static_timer)
+        * if run.static_active { sc.static_rate } else { scaling::beat_modifier(miniboss_alive, director.exhale) }
+        * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
-    director.elite_timer -= dt;
+    // The backlog rejoins through The Static's own door.
+    if run.static_active && director.static_backlog > 0.0 {
+        let drain = (STATIC_BACKLOG_DRAIN * dt).min(director.static_backlog);
+        director.static_backlog -= drain;
+        director.spawn_bank += drain;
+    }
+
+    // Elite rolls (see config::ELITE_ROLL_SECS). The Static has no elites.
+    if !run.static_active {
+        director.elite_timer -= dt;
+        director.since_elite += dt;
+        if director.elite_timer <= 0.0 {
+            director.elite_timer += ELITE_ROLL_SECS;
+            // §8 Farside: elites prowl the Moon's far hemisphere (+20% with the party there)
+            let far = crate::daynight::farside_elite_mult(planet.kind, anchors.iter().map(|(d, _)| *d));
+            if rng.gen_bool((sc.elite_chance * far).min(1.0) as f64) {
+                director.elite_pending = true;
+            }
+        }
+        // the pity guarantee waits out the cold open ("I have room")
+        let cold_open = run.timer > SPAWN_RATE_BEATS[1].0;
+        if director.since_elite >= ELITE_PITY_SECS && !cold_open {
+            director.elite_pending = true;
+        }
+    }
 
     if director.tick < 0.25 {
         return;
@@ -589,42 +1153,104 @@ pub fn director_spawn(
     }
     director.spawn_bank -= budget as f32;
 
-    let cap = ((ENEMY_CAP as f32) * player_scale) as usize;
-    let room = cap.saturating_sub(alive);
+    let cap = sc.live_cap;
+    let mut room = cap.saturating_sub(alive);
+    if budget > room {
+        // 1. The far stragglers go first (never an elite — its loot is promised — nor a
+        // Burrower mid-ambush). Arc to the NEAREST astronaut, so a co-op squad split
+        // across the planet keeps both hordes.
+        let want = budget - room;
+        let mut far: Vec<(f32, Entity)> = q_crowd
+            .iter()
+            .filter(|(_, e, buried)| !e.elite && !*buried)
+            .filter_map(|(ent, e, _)| {
+                let arc = anchors
+                    .iter()
+                    .map(|(a, _)| sphere::arc_dist(e.dir, *a, planet.radius))
+                    .fold(f32::INFINITY, f32::min);
+                (arc > STATIC_RECYCLE_ARC).then_some((arc, ent))
+            })
+            .collect();
+        if far.len() > want {
+            far.select_nth_unstable_by(want - 1, |a, b| b.0.total_cmp(&a.0));
+            far.truncate(want);
+        }
+        for (_, ent) in &far {
+            commands.entity(*ent).despawn();
+        }
+        director.static_recycled += far.len() as u32;
+        room += far.len();
+        // 2. The rest waits in The Static.
+        let overflow = budget.saturating_sub(room);
+        director.static_backlog = (director.static_backlog + overflow as f32).min(STATIC_BACKLOG_MAX);
+        if !run.static_active && !director.gathering_told && director.static_backlog >= STATIC_GATHERING_TELL {
+            director.gathering_told = true;
+            banners.write(BannerMsg("THE STATIC IS GATHERING. IT KEEPS WHAT THE PLANET CAN'T HOLD.".into()));
+        }
+    }
     let n = budget.min(room);
+    // Live horde by kind, for the world's per-kind caps (pots and boss heads are not horde).
+    let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+    if n > 0 {
+        for (_, e, _) in &q_crowd {
+            by_kind[e.kind.index()] += 1;
+        }
+    }
+    let table = crate::content::enemies::spawn_table(planet.kind);
     for i in 0..n {
-        let anchor = anchors[i % anchors.len()];
+        let (anchor, flare) = anchors[i % anchors.len()];
         let heading = {
             let (t, b) = sphere::tangent_frame(anchor);
             let a = rng.gen_range(0.0..std::f32::consts::TAU);
             t * a.cos() + b * a.sin()
         };
-        let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
+        // one draw either way: the band changes, the stream does not
+        let band = if flare {
+            SIGNAL_FLARE_SPAWN_ARC_MIN..SIGNAL_FLARE_SPAWN_ARC_MAX
+        } else {
+            SPAWN_ARC_MIN..SPAWN_ARC_MAX
+        };
+        let night = sun.spawn_arc(anchor);
+        let arc = rng.gen_range(band) * night;
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp_mult, dmg_mult, rng);
+            // the Dark Moon's CRAWL: The Static erupts where it was seen massing
+            let dir = match crawl.ghost_dir(rng, planet.radius) {
+                Some(d) => {
+                    gimmicks.crawl_ghosts += 1;
+                    d
+                }
+                None => dir,
+            };
+            spawn_enemy_at(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, &sc, rng);
             continue;
         }
 
-        let mix = EnemyKind::mix(run.elapsed);
-        let kind = mix[rng.gen_range(0..mix.len())];
-        let mut elite = run.elapsed > 150.0 && rng.gen_bool(0.012);
-        if director.elite_timer <= 0.0 {
-            elite = true;
-            director.elite_timer = 40.0;
+        // The world's table picks the kind (on the chain-wide mix clock, so later stages keep
+        // their later mix — M17); P01's scaling already decided how many and how tough. A
+        // pending elite waits for a kind that may carry it.
+        let Some(row) = crate::content::enemies::pick_spawn(table, scaling::mix_secs(run.timer, run.stage), &by_kind, sc.party_spawn, rng) else {
+            continue;
+        };
+        let kind = row.kind;
+        by_kind[kind.index()] += 1;
+        let elite = row.can_elite && std::mem::take(&mut director.elite_pending);
+        if elite {
+            director.since_elite = 0.0;
         }
         // Burrowers ambush: spawn close.
         let dir = if kind == EnemyKind::Burrower {
-            let arc = rng.gen_range(9.0..16.0);
+            let arc = rng.gen_range(9.0..16.0) * night;
             sphere::offset_dir(anchor, heading, arc, planet.radius)
         } else {
             dir
         };
-        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, rng);
+        spawn_enemy_at(&mut commands, &assets, &planet, kind, dir, elite, &sc, rng);
     }
 }
 
+/// Spawn a boss or miniboss 30 m from `player_dir`; returns the head entity.
 pub fn spawn_boss(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -632,8 +1258,8 @@ pub fn spawn_boss(
     planet: &CurrentPlanet,
     player_dir: Vec3,
     kind: BossKind,
-    difficulty: f32,
-) {
+    sc: &Scaling,
+) -> Entity {
     let def = kind.def();
     let mut rng = rand::thread_rng();
     let heading = {
@@ -642,7 +1268,7 @@ pub fn spawn_boss(
         t * a.cos() + b * a.sin()
     };
     let dir = sphere::offset_dir(player_dir, heading, 30.0, planet.radius);
-    let hp = def.hp * (1.0 + difficulty);
+    let hp = def.hp * sc.boss_hp;
     let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
     let is_worm = kind == BossKind::Craterpillar;
     let is_anubot = kind == BossKind::Anubot;
@@ -653,7 +1279,7 @@ pub fn spawn_boss(
     } else {
         (meshes.add(boss_mesh()), assets.boss_mat.clone())
     };
-    let contact_dmg = def.damage * (1.0 + difficulty * 0.5);
+    let contact_dmg = def.damage * sc.boss_dmg;
     let head = commands
         .spawn((
             Enemy {
@@ -702,15 +1328,9 @@ pub fn spawn_boss(
 
     if is_anubot {
         commands.entity(head).insert(AnubotBeam::default());
-        commands.spawn((
-            AnubotBeamVis { boss: head },
-            Mesh3d(assets.beam_mesh.clone()),
-            MeshMaterial3d(assets.beam_charge_mat.clone()),
-            Transform::from_translation(pos),
-            Visibility::Hidden,
-            StageScoped,
-        ));
+        spawn_anubot_beam_vis(commands, assets, head, pos);
     }
+    head
 }
 
 /// Bosses escalate as their HP drops: at 66% and 33% they ENRAGE (faster, hit harder,
@@ -725,6 +1345,8 @@ pub fn boss_phase_system(
     mut shake: ResMut<Shake>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q_boss: Query<(&mut Enemy, &mut Boss)>,
+    q_live: Query<(), With<Enemy>>,
+    q_horde: Query<&Enemy, (Without<Boss>, Without<crate::interact::Pot>)>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
@@ -734,7 +1356,9 @@ pub fn boss_phase_system(
         .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     let mut rng = rand::thread_rng();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
+    let sc = Scaling::for_run(&run, scaling::living_party(q_player.iter().map(|(_, _, ps)| ps)));
+    // the phase rings respect the live cap like every other spawn (L20)
+    let mut room = sc.live_cap.saturating_sub(q_live.iter().count());
 
     for (mut enemy, mut boss) in &mut q_boss {
         if enemy.hp <= 0.0 || enemy.max_hp <= 0.0 {
@@ -769,42 +1393,47 @@ pub fn boss_phase_system(
         };
         banners.write(BannerMsg(format!("{name} — {label}!")));
         sfx.write(SfxMsg(Sfx::BossRoar));
-        shake.add(0.55);
+        shake.add(SHAKE_ENEMY_SLAM_MAX);
 
         // encirclement burst: a ring of adds crests the horizon around the player
-        let ring = 8 + want as usize * 3;
+        let ring = (8 + want as usize * 3).min(room);
+        room -= ring;
         // Encircle whoever this boss is closest to; if nobody is up, skip the ring but
         // keep the enrage above — phases must not depend on finding a player.
         let Some(victim) = crate::player::nearest_astronaut(enemy.dir, &snaps, planet.radius) else {
             continue;
         };
         let (t, b) = sphere::tangent_frame(victim.dir);
+        // the ring is drawn from the world's table (its per-kind caps included), at least as
+        // late in the stage as a mid-fight mix
+        let table = crate::content::enemies::spawn_table(planet.kind);
+        let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+        for e in &q_horde {
+            by_kind[e.kind.index()] += 1;
+        }
         for i in 0..ring {
             let a = i as f32 / ring as f32 * std::f32::consts::TAU + rng.gen_range(-0.2..0.2);
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
             let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
-            let mix = EnemyKind::mix(run.elapsed.max(300.0));
-            let kind = mix[rng.gen_range(0..mix.len())];
-            let elite = want == 2 && rng.gen_bool(0.25);
-            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, &mut rng);
+            let Some(row) = crate::content::enemies::pick_spawn(table, scaling::mix_secs(run.timer, run.stage).max(300.0), &by_kind, sc.party_spawn, &mut rng) else {
+                continue;
+            };
+            by_kind[row.kind.index()] += 1;
+            let elite = want == 2 && row.can_elite && rng.gen_bool(0.25);
+            spawn_enemy_at(&mut commands, &assets, &planet, row.kind, dir, elite, &sc, &mut rng);
         }
     }
 }
 
 /// Judge Anubot's Verdict Beam — a lighthouse railbeam that telegraphs, then sweeps the
 /// surface. Idle → charge (dim, slow rotate) → fire (bright, faster, damaging) → idle.
-#[allow(clippy::type_complexity)]
+/// HOST-only: this advances the beam and deals the damage. What it looks like is
+/// `anubot_beam_visuals`, which a co-op client runs on its streamed copy of the boss.
 pub fn anubot_beam_system(
     time: Res<Time>,
-    assets: Res<EnemyAssets>,
-    run: Res<RunState>,
-    q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
-    mut q_boss: Query<(Entity, &mut Transform, &Enemy, &Boss, &mut AnubotBeam)>,
-    mut q_vis: Query<
-        (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
-        (Without<AnubotBeam>, Without<Player>),
-    >,
+    q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam), Without<Stunned>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     let dt = time.delta_secs();
@@ -813,67 +1442,68 @@ pub fn anubot_beam_system(
     }
     // Every astronaut in the corridor is hit — a sweeping beam is AoE, not single-target.
     let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
-    let t_now = time.elapsed_secs();
-    // pass 1: advance each beam, apply damage, snapshot for the visuals
-    let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
-    for (e, mut tf, enemy, boss, mut beam) in &mut q_boss {
+    for (e, tf, enemy, boss, mut beam) in &mut q_boss {
         beam.timer -= dt;
-        let ph = boss.phase as f32;
-        // rotate: slow while charging (telegraph), fast while firing; faster each phase
-        let spin = match beam.state {
-            1 => 0.5,
-            2 => 1.15 * (1.0 + 0.3 * ph),
-            _ => 0.25,
-        };
-        beam.angle = (beam.angle + spin * dt) % std::f32::consts::TAU;
+        beam.angle = (beam.angle + AnubotBeam::spin(beam.state, boss.phase) * dt) % std::f32::consts::TAU;
         if beam.timer <= 0.0 {
             beam.state = match beam.state {
-                0 => {
-                    beam.timer = 1.3 - 0.3 * ph; // shorter telegraph as he enrages
-                    1
-                }
-                1 => {
-                    beam.timer = 3.0 + 0.6 * ph; // longer sweep
-                    2
-                }
-                _ => {
-                    beam.timer = (2.6 - 0.7 * ph).max(0.8); // shorter rest
-                    0
-                }
+                0 => 1,
+                1 => 2,
+                _ => 0,
             };
+            beam.timer = AnubotBeam::state_secs(beam.state, boss.phase);
+        }
+        // damage while firing
+        if beam.state != 2 {
+            continue;
         }
         let up = tf.translation.normalize_or_zero();
-        let base = sphere::tangent_frame(up).0;
-        let heading = (Quat::from_axis_angle(up, beam.angle) * base).normalize_or_zero();
-
-        // damage while firing
-        if beam.state == 2 {
-            for (pe, pp) in ppos.iter().copied() {
-                {
-                    let v = pp - tf.translation;
-                    let along = v.dot(heading);
-                    let perp = (v - heading * along - up * v.dot(up)).length();
-                    if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
-                        writer.write(PlayerHitMsg {
-                            victim: pe,
-                            amount: enemy.damage * 1.2,
-                            from: tf.translation,
-                            attacker: Some(e),
-                        });
-                    }
-                }
+        let heading = beam.heading(up);
+        for (pe, pp) in ppos.iter().copied() {
+            let v = pp - tf.translation;
+            let along = v.dot(heading);
+            let perp = (v - heading * along - up * v.dot(up)).length();
+            if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
+                writer.write(PlayerHitMsg {
+                    victim: pe,
+                    amount: enemy.damage * 1.2,
+                    from: tf.translation,
+                    attacker: Some(e),
+                });
             }
         }
+    }
+}
+
+/// The Verdict Beam as everyone SEES it: the boss's charge-up pose plus the beam slab.
+/// Runs on host and client alike — on a client the boss is a streamed proxy whose
+/// `AnubotBeam` is kept in step from BossRec — so a joiner gets the same dodge tell the
+/// host does. Must run after whatever placed the boss this frame (enemy_move on the host,
+/// drive_boss_proxies on a client): the pose layers on top of that transform.
+#[allow(clippy::type_complexity)]
+pub fn anubot_beam_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<EnemyAssets>,
+    mut q_boss: Query<(Entity, &mut Transform, &Boss, &AnubotBeam)>,
+    mut q_vis: Query<
+        (Entity, &AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
+        Without<AnubotBeam>,
+    >,
+) {
+    let t_now = time.elapsed_secs();
+    let mut snap: HashMap<Entity, (Vec3, Vec3, u8)> = HashMap::new();
+    for (e, mut tf, boss, beam) in &mut q_boss {
+        let up = tf.translation.normalize_or_zero();
         // Hero-tier body tell (code-art-animation skill): the boss's POSE announces the
         // attack, not just the light — anticipation while charging, follow-through firing.
-        // Layers on top of enemy_move's write, which ran earlier in the chain.
         match beam.state {
             1 => {
                 // rear up as the charge builds (anticipation)
-                let wind = 1.0 - (beam.timer / (1.3 - 0.3 * ph).max(0.2)).clamp(0.0, 1.0);
+                let full = AnubotBeam::state_secs(1, boss.phase).max(0.2);
+                let wind = 1.0 - (beam.timer / full).clamp(0.0, 1.0);
                 tf.rotation *= Quat::from_rotation_x(0.24 * wind);
-                let s = 1.0 + 0.07 * wind;
-                tf.scale.y *= s;
+                tf.scale.y *= 1.0 + 0.07 * wind;
             }
             2 => {
                 // lurch into the sweep + a high-frequency shudder while it fires
@@ -882,15 +1512,14 @@ pub fn anubot_beam_system(
             }
             _ => {}
         }
-
-        snap.insert(e, (tf.translation, heading, beam.state, up.dot(Vec3::Y)));
-        let _ = up;
+        snap.insert(e, (tf.translation, beam.heading(up), beam.state));
     }
 
-    // pass 2: place / colour / show the beam visuals
-    for (vis, mut tf, mut visibility, mut mat) in &mut q_vis {
-        let Some((bpos, heading, state, _)) = snap.get(&vis.boss).copied() else {
-            *visibility = Visibility::Hidden;
+    // place / colour / show the beam slabs
+    for (ve, vis, mut tf, mut visibility, mut mat) in &mut q_vis {
+        let Some((bpos, heading, state)) = snap.get(&vis.boss).copied() else {
+            // Its boss is gone (dead, or a client's proxy reaped): the slab goes with it.
+            commands.entity(ve).try_despawn();
             continue;
         };
         if state == 0 {
@@ -910,8 +1539,22 @@ pub fn anubot_beam_system(
     }
 }
 
-/// DEV: press B during play to summon the current planet's stage boss immediately
-/// (so the Craterpillar is testable without surviving 8+ minutes). Remove before ship.
+/// Spawn the (hidden) beam slab that `anubot_beam_visuals` drives for `boss`. Shared by the
+/// host's `spawn_boss` and the client's boss proxy, so both build the identical visual.
+pub fn spawn_anubot_beam_vis(commands: &mut Commands, assets: &EnemyAssets, boss: Entity, pos: Vec3) {
+    commands.spawn((
+        AnubotBeamVis { boss },
+        Mesh3d(assets.beam_mesh.clone()),
+        MeshMaterial3d(assets.beam_charge_mat.clone()),
+        Transform::from_translation(pos),
+        Visibility::Hidden,
+        StageScoped,
+    ));
+}
+
+/// DEV (`--dev` only): press B during play to summon the current planet's stage boss
+/// immediately (so the Craterpillar is testable without surviving 8+ minutes). Host/solo
+/// only — a client summoning a boss would spawn one its host never simulates.
 pub fn debug_spawn_boss(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -920,6 +1563,7 @@ pub fn debug_spawn_boss(
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
     q_player: Query<&Player, With<crate::player::LocalPlayer>>,
+    q_party: Query<&crate::run::PlayerState, With<Player>>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     if !keys.just_pressed(KeyCode::KeyB) {
@@ -930,7 +1574,8 @@ pub fn debug_spawn_boss(
         crate::content::planets::PlanetKind::Moon => BossKind::Craterpillar,
         _ => BossKind::Anubot,
     };
-    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, run.difficulty);
+    let sc = Scaling::for_run(&run, scaling::living_party(q_party.iter()));
+    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, &sc);
     run.boss_spawned = true;
     banners.write(crate::messages::BannerMsg(format!("[DEV] {} SUMMONED", kind.def().name)));
 }
@@ -1015,15 +1660,35 @@ pub fn craterpillar_update(
     }
 }
 
-/// Steering + separation + transform write for every enemy.
+/// How far an astronaut SEEMS to the horde, as a multiplier on the real arc: a Signal Flare
+/// carrier (§7) and anyone a Beacon Tick tagged (§9) read closer than they are, so the chase
+/// prefers them over a nearer teammate.
+pub fn horde_lure(revealed: bool, tracked: bool) -> f32 {
+    (if revealed { SIGNAL_FLARE_LURE } else { 1.0 }) * if tracked { TRACKER_LURE } else { 1.0 }
+}
+
+/// Which astronaut an enemy at `from` chases: the least lured great-circle distance.
+pub fn chase_target(from: Vec3, snaps: &[crate::player::AstronautSnap], lure: &[f32], radius: f32) -> usize {
+    (0..snaps.len())
+        .min_by(|&a, &b| {
+            (sphere::arc_dist(from, snaps[a].dir, radius) * lure[a]).total_cmp(&(sphere::arc_dist(from, snaps[b].dir, radius) * lure[b]))
+        })
+        .unwrap_or(0)
+}
+
+/// Steering + separation + transform write for every enemy. Kinds that steer themselves
+/// (`bestiary::SelfSteered`: Rollo, the Sunskimmer, a fleeing Mimic) and anything under the
+/// ground are someone else's.
+#[allow(clippy::type_complexity)]
 pub fn enemy_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
+    run: Res<RunState>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<crate::bestiary::Tracked>), Without<Enemy>>,
     mut q: Query<
-        (Entity, &mut Enemy, &mut Transform),
-        (Without<Buried>, Without<crate::interact::Pot>),
+        (Entity, &mut Enemy, &mut Transform, Has<Stunned>, Has<Boss>),
+        (Without<Buried>, Without<crate::interact::Pot>, Without<crate::bestiary::SelfSteered>),
     >,
 ) {
     let dt = time.delta_secs();
@@ -1035,31 +1700,41 @@ pub fn enemy_move(
     // Downed astronauts are not targets.
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(e, p, _, tf)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(e, p, _, tf, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
         .collect();
     if snaps.is_empty() {
         return;
     }
+    // How far each astronaut SEEMS to the horde (Signal Flare, a Beacon Tick's tracker).
+    let (lure, tracked): (Vec<f32>, Vec<bool>) = q_player
+        .iter()
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(_, _, ps, _, tracked)| (horde_lure(ps.revealed(), tracked), tracked))
+        .unzip();
     let t_now = time.elapsed_secs();
+    // §4 night risk: the horde is faster on the night side (bosses keep their authored pace)
+    let sun = crate::daynight::Sun::of(&run);
 
-    for (entity, mut e, mut tf) in &mut q {
-        // Each enemy chases whoever is closest ALONG THE SURFACE.
-        let target = crate::player::nearest_astronaut(e.dir, &snaps, planet.radius)
-            .unwrap_or(snaps[0]);
+    for (entity, mut e, mut tf, stunned, is_boss) in &mut q {
+        // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
+        let pick = chase_target(e.dir, &snaps, &lure, planet.radius);
+        let target = snaps[pick];
         let player_dir = target.dir;
         let player_pos = target.pos;
-        e.contact_cd = (e.contact_cd - dt).max(0.0);
-        e.flash = (e.flash - dt * 6.0).max(0.0);
-        e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
-        e.knock *= (1.0 - 7.0 * dt).max(0.0);
+        tick_enemy(&mut e, dt);
 
         let r = planet.surface(e.dir);
-        let eff_speed = e.speed * (1.0 - e.slow);
+        let night = if is_boss { 1.0 } else { sun.enemy_speed(e.dir) };
+        let mut eff_speed = e.speed * (1.0 - e.slow) * night;
+        // A tracked astronaut is a beacon: the far horde closes on it faster (§9 Beacon Tick).
+        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
+        if tracked[pick] && to_player_arc > TRACKER_SPEEDUP_ARC {
+            eff_speed *= TRACKER_SPEED_MULT;
+        }
 
         // Ranged kinds hold their preferred distance and strafe; melee beelines.
         let standoff = e.kind.def().standoff;
-        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
         let steer_target = if standoff > 0.0 && to_player_arc < standoff {
             let (t, _) = sphere::tangent_frame(e.dir);
             let tangent_to = {
@@ -1082,7 +1757,8 @@ pub fn enemy_move(
             player_dir
         };
 
-        let angle = eff_speed * dt / r;
+        // a stunned foe stands reeling (its knockback still carries it, below)
+        let angle = if stunned { 0.0 } else { eff_speed * dt / r };
         let mut new_dir = sphere::step_toward(e.dir, steer_target, angle);
 
         // separation from neighbors (cheap cell lookup)
@@ -1118,6 +1794,15 @@ pub fn enemy_move(
 
         animate_crowd(&mut e, &mut tf, &planet, player_pos, eff_speed, dt, t_now);
     }
+}
+
+/// The per-frame decays every simulated enemy runs, whoever steers it (`enemy_move`, or a
+/// `bestiary` kind's own mover): contact cooldown, hit-flash, slow and knockback.
+pub fn tick_enemy(e: &mut Enemy, dt: f32) {
+    e.contact_cd = (e.contact_cd - dt).max(0.0);
+    e.flash = (e.flash - dt * 6.0).max(0.0);
+    e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
+    e.knock *= (1.0 - 7.0 * dt).max(0.0);
 }
 
 /// Crowd-tier animation, shared by the host's simulated horde and a client's streamed
@@ -1200,7 +1885,9 @@ pub fn burrower_emerge(
     assets: Res<EnemyAssets>,
     q_player: Query<(Entity, &Transform), With<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
-    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), Without<Player>>,
+    // a tunnelling Trencher wears `Buried` too (every weapon already skips it), but it
+    // surfaces on its own terms (`bestiary::trencher_update`)
+    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), (Without<Player>, Without<crate::bestiary::Trencher>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1210,24 +1897,20 @@ pub fn burrower_emerge(
     for (e, enemy, mut b, mut tf) in &mut q {
         b.timer -= dt;
         // rumble under the surface
-        let depth = (b.timer / 1.3).clamp(0.0, 1.0);
+        let depth = (b.timer / BURROW_SECS).clamp(0.0, 1.0);
         tf.translation = planet.surface_point(enemy.dir) - enemy.dir * (depth * 1.2);
         if b.timer <= 0.0 {
             commands.entity(e).remove::<Buried>();
             // eruption damage to anyone standing on top of it
             for (pe, pp) in ppos.iter().copied() {
-                if tf.translation.distance(pp) < 2.6 {
+                if tf.translation.distance(pp) < BURROW_ERUPT_RADIUS {
                     writer.write(PlayerHitMsg { victim: pe, amount: enemy.damage, from: tf.translation, attacker: Some(e) });
                 }
             }
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(enemy.dir) + enemy.dir * 0.1)
-                    .with_rotation(sphere::frame_quat(enemy.dir, sphere::tangent_frame(enemy.dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.5)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: 0.25, max: 0.25, radius: 0.0, damage: 0.0, dir: enemy.dir, ring: false },
-                StageScoped,
             ));
         }
     }
@@ -1238,7 +1921,7 @@ pub fn enemy_contact(
     time: Res<Time>,
     run: Res<RunState>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &Transform), Without<Buried>>,
+    mut q: Query<(Entity, &mut Enemy, &Transform), (Without<Buried>, Without<Stunned>)>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     if time.delta_secs() <= 0.0 {
@@ -1253,7 +1936,9 @@ pub fn enemy_contact(
         return;
     }
     for (entity, mut e, tf) in &mut q {
-        if e.contact_cd > 0.0 || e.speed == 0.0 {
+        // no bite at all (a Beacon Tick's touch is `bestiary::tick_latch`'s): a zero hit would
+        // still spend the victim's i-frames and shield recharge
+        if e.contact_cd > 0.0 || e.speed == 0.0 || e.damage <= 0.0 {
             continue;
         }
         let reach = e.scale * 0.55 + PLAYER_RADIUS + 0.25;
@@ -1276,18 +1961,20 @@ pub fn spitter_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
-    mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
+    mut q: Query<(&Enemy, &mut Spitter, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 || storm.player_inside {
-        return; // hidden in the dust storm — ranged enemies can't see you
+    if dt <= 0.0 {
+        return;
     }
+    // Anyone hidden in the dust storm is invisible to ranged enemies — per astronaut, so a
+    // teammate outside the cell is still a target while you ride it.
+    // (a Signal Flare carrier is never hidden: the horde always knows where they are)
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps)| !ps.dead)
-        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .filter(|(_, _, ps, hidden)| !ps.dead && (!hidden || ps.revealed()))
+        .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {
         return;
@@ -1323,49 +2010,78 @@ pub fn spitter_attack(
 }
 
 /// Beamers paint the player with a tracking aim line, lock late, then fire a railbolt.
+/// HOST-only (it decides and fires); the line itself is drawn by `aim_line_visuals`,
+/// which a co-op client also runs on the lines it rebuilt from the hazard lane.
 #[allow(clippy::too_many_arguments)]
 pub fn beamer_attack(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
-    mut q_lines: Query<(Entity, &AimLine, &mut Transform), (Without<Enemy>, Without<Player>)>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
+    // the Longshot Beamer Prime wears a Beamer (for the shared aim line) but aims itself
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform, Has<Stunned>), (Without<Buried>, Without<crate::bestiary::PrimeSight>)>,
+    q_lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    // Lost the target in the dust — drop every aim line and hold fire.
-    if storm.player_inside {
-        for (le, _, _) in &q_lines {
-            commands.entity(le).despawn();
-        }
-        for (_, _, mut b, _) in &mut q {
-            b.charging = 0.0;
-        }
-        return;
-    }
-    let snaps: Vec<crate::player::AstronautSnap> = q_player
+    // (astronaut, hidden in the dust storm)
+    let all: Vec<(crate::player::AstronautSnap, bool)> = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(en, p, _, tf)| crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation })
+        .filter(|(_, _, ps, _, _)| !ps.dead)
+        // a Signal Flare carrier is never hidden: the horde always knows where they are
+        .map(|(en, p, ps, tf, hidden)| {
+            (crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation }, hidden && !ps.revealed())
+        })
         .collect();
-    if snaps.is_empty() {
-        return;
-    }
+    // Only astronauts OUT of the dust can be picked as a new target.
+    let visible: Vec<crate::player::AstronautSnap> =
+        all.iter().filter(|(_, hidden)| !hidden).map(|(s, _)| *s).collect();
+    let drop_line = |commands: &mut Commands, owner: Entity| {
+        for (le, line) in q_lines.iter() {
+            if line.owner == owner {
+                commands.entity(le).try_despawn();
+            }
+        }
+    };
 
-    for (entity, e, mut b, tf) in &mut q {
+    for (entity, e, mut b, tf, stunned) in &mut q {
+        // A stunned beamer loses its lock: the telegraph drops rather than hanging frozen
+        // and firing the moment the stun wears off.
+        if stunned {
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
+            continue;
+        }
         // While charging, stay on the LATCHED target (if it still exists); otherwise pick
-        // the nearest astronaut fresh.
-        let locked = b
+        // the nearest visible astronaut fresh.
+        let latched = b
             .target
             .filter(|_| b.charging > 0.0)
-            .and_then(|t| snaps.iter().copied().find(|s| s.entity == t));
-        let Some(player) = locked.or_else(|| crate::player::nearest_astronaut(e.dir, &snaps, planet.radius))
+            .and_then(|t| all.iter().copied().find(|(s, _)| s.entity == t));
+        if let Some((_, true)) = latched {
+            // Its mark ducked into the dust storm: the telegraph was for them, so drop it
+            // and hold fire rather than swing the line onto somebody else mid-sweep.
+            b.charging = 0.0;
+            b.target = None;
+            drop_line(&mut commands, entity);
+            continue;
+        }
+        let Some(player) = latched
+            .map(|(s, _)| s)
+            .or_else(|| crate::player::nearest_astronaut(e.dir, &visible, planet.radius))
         else {
+            // nobody to see: an unfinished charge fizzles
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
             continue;
         };
         let ptf = player;
@@ -1373,7 +2089,7 @@ pub fn beamer_attack(
         if b.charging > 0.0 {
             b.charging -= dt;
             // track the player until the final quarter second, then hold the lock
-            if b.charging > 0.25 {
+            if b.charging > BEAMER_LOCK_SECS {
                 let v = ptf.pos - tf.translation;
                 let vt = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
                 if vt != Vec3::ZERO {
@@ -1398,47 +2114,65 @@ pub fn beamer_attack(
                         .with_scale(Vec3::new(0.5, 0.5, 2.2)),
                     StageScoped,
                 ));
-                // drop the aim line
-                for (le, line, _) in q_lines.iter() {
-                    if line.owner == entity {
-                        commands.entity(le).despawn();
-                    }
-                }
+                drop_line(&mut commands, entity);
             }
             continue;
         }
         b.cd -= dt;
         if b.cd <= 0.0 && arc < 26.0 {
-            b.charging = 1.1;
+            b.charging = BEAMER_CHARGE_SECS;
             b.target = Some(player.entity); // commit for the whole telegraph
             let v = ptf.pos - tf.translation;
             b.aim = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
             commands.spawn((
-                AimLine { owner: entity },
-                Mesh3d(assets.proj_mesh.clone()),
+                AimLine { owner: entity, march: 0.0 },
+                Mesh3d(assets.aim_mesh.clone()),
                 MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(tf.translation),
+                // zero-scaled until `aim_line_visuals` lays it along the aim
+                Transform::from_translation(tf.translation).with_scale(Vec3::ZERO),
                 StageScoped,
             ));
         }
     }
+}
 
-    // stretch each live aim line from its beamer toward the current aim
-    for (le, line, mut ltf) in &mut q_lines {
-        let Ok((_, e, b, tf)) = q.get(line.owner) else {
-            commands.entity(le).despawn();
+/// Lay each live aim line from its beamer along the current aim. While the beamer tracks,
+/// its dashes march toward the target and the line thickens with the charge; in the final
+/// BEAMER_LOCK_SECS they freeze and go fat — "it has stopped aiming, dodge now". Shared by
+/// the host and a co-op client, so a joiner reads the exact tell the host would. Lines whose
+/// beamer is gone are cleared here.
+pub fn aim_line_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    q: Query<(&Enemy, &Beamer, &Transform)>,
+    mut q_lines: Query<(Entity, &mut AimLine, &mut Transform), Without<Enemy>>,
+) {
+    let dt = time.delta_secs();
+    for (le, mut line, mut ltf) in &mut q_lines {
+        let Ok((e, b, tf)) = q.get(line.owner) else {
+            commands.entity(le).try_despawn();
             continue;
         };
         if b.aim == Vec3::ZERO {
             continue;
         }
-        let len = 24.0;
-        let mid = tf.translation + e.dir * 1.0 + b.aim * (len * 0.5);
-        ltf.translation = mid;
+        // the Prime's line is longer, its charge and lock its own
+        let (len, charge_secs, lock_secs) = if e.kind == EnemyKind::BeamerPrime {
+            (PRIME_AIM_LINE_LEN, PRIME_CHARGE_SECS, PRIME_LOCK_SECS)
+        } else {
+            (AIM_LINE_LEN, BEAMER_CHARGE_SECS, BEAMER_LOCK_SECS)
+        };
+        let period = len / AIM_DASHES as f32;
+        let locked = b.charging <= lock_secs;
+        if !locked {
+            line.march = (line.march + dt * AIM_DASH_SPEED / period).fract();
+        }
+        let charge = 1.0 - (b.charging / charge_secs).clamp(0.0, 1.0);
+        let width = if locked { 0.26 } else { 0.09 + charge * 0.1 };
+        // The dash mesh runs from the origin along local -Z (frame_quat's forward).
+        ltf.translation = tf.translation + e.dir * 1.0 + b.aim * (line.march * period);
         ltf.rotation = sphere::frame_quat(e.dir, b.aim);
-        // thin pulsing line, thickening as the shot locks in
-        let lock = 1.0 - (b.charging / 1.1).clamp(0.0, 1.0);
-        ltf.scale = Vec3::new(0.10 + lock * 0.16, 0.10 + lock * 0.16, len / 0.56);
+        ltf.scale = Vec3::new(width, width, len);
     }
 }
 
@@ -1448,18 +2182,19 @@ pub fn lobber_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
-    mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
+    mut q: Query<(&Enemy, &mut Lobber, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 || storm.player_inside {
-        return; // can't range you through the dust
+    if dt <= 0.0 {
+        return;
     }
+    // can't range anyone through the dust
+    // (a Signal Flare carrier is never hidden: the horde always knows where they are)
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps)| !ps.dead)
-        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .filter(|(_, _, ps, hidden)| !ps.dead && (!hidden || ps.revealed()))
+        .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {
         return;
@@ -1475,14 +2210,10 @@ pub fn lobber_attack(
             l.cd = 4.5;
             let target = player.dir;
             let flight = 1.6;
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(target) + target * 0.15)
-                    .with_rotation(sphere::frame_quat(target, sphere::tangent_frame(target).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.1)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: flight, max: flight, radius: 3.2, damage: e.damage, dir: target, ring: false },
-                StageScoped,
             ));
             commands.spawn((
                 MortarShell { from: e.dir, to: target, t: 0.0, dur: flight },
@@ -1524,27 +2255,52 @@ pub fn enemy_projectiles(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<(Entity, &Transform), With<Player>>,
-    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform), Without<Player>>,
+    q_player: Query<(Entity, &Transform, &crate::run::PlayerState), With<Player>>,
+    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform, Option<&mut crate::bestiary::CurveShot>), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
+    particles: Option<Res<ParticleAssets>>,
+    mut telemetry: ResMut<crate::bestiary::BestiaryTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
-    for (e, mut p, mut tf) in &mut q {
+    // a Beacon is no bullet shield: shots pass over the downed (L18)
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().filter(|(_, _, ps)| !ps.dead).map(|(e, t, _)| (e, t.translation)).collect();
+    for (e, mut p, mut tf, curve) in &mut q {
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(e).despawn();
             continue;
         }
-        let r = planet.surface(p.dir) + p.hover;
+        // A Beamer Prime's railbolt flies a line of fire over the curve instead of hugging
+        // the ground: any terrain that rises into that line stops it (the hill's shadow).
+        let r = match &curve {
+            Some(c) => c.radius(),
+            None => planet.surface(p.dir) + p.hover,
+        };
         let vel = p.heading * p.speed;
         let (nd, nv) = sphere::advance(p.dir, vel, r, dt);
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
-        tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        if let Some(mut c) = curve {
+            c.flown += p.speed * dt;
+            let r = c.radius();
+            tf.translation = p.dir * r;
+            tf.rotation = sphere::frame_quat(p.dir, p.heading);
+            if planet.surface(p.dir) > r - PRIME_BOLT_CLEARANCE {
+                if p.damage > 0.0 {
+                    telemetry.prime_bolts_shadowed += 1; // the host's own shot, not a client's copy
+                }
+                if let Some(pa) = &particles {
+                    fx::burst(&mut commands, pa, tf.translation, p.dir, Pcolor::Danger, 10, 5.0);
+                }
+                commands.entity(e).despawn();
+                continue;
+            }
+        } else {
+            tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        }
         // first astronaut it touches eats it (a shot is consumed by one body)
         if let Some((pe, _)) = ppos
             .iter()
@@ -1563,7 +2319,8 @@ pub fn boss_attacks(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    mut q: Query<(&Enemy, &mut Boss, &Transform)>,
+    // (bosses are immune to stuns; the filter keeps "stunned foes don't attack" universal)
+    mut q: Query<(&Enemy, &mut Boss, &Transform), Without<Stunned>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     let dt = time.delta_secs();
@@ -1575,14 +2332,10 @@ pub fn boss_attacks(
         boss.burst_timer -= dt;
         if boss.attack_timer <= 0.0 {
             boss.attack_timer = 6.5;
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(e.dir) + e.dir * 0.15)
-                    .with_rotation(sphere::frame_quat(e.dir, sphere::tangent_frame(e.dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.1)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: 1.4, max: 1.4, radius: 7.0, damage: e.damage * 1.6, dir: e.dir, ring: true },
-                StageScoped,
             ));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
@@ -1604,13 +2357,73 @@ pub fn boss_attacks(
     }
 }
 
-/// Telegraphs expand, then detonate against the player.
+/// Everything a telegraph spawns with, laid flat on the ground at `tg.dir` — shared by the
+/// host's attacks and a client's streamed copy, so both draw the same ring in the same place.
+pub fn telegraph_bundle(assets: &EnemyAssets, planet: &CurrentPlanet, tg: Telegraph) -> impl Bundle {
+    let start = if tg.radius > 0.0 { tg.radius } else { 0.1 };
+    (
+        Mesh3d(assets.ring_mesh.clone()),
+        MeshMaterial3d(assets.ring_mat.clone()),
+        ground_decal(planet, tg.dir, TELEGRAPH_LIFT).with_scale(Vec3::splat(start)),
+        tg,
+        StageScoped,
+    )
+}
+
+/// A transform lying flat on the ground at `dir` (mesh local XZ = the ground, +Y = up).
+pub fn ground_decal(planet: &CurrentPlanet, dir: Vec3, lift: f32) -> Transform {
+    Transform::from_translation(planet.surface_point(dir) + dir * lift)
+        .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0))
+}
+
+/// Start a Burrower's crack decal (host at spawn, client from the hazard lane). Its spin is
+/// hashed from where it is, so two machines draw the same crack.
+pub fn spawn_crack_decal(commands: &mut Commands, assets: &EnemyAssets, planet: &CurrentPlanet, dir: Vec3, secs: f32) -> Entity {
+    let spin = ((dir.x * 37.13 + dir.y * 11.7 + dir.z * 91.71).fract().abs()) * std::f32::consts::TAU;
+    let mut tf = ground_decal(planet, dir, 0.12);
+    tf.rotation *= Quat::from_rotation_y(spin);
+    commands
+        .spawn((
+            CrackDecal { dir, timer: secs, max: secs },
+            Mesh3d(assets.crack_mesh.clone()),
+            MeshMaterial3d(assets.ring_mat.clone()),
+            tf.with_scale(Vec3::new(0.2 * BURROW_ERUPT_RADIUS, 1.0, 0.2 * BURROW_ERUPT_RADIUS)),
+            StageScoped,
+        ))
+        .id()
+}
+
+/// Cracks race outward from the burrow and creep to the eruption's full reach just as it
+/// breaks the surface. Runs everywhere a crack can exist (host, client, headless).
+pub fn crack_decals(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut CrackDecal, &mut Transform)>) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (e, mut c, mut tf) in &mut q {
+        c.timer -= dt;
+        if c.timer <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let t = 1.0 - (c.timer / c.max).clamp(0.0, 1.0);
+        let reach = BURROW_ERUPT_RADIUS * (0.2 + 0.8 * (1.0 - (1.0 - t) * (1.0 - t)));
+        tf.scale = Vec3::new(reach, 1.0, reach);
+    }
+}
+
+/// Telegraphs mark their TRUE lethal edge from the first frame and pulse inward from it,
+/// faster as impact nears (a rising chirp, held under 3/s in photosensitivity mode), then
+/// detonate against every astronaut. The eruption pop (radius 0) just blooms outward. The
+/// fill that counts down to impact is presentation (`animate_hazard_decor`).
+#[allow(clippy::too_many_arguments)]
 pub fn telegraphs(
     mut commands: Commands,
     time: Res<Time>,
+    save: Res<crate::save::MetaSave>,
     mut shake: ResMut<Shake>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(Entity, &Transform), With<Player>>,
+    q_player: Query<(Entity, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
     mut q: Query<(Entity, &mut Telegraph, &mut Transform), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
@@ -1618,17 +2431,31 @@ pub fn telegraphs(
     if dt <= 0.0 {
         return;
     }
-    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
+    let (f0, f1) = if save.accessibility.photosensitive {
+        (TELEGRAPH_PULSE_HZ.0.min(TELEGRAPH_PULSE_HZ_PHOTO), TELEGRAPH_PULSE_HZ_PHOTO)
+    } else {
+        TELEGRAPH_PULSE_HZ
+    };
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t, _)| (e, t.translation)).collect();
+    let me = q_player.iter().find(|(_, _, local)| *local).map(|(_, t, _)| t.translation);
     for (e, mut tg, mut tf) in &mut q {
         tg.timer -= dt;
         let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
-        tf.scale = Vec3::splat(0.1 + t * tg.radius.max(0.6));
+        if tg.radius > 0.0 {
+            // phase of a chirp whose rate ramps f0 -> f1 across the telegraph's life
+            let phase = std::f32::consts::TAU * tg.max * (f0 * t + (f1 - f0) * t * t * 0.5);
+            // inward only: the ring never draws the lethal edge further out than it is
+            let pulse = 1.0 - TELEGRAPH_PULSE_AMP * (0.5 + 0.5 * phase.sin());
+            tf.scale = Vec3::splat(tg.radius * pulse);
+        } else {
+            tf.scale = Vec3::splat(0.1 + t * 0.6);
+        }
         if tg.timer <= 0.0 {
             if tg.damage > 0.0 {
                 for (pe, pp) in ppos.iter().copied() {
                     let d = tf.translation.distance(pp);
                     let hit = if tg.ring {
-                        d < tg.radius + 1.0 && d > tg.radius * 0.35
+                        d < tg.radius + 1.0 && d > tg.radius * SLAM_SAFE_FRACTION
                     } else {
                         d < tg.radius + 0.6
                     };
@@ -1636,9 +2463,15 @@ pub fn telegraphs(
                         writer.write(PlayerHitMsg { victim: pe, amount: tg.damage, from: tf.translation, attacker: None });
                     }
                 }
-                shake.add(0.22);
+                // §13 budget: an elite/boss slam kicks 0.22–0.35 (a boss's ring slam the
+                // most), fading out with distance — a mortar across the planet shakes nothing
+                if let Some(me) = me {
+                    let near = (1.0 - tf.translation.distance(me) / SHAKE_ENEMY_SLAM_FALLOFF).clamp(0.0, 1.0);
+                    let kick = if tg.ring { SHAKE_ENEMY_SLAM_MAX } else { SHAKE_ENEMY_SLAM_MIN };
+                    shake.add(kick * near);
+                }
                 if let Some(pa) = &particles {
-                    fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Red, 18, 9.0);
+                    fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Danger, 18, 9.0);
                 }
             }
             commands.entity(e).despawn();
@@ -1646,14 +2479,173 @@ pub fn telegraphs(
     }
 }
 
-/// Restore materials after hit-flash.
-pub fn enemy_flash(
+/// PRESENTATION: give each new hazard the parts that let it read without color (§13) — a
+/// fill that sweeps out to the lethal edge by impact, a slam's inner safe ring — and, in
+/// high-contrast mode, a white outline hull on every telegraph, aim line, crack, shot and
+/// the verdict beam. Children, so they move, scale and despawn with their hazard; there are
+/// at most a few dozen hazards alive, never one per crowd enemy. Toggling high contrast
+/// mid-run (pause menu) outlines, or strips, every hazard already standing.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn decorate_hazards(
+    mut commands: Commands,
     assets: Res<EnemyAssets>,
-    mut q: Query<(&Enemy, &BaseMat, &mut MeshMaterial3d<StandardMaterial>), Changed<Enemy>>,
+    save: Res<crate::save::MetaSave>,
+    tels: Query<(Entity, Ref<Telegraph>)>,
+    lines: Query<(Entity, Ref<AimLine>)>,
+    cracks: Query<(Entity, Ref<CrackDecal>)>,
+    shots: Query<(Entity, Option<Ref<EnemyProjectile>>, Option<Ref<MortarShell>>), Or<(With<EnemyProjectile>, With<MortarShell>)>>,
+    beams: Query<(Entity, Ref<AnubotBeamVis>)>,
+    decor: Query<(Entity, &HazardDecor)>,
+    mut last_hc: Local<Option<bool>>,
 ) {
-    for (e, base, mut mat) in &mut q {
+    let hc = save.accessibility.high_contrast;
+    let toggled = last_hc.is_some_and(|was| was != hc);
+    *last_hc = Some(hc);
+    if toggled && !hc {
+        for (e, d) in &decor {
+            if *d == HazardDecor::Outline {
+                commands.entity(e).try_despawn();
+            }
+        }
+    }
+    // a hazard gets an outline when it appears, or when outlines were just switched on
+    let wants_outline = |added: bool| hc && (added || toggled);
+    let outline = |mesh: &Handle<Mesh>, tf: Transform| {
+        (HazardDecor::Outline, Mesh3d(mesh.clone()), MeshMaterial3d(assets.outline_mat.clone()), tf)
+    };
+    for (e, tg) in &tels {
+        let added = tg.is_added();
+        if !added && !wants_outline(false) {
+            continue;
+        }
+        // `get_entity`: a hazard can be retired in the very frame it is first seen here.
+        let Ok(mut ec) = commands.get_entity(e) else { continue };
+        let safe = Transform::from_scale(Vec3::splat(SLAM_SAFE_FRACTION));
+        ec.with_children(|c| {
+            if added && tg.radius > 0.0 {
+                if tg.ring {
+                    c.spawn((HazardDecor::SafeRing, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
+                    c.spawn((HazardDecor::Sweep, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
+                } else {
+                    c.spawn((
+                        HazardDecor::Sweep,
+                        Mesh3d(assets.disc_mesh.clone()),
+                        MeshMaterial3d(assets.ring_fill_mat.clone()),
+                        Transform::from_scale(Vec3::new(0.0, 1.0, 0.0)),
+                    ));
+                }
+            }
+            if wants_outline(added) {
+                c.spawn(outline(&assets.ring_outline_mesh, Transform::IDENTITY));
+                if tg.radius > 0.0 && tg.ring {
+                    c.spawn(outline(&assets.ring_outline_mesh, safe));
+                }
+            }
+        });
+    }
+    if !hc {
+        return;
+    }
+    let beam_hull = Transform::from_scale(Vec3::new(1.08, 1.6, 1.004));
+    let hulls = lines
+        .iter()
+        .map(|(e, r)| (e, r.is_added(), &assets.aim_outline_mesh, Transform::IDENTITY))
+        .chain(cracks.iter().map(|(e, r)| (e, r.is_added(), &assets.crack_outline_mesh, Transform::IDENTITY)))
+        .chain(shots.iter().map(|(e, p, m)| {
+            let added = p.is_some_and(|r| r.is_added()) || m.is_some_and(|r| r.is_added());
+            (e, added, &assets.proj_outline_mesh, Transform::IDENTITY)
+        }))
+        .chain(beams.iter().map(|(e, r)| (e, r.is_added(), &assets.beam_mesh, beam_hull)));
+    for (e, added, mesh, tf) in hulls {
+        if !wants_outline(added) {
+            continue;
+        }
+        let Ok(mut ec) = commands.get_entity(e) else { continue };
+        ec.with_children(|c| {
+            c.spawn(outline(mesh, tf));
+        });
+    }
+}
+
+/// PRESENTATION: sweep each telegraph's fill out toward the lethal edge as impact nears —
+/// the countdown, told by motion. A disc fills from the center; a slam's band fills from
+/// its safe inner edge outward.
+pub fn animate_hazard_decor(
+    q_tel: Query<(&Telegraph, &Children)>,
+    mut q_decor: Query<(&HazardDecor, &mut Transform), Without<Telegraph>>,
+) {
+    for (tg, children) in &q_tel {
+        let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
+        for child in children.iter() {
+            let Ok((decor, mut tf)) = q_decor.get_mut(child) else { continue };
+            if *decor != HazardDecor::Sweep {
+                continue;
+            }
+            tf.scale = if tg.ring {
+                Vec3::splat(SLAM_SAFE_FRACTION + (1.0 - SLAM_SAFE_FRACTION) * t)
+            } else {
+                Vec3::new(t, 1.0, t)
+            };
+        }
+    }
+}
+
+/// PRESENTATION: put the danger materials in the viewer's palette, and the hit-flash at the
+/// flash-reduction setting. The materials are shared handles, so recoloring every telegraph,
+/// shot and beam on the planet is a handful of asset writes — no per-entity work. All of
+/// them are unlit, so it is the base color that carries both the hue and the brightness.
+pub fn apply_danger_palette(
+    save: Res<crate::save::MetaSave>,
+    assets: Option<Res<EnemyAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut applied: Local<Option<(Palette, bool)>>,
+) {
+    let want = (save.accessibility.palette, save.accessibility.flash_reduction);
+    if *applied == Some(want) {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    let targets = [&assets.ring_mat, &assets.ring_fill_mat, &assets.proj_mat, &assets.beam_charge_mat, &assets.beam_fire_mat];
+    for (handle, base) in targets.into_iter().zip(danger_looks(want.0)) {
+        if let Some(m) = materials.get_mut(handle) {
+            m.base_color = base;
+        }
+    }
+    if let Some(m) = materials.get_mut(&assets.flash_mat) {
+        let g = if want.1 { HIT_FLASH_GREY_REDUCED } else { 1.0 };
+        m.base_color = Color::srgb(g, g, g);
+    }
+    *applied = Some(want);
+}
+
+/// Swap the hit-flash material in and out. In photosensitivity mode an enemy may START a
+/// flash at most once per PHOTO_MIN_FLASH_INTERVAL: a crowd under an aura otherwise strobes
+/// white at the aura's tick rate. A held flash (hits landing faster than it fades) stays
+/// steadily white, which is not a flash at all.
+pub fn enemy_flash(
+    time: Res<Time<Real>>,
+    save: Res<crate::save::MetaSave>,
+    assets: Res<EnemyAssets>,
+    mut q: Query<(Entity, &Enemy, &BaseMat, &mut MeshMaterial3d<StandardMaterial>), Changed<Enemy>>,
+    // enemy -> when its current flash began; only enemies flashed in the last interval
+    mut recent: Local<HashMap<Entity, f32>>,
+) {
+    let photo = save.accessibility.photosensitive;
+    let now = time.elapsed_secs();
+    if photo {
+        recent.retain(|_, t| now - *t < PHOTO_MIN_FLASH_INTERVAL);
+    } else if !recent.is_empty() {
+        recent.clear();
+    }
+    for (entity, e, base, mut mat) in &mut q {
         if e.flash > 0.0 {
             if mat.0 != assets.flash_mat {
+                if photo {
+                    if recent.contains_key(&entity) {
+                        continue;
+                    }
+                    recent.insert(entity, now);
+                }
                 mat.0 = assets.flash_mat.clone();
             }
         } else if mat.0 != base.0 {

@@ -62,6 +62,29 @@ pub enum Behavior {
     Rocket { speed: f32, aoe: f32 },
     /// Damaging + slowing aura around the player.
     Aura { radius: f32, slow: f32 },
+    // ---- the six Tier-1 weapons' own behaviours (GDD §6; `arsenal.rs`) ----
+    /// A mortar lobbed high onto the densest clump in `range` (arc m) — over the horizon —
+    /// landing after about `flight` s in an `aoe` splatter. `split` > 0: on the way down it
+    /// breaks into that many, blanketing the ring round the target (RAGÙ RAIN).
+    Lob { range: f32, flight: f32, aoe: f32, split: u32 },
+    /// A tight damage field that bites hardest on what hugs you, and harder the more of
+    /// them there are. `nova` > 0: every FULL_DISCHARGE_SECS the stored charge goes off as
+    /// a screen-clearing nova of that radius (FULL DISCHARGE).
+    Hug { radius: f32, nova: f32 },
+    /// A disc that bounces enemy to enemy (`bounces`; `u32::MAX` = never runs out), and with
+    /// no one left in `link` range rolls on round its great circle for a whole lap.
+    Disc { speed: f32, bounces: u32, link: f32 },
+    /// A cone blast that shoves and stuns what it catches — the panic button.
+    Cone { arc_deg: f32, range: f32 },
+    /// A ring that rolls out from you to `radius`, shoving, stunning and hurting everything
+    /// it passes (THE BROWN NOTE).
+    Repulsor { radius: f32 },
+    /// Tolls on its cooldown: damages everything in `radius` and marks it for +crit.
+    /// `wisps`: each toll raises recent dead as friendly Static-wisps (THE ANGELUS).
+    Toll { radius: f32, wisps: bool },
+    /// Yo-yos on a cord, orbiting close; damage and reach grow with the un-hit move combo.
+    /// `garrote`: at max combo the cord pays out to garrote the whole ring (SWORD-YO).
+    Tether { radius: f32, deg_per_sec: f32, garrote: bool },
 }
 
 pub struct WeaponDef {
@@ -346,11 +369,11 @@ impl WeaponKind {
             MeatballComet => WeaponDef {
                 kind: *self,
                 name: "Meatball Comet",
-                desc: "Frozen mortar meatball, splatters on impact",
-                damage: 22.0,
-                cooldown: 1.6,
+                desc: "Lobs a frozen meatball over the horizon; splat",
+                damage: 24.0,
+                cooldown: 1.7,
                 projectiles: 1,
-                behavior: Rocket { speed: 13.0, aoe: 3.4 },
+                behavior: Lob { range: 38.0, flight: 1.05, aoe: 3.6, split: 0 },
                 color: Color::srgb(0.75, 0.35, 0.20),
                 evolves_to: Some(RaguRain),
                 evo_item: Some(ItemKind::FishBowlHelmet),
@@ -360,9 +383,9 @@ impl WeaponKind {
                 name: "RAGÙ RAIN",
                 desc: "Nonna's recipe. Survived reentry. Barely.",
                 damage: 30.0,
-                cooldown: 1.2,
-                projectiles: 3,
-                behavior: Rocket { speed: 16.0, aoe: 4.6 },
+                cooldown: 1.35,
+                projectiles: 1,
+                behavior: Lob { range: 42.0, flight: 1.2, aoe: 4.0, split: 3 },
                 color: Color::srgb(0.9, 0.3, 0.15),
                 evolves_to: None,
                 evo_item: None,
@@ -370,11 +393,11 @@ impl WeaponKind {
             StaticCling => WeaponDef {
                 kind: *self,
                 name: "Static Cling",
-                desc: "A field of charge that shreds what hugs you",
-                damage: 6.0,
-                cooldown: 0.5,
+                desc: "Shocks whatever hugs you. The more, the worse",
+                damage: 7.0, // per tick, at contact
+                cooldown: 0.35,
                 projectiles: 1,
-                behavior: Aura { radius: 3.8, slow: 0.0 },
+                behavior: Hug { radius: 2.9, nova: 0.0 },
                 color: Color::srgb(0.7, 0.7, 1.0),
                 evolves_to: Some(FullDischarge),
                 evo_item: Some(ItemKind::ThornPlating),
@@ -383,10 +406,10 @@ impl WeaponKind {
                 kind: *self,
                 name: "FULL DISCHARGE",
                 desc: "Ghost-cosmonauts hate this one weird trick",
-                damage: 13.0,
-                cooldown: 0.45,
+                damage: 12.0,
+                cooldown: 0.3,
                 projectiles: 1,
-                behavior: Aura { radius: 5.6, slow: 0.0 },
+                behavior: Hug { radius: 3.5, nova: 18.0 },
                 color: Color::srgb(0.8, 0.8, 1.0),
                 evolves_to: None,
                 evo_item: None,
@@ -394,11 +417,11 @@ impl WeaponKind {
             RicochetDisc => WeaponDef {
                 kind: *self,
                 name: "Ricochet Disc",
-                desc: "Skips enemy to enemy; comes home",
-                damage: 13.0,
-                cooldown: 1.25,
+                desc: "Skips enemy to enemy, then laps the planet",
+                damage: 12.0,
+                cooldown: 1.3,
                 projectiles: 1,
-                behavior: Chain { jumps: 4, range: 13.0, link_range: 5.5 },
+                behavior: Disc { speed: 40.0, bounces: 4, link: 7.0 },
                 color: Color::srgb(0.6, 1.0, 0.9),
                 evolves_to: Some(Omnidisc),
                 evo_item: Some(ItemKind::LuckyMeteorite),
@@ -407,10 +430,10 @@ impl WeaponKind {
                 kind: *self,
                 name: "THE OMNIDISC",
                 desc: "Home is wherever you're standing",
-                damage: 18.0,
-                cooldown: 0.95,
+                damage: 16.0,
+                cooldown: 1.0,
                 projectiles: 2,
-                behavior: Chain { jumps: 9, range: 16.0, link_range: 7.0 },
+                behavior: Disc { speed: 46.0, bounces: u32::MAX, link: 9.0 },
                 color: Color::srgb(0.7, 1.0, 1.0),
                 evolves_to: None,
                 evo_item: None,
@@ -418,11 +441,11 @@ impl WeaponKind {
             SonicWhoopee => WeaponDef {
                 kind: *self,
                 name: "Sonic Whoopee",
-                desc: "A brown-note pulse that shoves the horde back",
-                damage: 13.0,
-                cooldown: 1.15,
+                desc: "A cone of rude noise: shoves, stuns. Panic button",
+                damage: 12.0,
+                cooldown: 1.7,
                 projectiles: 1,
-                behavior: MeleeArc { arc_deg: 210.0, range: 4.0 },
+                behavior: Cone { arc_deg: 80.0, range: 7.0 },
                 color: Color::srgb(0.6, 0.5, 0.35),
                 evolves_to: Some(BrownNote),
                 evo_item: Some(ItemKind::RocketBoots),
@@ -431,10 +454,10 @@ impl WeaponKind {
                 kind: *self,
                 name: "THE BROWN NOTE",
                 desc: "Discovered by accident. Weaponized on purpose.",
-                damage: 26.0,
-                cooldown: 0.95,
+                damage: 30.0,
+                cooldown: 1.4,
                 projectiles: 1,
-                behavior: MeleeArc { arc_deg: 360.0, range: 5.2 },
+                behavior: Repulsor { radius: 10.0 },
                 color: Color::srgb(0.7, 0.55, 0.3),
                 evolves_to: None,
                 evo_item: None,
@@ -442,11 +465,11 @@ impl WeaponKind {
             CosmonautsBell => WeaponDef {
                 kind: *self,
                 name: "Cosmonaut's Bell",
-                desc: "Tolls for the ones the vacuum kept",
-                damage: 9.0,
-                cooldown: 0.9,
+                desc: "Tolls every 4s; the tolled are marked for crits",
+                damage: 18.0,
+                cooldown: 4.0,
                 projectiles: 1,
-                behavior: Aura { radius: 4.6, slow: 0.0 },
+                behavior: Toll { radius: 8.0, wisps: false },
                 color: Color::srgb(0.95, 0.9, 0.6),
                 evolves_to: Some(Angelus),
                 evo_item: Some(ItemKind::StarChart),
@@ -455,10 +478,10 @@ impl WeaponKind {
                 kind: *self,
                 name: "THE ANGELUS",
                 desc: "Every toll is a mercy and a threat",
-                damage: 17.0,
-                cooldown: 0.8,
+                damage: 28.0,
+                cooldown: 4.0,
                 projectiles: 1,
-                behavior: Aura { radius: 6.2, slow: 0.0 },
+                behavior: Toll { radius: 10.0, wisps: true },
                 color: Color::srgb(1.0, 0.95, 0.7),
                 evolves_to: None,
                 evo_item: None,
@@ -466,11 +489,11 @@ impl WeaponKind {
             YoYo => WeaponDef {
                 kind: *self,
                 name: "Yo-Yo of Damocles",
-                desc: "Spiked yo-yo on a plasma cord, orbits close",
+                desc: "Spiked yo-yo on a cord. Keep moving, don't get hit",
                 damage: 12.0,
                 cooldown: 0.0,
-                projectiles: 2,
-                behavior: Orbit { radius: 2.9, deg_per_sec: 240.0 },
+                projectiles: 1,
+                behavior: Tether { radius: 2.7, deg_per_sec: 250.0, garrote: false },
                 color: Color::srgb(0.9, 0.4, 0.5),
                 evolves_to: Some(SwordYo),
                 evo_item: Some(ItemKind::HeavyPayload),
@@ -481,8 +504,8 @@ impl WeaponKind {
                 desc: "Down. Up. Existential. Down again.",
                 damage: 19.0,
                 cooldown: 0.0,
-                projectiles: 5,
-                behavior: Orbit { radius: 4.6, deg_per_sec: 300.0 },
+                projectiles: 2,
+                behavior: Tether { radius: 3.4, deg_per_sec: 290.0, garrote: true },
                 color: Color::srgb(1.0, 0.5, 0.6),
                 evolves_to: None,
                 evo_item: None,
@@ -506,6 +529,63 @@ impl WeaponKind {
 
     pub fn is_evolution(&self) -> bool {
         self.def().evolves_to.is_none() && self.def().evo_item.is_none() && !Self::BASE.contains(self)
+    }
+
+    /// Explicit wire code (Second Astronaut's ghost weapon in `net::NetItemVis`). Never
+    /// renumber, only append.
+    pub fn code(&self) -> u8 {
+        use WeaponKind::*;
+        match self {
+            Wrench => 0,
+            LaserPistol => 1,
+            RivetGun => 2,
+            Kunai => 3,
+            Boomerang => 4,
+            MiningLaser => 5,
+            Drones => 6,
+            Tesla => 7,
+            RocketPod => 8,
+            CryoVent => 9,
+            MeatballComet => 10,
+            StaticCling => 11,
+            RicochetDisc => 12,
+            SonicWhoopee => 13,
+            CosmonautsBell => 14,
+            YoYo => 15,
+            MegaWrench => 16,
+            GatlingLaser => 17,
+            Riveter9000 => 18,
+            BladeStorm => 19,
+            SatelliteArray => 20,
+            DeathRay => 21,
+            DroneSwarm => 22,
+            StormCore => 23,
+            MirvPod => 24,
+            AbsoluteZero => 25,
+            RaguRain => 26,
+            FullDischarge => 27,
+            Omnidisc => 28,
+            BrownNote => 29,
+            Angelus => 30,
+            SwordYo => 31,
+        }
+    }
+    pub fn from_code(c: u8) -> Option<WeaponKind> {
+        use WeaponKind::*;
+        [
+            Wrench, LaserPistol, RivetGun, Kunai, Boomerang, MiningLaser, Drones, Tesla, RocketPod,
+            CryoVent, MeatballComet, StaticCling, RicochetDisc, SonicWhoopee, CosmonautsBell, YoYo,
+            MegaWrench, GatlingLaser, Riveter9000, BladeStorm, SatelliteArray, DeathRay, DroneSwarm,
+            StormCore, MirvPod, AbsoluteZero, RaguRain, FullDischarge, Omnidisc, BrownNote, Angelus,
+            SwordYo,
+        ]
+        .into_iter()
+        .find(|w| w.code() == c)
+    }
+
+    /// The base weapon this evolution grew from (`None` for a base weapon).
+    pub fn evolved_from(&self) -> Option<WeaponKind> {
+        Self::BASE.into_iter().find(|b| b.def().evolves_to == Some(*self))
     }
 
     /// Which base weapons use `item` as their evolution catalyst (for item-card hints).

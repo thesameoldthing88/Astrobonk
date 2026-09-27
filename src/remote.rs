@@ -1,9 +1,10 @@
 //! Drawing OTHER players on a co-op client.
 //!
 //! The host simulates every astronaut and replicates a compact `NetTransform` per player.
-//! A client receives those as bare entities — `PlayerId` + `NetTransform` + `PlayerVitals`
-//! and nothing else — so by default nothing is drawn. This module gives each one the
-//! astronaut rig and drives it from the replicated pose.
+//! A client receives those as bare entities — `PlayerId`, `NetTransform`, `PlayerVitals`,
+//! `NetHero`, `NetComet` and nothing else — so by default nothing is drawn. This module
+//! gives each one the astronaut rig in its own hero's suit and drives it from the
+//! replicated pose (tucking through slides like the local astronaut does).
 //!
 //! THE CENTRAL RULE: a remote astronaut never gets a `Player` or `PlayerState` component.
 //! Two reasons, both load-bearing:
@@ -37,6 +38,10 @@ pub struct RemoteAstronaut {
     pub speed: f32,
     pub vel_r: f32,
     pub grounded: bool,
+    /// Mid-slide on the host — the rig tucks exactly as the local astronaut's does.
+    pub sliding: bool,
+    /// The hero whose suit this rig wears; rebuilt if the replicated NetHero changes.
+    pub hero: AstronautKind,
     pub anim: RigAnim,
 }
 
@@ -46,7 +51,7 @@ impl Plugin for RemoteVisualsPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (spawn_remote_rigs, drive_remote_transforms, animate_remote_rigs)
+            (spawn_remote_rigs, refit_remote_rigs, drive_remote_transforms, animate_remote_rigs)
                 .chain()
                 .run_if(in_state(crate::AppState::InRun))
                 .run_if(crate::net::is_client),
@@ -67,7 +72,7 @@ fn spawn_remote_rigs(
     planet: Res<CurrentPlanet>,
     mine: Res<crate::net::MyPlayerId>,
     q_new: Query<
-        (Entity, &crate::player::PlayerId, &crate::net::NetTransform),
+        (Entity, &crate::player::PlayerId, &crate::net::NetTransform, Option<&crate::net::NetHero>),
         (Without<Player>, Without<RemoteAstronaut>),
     >,
 ) {
@@ -75,14 +80,14 @@ fn spawn_remote_rigs(
     // copy of ourselves, so we draw NOBODY rather than risk a ghost twin.
     let Some(my_id) = mine.0 else { return };
 
-    for (e, pid, nt) in &q_new {
+    for (e, pid, nt, hero) in &q_new {
         if pid.0 == my_id {
             continue; // the server's copy of us — we already draw our own predicted body
         }
-        // A remote's real AstronautKind isn't on the wire yet, so pick a stable palette by
-        // slot. Teammates are visually distinct and consistent; correct suits need a
-        // character handshake (see NETCODE NOTES).
-        let def = AstronautKind::ALL[(pid.0 as usize) % AstronautKind::ALL.len()].def();
+        // The teammate's own hero, from the replicated NetHero (it rides in with the
+        // entity, so the fallback only covers a pre-hero host).
+        let hero = hero.map(|h| crate::net::hero_from_code(h.0)).unwrap_or(AstronautKind::Buzz);
+        let def = hero.def();
 
         let up = nt.dir;
         let tf = Transform {
@@ -99,6 +104,8 @@ fn spawn_remote_rigs(
                 speed: 0.0,
                 vel_r: 0.0,
                 grounded: true,
+                sliding: nt.sliding,
+                hero,
                 anim: RigAnim::default(),
             },
             tf,
@@ -106,15 +113,39 @@ fn spawn_remote_rigs(
         ));
         // No StageScoped: this entity belongs to the server. Letting despawn_stage reap it
         // would pull a replicated entity out from under replicon.
-        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor);
+        // a teammate's flashlight lights the ground but casts no shadow (L9)
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
         info!("NET remote visual: built rig for player {}", pid.0);
+    }
+}
+
+/// Re-suit a teammate whose hero changed. On a fresh join the host seats a peer before
+/// its first build heartbeat says who it plays, so the NetHero a client first sees can be
+/// the host's pick for half a second; this is what makes the suit follow.
+fn refit_remote_rigs(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &crate::net::NetHero, &mut RemoteAstronaut)>,
+) {
+    for (e, hero, mut r) in &mut q {
+        let want = crate::net::hero_from_code(hero.0);
+        if r.hero == want {
+            continue;
+        }
+        r.hero = want;
+        let def = want.def();
+        commands.entity(e).despawn_related::<Children>();
+        // a teammate's flashlight lights the ground but casts no shadow (L9)
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
+        info!("NET remote visual: re-suited a teammate as {}", def.name);
     }
 }
 
 /// Ease the drawn pose toward the last replicated snapshot and reconstruct the Transform
 /// with exactly the same formula `player_physics` uses, so a remote stands on the terrain
 /// the same way the local astronaut does.
-fn drive_remote_transforms(
+pub(crate) fn drive_remote_transforms(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     mut q: Query<(&crate::net::NetTransform, &mut RemoteAstronaut, &mut Transform)>,
@@ -160,6 +191,7 @@ fn drive_remote_transforms(
         r.speed += ((r.dir - prev).length() * local_r / dt - r.speed) * ka;
         r.vel_r += ((r.height - prev_h) / dt - r.vel_r) * ka;
         r.grounded = nt.height <= 0.02;
+        r.sliding = nt.sliding;
 
         let up = r.dir;
         tf.translation = planet.surface_point(up) + up * (r.height + PLAYER_HEIGHT * 0.5);
@@ -184,8 +216,7 @@ fn animate_remote_rigs(
         let d = RigDrive {
             speed: r.speed,
             grounded: r.grounded,
-            // slide_timer isn't replicated, so remotes stay upright through a slide.
-            sliding: false,
+            sliding: r.sliding,
             vel_r: r.vel_r,
         };
         crate::player::animate_rig(&mut r.anim, d, children, &mut q_joints, dt, t);

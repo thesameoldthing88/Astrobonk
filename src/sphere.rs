@@ -85,16 +85,13 @@ impl Terrain {
         // ridged mountains, gated by a smooth mask so only some regions are alpine
         let mut h = smooth;
         if self.rugged > 0.0 {
-            let ridge = 1.0 - 2.0 * hills_n(dir, self.seed.wrapping_add(101), 6).abs();
-            let mask = (hills_n(dir, self.seed.wrapping_add(202), 4) * 1.6 - 0.15).clamp(0.0, 1.0);
+            let (ridge, mask) = self.ridge_parts(dir);
             h += self.rugged * 1.7 * ridge.max(0.0) * mask;
         }
         // craters: smooth bowls with a raised rim
         for i in 0..self.craters {
-            let c = hash_dir(self.seed.wrapping_add(31), i);
+            let (c, w) = self.crater(i);
             let ang = dir.angle_between(c);
-            let w = self.crater_width
-                * (0.7 + 0.6 * (i.wrapping_mul(2654435769).wrapping_add(7) % 100) as f32 / 100.0);
             if ang < w {
                 let t = ang / w;
                 let bowl = -((t * std::f32::consts::PI).cos() * 0.5 + 0.5);
@@ -107,6 +104,173 @@ impl Terrain {
 
     pub fn surface(&self, dir: Vec3, radius: f32) -> f32 {
         radius * (1.0 + self.amp * self.height(dir))
+    }
+
+    /// The ridged-mountain field before it is scaled into metres: the ridge profile (1 on a
+    /// crease, falling off either side) and the alpine mask that gates it.
+    fn ridge_parts(&self, dir: Vec3) -> (f32, f32) {
+        let ridge = 1.0 - 2.0 * hills_n(dir, self.seed.wrapping_add(101), 6).abs();
+        let mask = (hills_n(dir, self.seed.wrapping_add(202), 4) * 1.6 - 0.15).clamp(0.0, 1.0);
+        (ridge, mask)
+    }
+
+    /// How much ridged mountain stands at `dir`, 0..1 (× rugged × 1.7 × amp × radius is its
+    /// height in metres). Zero on a world without mountains.
+    pub fn ridge(&self, dir: Vec3) -> f32 {
+        if self.rugged <= 0.0 {
+            return 0.0;
+        }
+        let (ridge, mask) = self.ridge_parts(dir);
+        ridge.max(0.0) * mask
+    }
+
+    /// Crater `i`'s centre and angular radius.
+    fn crater(&self, i: u32) -> (Vec3, f32) {
+        let c = hash_dir(self.seed.wrapping_add(31), i);
+        let w = self.crater_width
+            * (0.7 + 0.6 * (i.wrapping_mul(2654435769).wrapping_add(7) % 100) as f32 / 100.0);
+        (c, w)
+    }
+
+    /// Inside any crater's bowl (rim included).
+    pub fn in_crater(&self, dir: Vec3) -> bool {
+        (0..self.craters).any(|i| {
+            let (c, w) = self.crater(i);
+            dir.angle_between(c) < w
+        })
+    }
+
+    /// The Grind-Line spines (GDD §4 "ridged-mountain crests expose a thin grindable
+    /// spine"): the crest lines of the ridged-mountain field, as polylines of unit
+    /// directions GRIND_STEP metres apart, on a planet of `radius`.
+    ///
+    /// A crest is FOLLOWED, not solved for: the ridge term is a creased profile times a
+    /// smooth mask, and where the mask is high the crease itself has usually wandered off
+    /// into the foothills — so the crest is the running maximum ACROSS the range: step along
+    /// it, then re-centre on the highest point of a short cross-section. A trace stops where
+    /// the range fades (below GRIND_CREST_MIN), flattens out across (the maximum sits at the
+    /// section's edge: a slope, not a crest), turns harder than a rail can, drops into a
+    /// crater bowl, closes its own loop, or meets a crest already traced. A pure function of
+    /// the terrain — no RNG — so every machine traces the same rails.
+    pub fn ridge_spines(&self, radius: f32) -> Vec<Vec<Vec3>> {
+        use crate::config::{GRIND_CREST_MIN, GRIND_MAX_TURN_DEG, GRIND_MIN_LEN, GRIND_SEEDS, GRIND_STEP};
+        use std::collections::HashSet;
+        let mut out = Vec::new();
+        if self.rugged <= 0.0 {
+            return out;
+        }
+        // cells of crest already traced, so each crest is traced once
+        let cell = 2.5 / radius;
+        let key = |d: Vec3| (d / cell).floor().as_ivec3();
+        let mut visited: HashSet<IVec3> = HashSet::new();
+        let min_turn = GRIND_MAX_TURN_DEG.to_radians().cos();
+        let usable = |d: Vec3, visited: &HashSet<IVec3>| {
+            self.ridge(d) >= GRIND_CREST_MIN && !self.in_crater(d) && !visited.contains(&key(d))
+        };
+        // a crest can't be longer than a lap of the planet
+        let max_steps = (std::f32::consts::TAU * radius / GRIND_STEP) as usize;
+        for seed in fib_sphere(GRIND_SEEDS) {
+            if self.ridge(seed) < GRIND_CREST_MIN || visited.contains(&key(seed)) {
+                continue;
+            }
+            // Climb onto the crest up the slope; the crest then runs square to that climb.
+            let Some(across) = self.ridge_gradient(seed).try_normalize() else { continue };
+            let Some(start) = self.crest_across(seed, across, radius) else { continue };
+            if !usable(start, &visited) {
+                continue;
+            }
+            let run = start.cross(across).normalize();
+            let mut line = vec![start];
+            for sign in [1.0f32, -1.0] {
+                let mut here = start;
+                let mut heading = run * sign;
+                let mut leg: Vec<Vec3> = Vec::new();
+                for _ in 0..max_steps {
+                    let ahead = offset_dir(here, heading, GRIND_STEP, radius);
+                    let side = ahead.cross(heading).normalize_or_zero();
+                    let Some(next) = self.crest_across(ahead, side, radius) else { break };
+                    if !usable(next, &visited) {
+                        break;
+                    }
+                    let step = next - here;
+                    let Some(dir) = (step - next * step.dot(next)).try_normalize() else { break };
+                    if dir.dot(heading) < min_turn {
+                        break;
+                    }
+                    // back where it started: a closed ring, so stop before doubling it
+                    if leg.len() > 10 && arc_dist(next, start, radius) < 2.0 {
+                        break;
+                    }
+                    leg.push(next);
+                    here = next;
+                    heading = dir;
+                }
+                if sign > 0.0 {
+                    line.extend(leg);
+                } else {
+                    leg.reverse();
+                    leg.extend(line);
+                    line = leg;
+                }
+            }
+            for d in &line {
+                visited.insert(key(*d));
+            }
+            if (line.len() - 1) as f32 * GRIND_STEP >= GRIND_MIN_LEN {
+                out.push(line);
+            }
+        }
+        out
+    }
+
+    /// Gradient of the ridge term on the tangent plane at `dir`, per radian.
+    fn ridge_gradient(&self, dir: Vec3) -> Vec3 {
+        let (t, b) = tangent_frame(dir);
+        let e = 1e-3;
+        let dt = self.ridge((dir + t * e).normalize()) - self.ridge((dir - t * e).normalize());
+        let db = self.ridge((dir + b * e).normalize()) - self.ridge((dir - b * e).normalize());
+        (t * dt + b * db) / (2.0 * e)
+    }
+
+    /// The highest point of the ridge term on a short cross-section through `dir` along
+    /// the unit tangent `side`, or None when the section holds no crest — its maximum sits
+    /// at an end, so this is a slope rather than a ridge.
+    fn crest_across(&self, dir: Vec3, side: Vec3, radius: f32) -> Option<Vec3> {
+        const HALF: f32 = 2.0; // metres either side
+        const SAMPLES: usize = 9;
+        let at = |x: f32| offset_dir(dir, side, x, radius);
+        let xs = |k: usize| (k as f32 / (SAMPLES - 1) as f32 * 2.0 - 1.0) * HALF;
+        let (best, _) = (0..SAMPLES)
+            .map(|k| (k, self.ridge(at(xs(k)))))
+            .fold((0, f32::MIN), |acc, (k, v)| if v > acc.1 { (k, v) } else { acc });
+        if best == 0 || best == SAMPLES - 1 {
+            return None;
+        }
+        // refine: step toward whichever neighbour is higher, halving the step each time
+        let mut x = xs(best);
+        let mut h = HALF / (SAMPLES - 1) as f32;
+        for _ in 0..6 {
+            let (l, c, r) = (self.ridge(at(x - h)), self.ridge(at(x)), self.ridge(at(x + h)));
+            if l > c && l >= r {
+                x -= h;
+            } else if r > c {
+                x += h;
+            }
+            h *= 0.5;
+        }
+        Some(at(x))
+    }
+
+    /// The terrain's slope at `dir` on a planet of `radius`: the tangent vector pointing
+    /// straight UPHILL, with length = rise per metre (0 on flat ground). A sliding
+    /// astronaut accelerates down it (§4 slope-boost).
+    pub fn slope(&self, dir: Vec3, radius: f32) -> Vec3 {
+        let (t, b) = tangent_frame(dir);
+        let e = 0.5 / radius; // half a metre either side
+        let s = |d: Vec3| self.surface(d.normalize(), radius);
+        let dt = s(dir + t * e) - s(dir - t * e);
+        let db = s(dir + b * e) - s(dir - b * e);
+        (t * dt + b * db) / (2.0 * e * radius)
     }
 }
 

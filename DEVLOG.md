@@ -1,5 +1,245 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P18 lands: the §11 co-op rules
+- **P18:** a downed astronaut becomes a **Tumbling Beacon** — it rolls down the terrain's fall
+  line under a planet-high flare (faded near the camera) while its **Static Meter** fills; a
+  teammate standing in the ring for 3 s revives it at 50% HP and gets **Hero's Adrenaline**
+  (+20% speed, 5 s); a full meter means The Static claims it until the next teleporter, where it
+  rejoins at 50%. The §11 party table scales crowd and boss HP; spawns anchor on standing
+  astronauts. **Friendly physics** (no friendly damage): swings nudge, blasts and Slams pop,
+  cryo fields chill, Tesla arcs jolt. **Drop-in**: a peer seated 20 s+ into a run falls from
+  orbit at half the squad's level and fights on autopilot while idle. **STATIC CASCADE** (two
+  storm-callers 120°+ apart wrap the planet in a lightning belt) and three named duos (Deep
+  Freeze Protocol, Magnet Circus, Rivet & Rescue) with a squad callout on results. Squad HUD,
+  Beacon edge markers, the downed player's own panel.
+- **Co-op wire:** PlayerVitals carries the down/claim/meter/revive/adrenaline/chill/grace
+  fields; RunSnapMsg the cascade charge and squad tally; five hazard-lane one-shots (Revived,
+  Shove, Cascade, Duo, DropIn); `PROTOCOL_ID` 0xA570B0_C.
+- **Reconciled on landing:** P12's `HitMsg.weapon` and P18's `HitMsg.by` answered the same
+  question; one `HitBy` remains with `HitMsg::weapon()` for P12's readers. A Beacon no longer
+  lifesteals from shots in flight, regenerates, or takes hits that would reset its meters.
+- **Verified:** smoke 6/6; `--revive/--cascade/--duos --coop2`, `--dropin`, `--coop4`, plus
+  `--weapons base|evolve`, `--bestiary all --coop2`, `--daynight --coop2`, `--hazards`,
+  `--overflow` on the merged tree; a two-instance run with `--dev --downpeer` (a revive over the
+  wire, then a real party wipe at 70 s).
+
+## 2026-09-27 — P08 lands: seven new enemies and per-world spawn tables
+- **P08:** the batch-1 §9 bestiary, each with its own behaviour, silhouette and one emissive
+  accent: Rollo (great-circle roller that runs away downhill and bonks on walls), Trencher
+  (tunnels under a ridge, uppercuts grounded astronauts), Aegis Drone (slow-turning front shield,
+  10% through it, reads BLOCK), Sunskimmer (whining kamikaze diver, shootable at altitude via its
+  column hitbox), Beacon Tick (6 s tracker that pulls the horde), Mimic Chest (14% of chests,
+  rolled with the layout; eats the price, shockwaves, flees, refunds the payer on death), Longshot
+  Beamer Prime (leads its mark; hills block the railbolt). The director draws kinds from per-world
+  spawn tables; `enemies::spawn_enemy_at` is the one entry point for adds.
+- **Co-op:** kind codes 9-15, a new enemy-state lane for what a client cannot derive, five
+  hazard-lane events; `PROTOCOL_ID` 0xA570B0_B (after P07/P12's bumps).
+- **Reconciled on landing:** P07's night pace (`Sun::enemy_speed`) and Beacon tracking combine
+  in the movers; P12 stuns hold the Rollo, Trencher, Skimmer, Tick, Mimic and Aegis (a stunned
+  Skimmer mid-dive pops); P12's Bell-mark crit and the Aegis block share `apply_hits`.
+- **Verified:** smoke 6/6; `--bestiary all` solo and co-op; windowed `--dev --enemies all`.
+- **Found:** the UI font draws the em dash as a box ("YOU □ THE HORDE") — logged as L66.
+
+## 2026-09-27 — P12 lands: the Tier-1 weapons play as §6 describes
+- **P12:** `arsenal.rs` gives the six newest weapons their own behaviours — lobbed Meatball Comet
+  (RAGÙ RAIN splits x3), Static Cling's hug field (FULL DISCHARGE's periodic nova), the Ricochet
+  Disc bouncing enemy to enemy and lapping the planet (THE OMNIDISC), the Whoopee's cone shove +
+  stun (THE BROWN NOTE's repulsor ring), the Bell's 4 s tolls marking foes for +crit (THE
+  ANGELUS's friendly wisps), the un-hit-combo Yo-Yo (SWORD-YO's garrote) with a HUD combo. The
+  §12 evolution fanfare runs on every machine; §13 hitstop only on the local player's kills,
+  sparse (50/90/130 ms, evolved +20 ms); the 1.8° shake clamp holds at the camera; stunned foes
+  cannot attack. `--weapons base|evo|evolve|<names>` and `--dev --evolvenow` probes.
+- **Reconciled/fixed on landing:** one cryo-slow path (`HitMsg.weapon`; P30's `SlowMsg` removed);
+  the camera's grade comes from the toon bundle and the fanfare dips relative to it; the melee
+  swing is a see-through, shadowless crescent over the arc that hit instead of a solid orange
+  slab; the weapon probe judges close-range hits only on runs that brought foes into reach.
+- **Verified:** smoke 6/6; `--weapons` base/evo/evolve solo and co-op, with `--fast-boss` (nova
+  134 hits, repulsor 117); windowed swings (via a temporary 2 s swing life) and the fanfare;
+  co-op 60 s (client 107 proxies, `local_sim=0`).
+
+## 2026-09-27 — P07 lands: the turning sun, night rules and the world gimmicks
+- **P07:** `daynight.rs` — ONE sun (`Sun::of`) replacing the fixed `sunward`/`is_night`; the host
+  turns it and eats it (Devoured Sun Shard + Cursed Δ every 60 s toward night-lock), both on
+  `RunSnapMsg`, clients dead-reckon; lighting follows it everywhere (a lit crash site at the
+  start); night = +15% horde pace, spawns 20% closer, +25% kill Gold, the Static fading at
+  night; the Moon's Earthside/Farside (Earthlight, brighter gems, +20% elites). `gimmicks.rs` —
+  Mars thorn flora snags, Dark Moon spore caps (telegraphed, hazard lane), The Crawl (Static
+  massing seen through the crust via an x-ray material, then erupting as The Static rises).
+  Headless `--daynight` / `--hazards` probes assert the numbers.
+- **Reconciled on landing:** the toon rim now follows `daynight::SunLight` (P03's stand-in sun
+  is gone); `daynight::apply_sky` is the one ambient writer and its night end is P36's toon
+  night fill (P07's own night ambient fields removed); `--warp` uses the live sun.
+- **Fixed on landing:** the Crawl's sites lagged the clock by a frame per level-up (a level-up
+  opening mid-frame stops the `playing` systems after `run_clock`), so after a few level-ups
+  they were not erupting when The Static rose — pre-Static mass is now derived from the clock.
+- **Verified:** smoke 6/6; `--daynight` solo/co-op, `--hazards` on Moon/Mars/Dark Moon solo and
+  co-op, `--overflow`; windowed Moon (lit start) and Dark Moon; co-op 60 s, identical layouts.
+
+## 2026-09-27 — P36 lands: the toon art style
+- **P36:** `toon.rs` patches bevy_pbr's own lighting module once it loads (3 cel steps, a hard
+  specular, a two-step flashlight cone) — every material in every lane gets the look with no
+  per-site changes, and crowd enemies keep one draw per kind — plus one fullscreen pass between
+  tonemapping and FXAA that inks silhouettes (depth second-difference) and creases (normal
+  prepass) and rims sun-facing edges. Per-world `ToonLook` (ink, night fill, saturation,
+  exposure, sky); stepped terrain height colours; sparer bloom; thicker ink in high-contrast.
+  `--dev --warp noon|dusk|night` gives windowed checks a lit view.
+- **Fixed while landing:** charge-shrine rings stood on their edge since v0.1 (an extra
+  quarter-turn on top of `frame_quat`) — they now lie flat and outline the 4.2 m zone; props now
+  keep 12 m (`START_CLEAR_ARC`) clear of the drop point, so a stage never opens with the camera
+  inside a boulder. The sky colour has one writer (`toon::apply_world_look`). P30's meshkit
+  winding fix kept over P36's duplicate.
+- **Verified:** build, smoke 6/6 (incl. the winding self-check), windowed Moon/Mars/Dark Moon at
+  noon, three fresh layouts with a clear start, co-op 50 s with identical layout checksums.
+
+## 2026-09-27 — P30 lands: the solo/save/world/combat known-issues sweep
+- **Context:** the second container wipe lost the first builds of P07/P08/P10/P12/P14/P22/P30/P32
+  and the partial P11/P13/P36. Rebuilt with GitHub backup branches (`claude/pensive-keller-0cood4-PXX`,
+  approved by the user) and a `tools/dev/` harness in the repo. Six lanes then ran until the
+  account's **weekly agent limit** (resets 2026-10-02 10:00 UTC) stopped every agent mid-build;
+  their work is saved on the backup branches, and the lead now lands it directly.
+- **P30:** the save counters bank again (H1: `bank_results` reads a run-long snapshot of the local
+  sheet; H2/H3 were already fixed by P01); the save format tolerates new counters, renamed content
+  and crashes mid-write (M13); meshkit winds outward (M12 — the astronaut's backpack and limbs no
+  longer render near-black in daylight); B/T dev keys need `--dev` (M14); pots are out of the cap
+  and overflow dissolves far stragglers into The Static with a per-stage backlog (L16, M16, M17);
+  the spatial hash scans only reachable cells (M18); ABANDON clears the pause overlay (M19);
+  per-planet skies (L6); props kept clear of interactables; cached terrain and rig assets (L8/L9).
+- **Verified:** build (21 warnings, none new), smoke 6/6, `--overflow` solo + co-op (4000 ticks),
+  windowed solo 32 s, two-instance co-op 50 s (client 93 proxies, `seq_gaps=0`).
+- **Not done:** the independent adversarial review (the agent limit hit first); the lead reviewed
+  the save-format change line by line.
+
+## 2026-09-27 — Wave 3: P05 Tomes 8 → 23 + loadout + P06 Movement techs + Antipode Blink
+- **P05:** all 15 GDD §7 tomes as stat lines folded by `recompute_stats` (so a joiner's own tomes
+  reach the host in `PlayerBuildMsg`), each wired to its effect site (`tomes.rs` has the table);
+  10 ranks at 100·1.6^rank Silver, a 4-slot loadout (`TOME_SLOTS_MAX` 8 via quests), `MetaSave.version`
+  + `migrate()` (old 20-level tomes → ceil(L/2) ranks, slots rebuilt from quests, unowned tomes
+  dropped from the loadout); the TOME LIBRARY screen (`AppState::Tomes`, scrolling card grid);
+  HUD CROWD/NIGHT/MOMENTUM and a pause TOMES line; Horizon calls on the pickup lane (+ HorizonSettle),
+  Nightfall's beam on `NetItemVis.lamp`; Static Silver paid once at banking; Elite excludes bosses.
+- **P06:** new `techs.rs` — the Slam (air slide held → dive → host shockwave that needs a ramp:
+  `player::steer` lets a wish steer above run speed but never add to it), Grind-Lines traced from
+  the terrain's ridge crests (one merged rail mesh, interactables kept 2.5 m clear), the Antipode
+  Blink item (Q, exact antipode, momentum turned about the camera axis, HUD dial) with Boomerang
+  Insurance routed through it, F flashlight, 60% air control, Shift slide, slope-boost and slide
+  plow; joiner edge presses ride `PlayerInputMsg` as wrapping counts (`EdgePresses`).
+- **Integration:** conflicts in 5 files (`net.rs`, `items.rs`, `player.rs`, `main.rs`, `headless.rs`).
+  Both branches took `PROTOCOL_ID` 0xA570B0_7, so the merged wire is `_8`; `NetItemVis` carries
+  P05's `lamp` then P06's `blink_cd`/`antipode`; netcode notes are 2g TOMES, 2h MOVEMENT TECHS.
+  Cross-package fixes: both packages wrote the flashlight's intensity (P05 every frame for
+  Nightfall, P06 on the F toggle), so Nightfall would have relit a beam switched off — now
+  `sync_flashlights` only keeps the switch and `tomes::apply_flashlights` (ordered after it) is the
+  one writer (`FlashlightBeam.on` × Flashlight stat), and the duplicate `FLASHLIGHT_INTENSITY` is
+  gone. Found in review: a Dead Man's Tether rewind (or a joiner's snap to its host copy) while
+  riding a rail was pulled straight back onto the rail by the next `ride_rail`, and a Slam dive
+  in the air survived the teleport — `MoveTech::cancel_moves` now runs on every teleport
+  (`blink_body`, `combat::move_astronaut`, `net::reconcile_own_astronaut`). Probe hardening:
+  Ricochet's fast-boss check was flaky (every shot spent its pierce before coming down), so the
+  probe now brings a shot the real firing path rolled a skip for to the end of its life; the
+  `--techs` darkmoon co-op Slam stage could bank a dud when the flight brushed a prop; the XP
+  pipeline checks skip `--staticnow` (no kill drops XP while The Static is up); the tome probe
+  lays its over-the-horizon gems only for Tome of the Horizon; `--techs` with `--tomes` is refused
+  (the two probes stage conflicting scenes on the same ticks).
+- **Verified:** build clean (22 warnings, all pre-existing). Smoke 6/6 PASS. Every P05/P06 flag
+  passes: `--tomes all` (solo, `--coop2`, fast-boss mars), rank-1 banishment/ascension/duplication,
+  rank-3 horizon/ricochet, fast-boss elite/static, `--staticnow` (solo, fast-boss, co-op), rank-5
+  co-op duplication/banishment; `--techs` on moon/mars/darkmoon-coop2/coop2/fast-boss-coop2
+  (darkmoon repeated ×4), `--items new` (solo + co-op), `--deathsave` and `--deathsave --coop2
+  --assist`. Windowed: solo 56 s clean; `--dev --tomes all --items antipodeblink,boomeranginsurance`
+  with real keys — F turned the light off, Q blinked (blink_cd 11), ESC's pause panel fits the
+  stats, the TOMES line and the new controls line; main menu and TOME LIBRARY render. Real co-op
+  70 s: identical layout/interactable sums on both sides, client streams proxies with
+  `local_sim=0`, `seq_gaps=0`, no panics.
+- **Known gaps:** Nightfall reads a fixed sun until P07 (which must replace `planet::is_night`);
+  Microwave Gold price/Salvage discount wait for P16; Duplication/Salvage are host-only until P14;
+  Golden Tome max ×1.5 (GDD formula) vs the old ×2.0 is a design call; Antipode Blink mastery
+  ladder P21/P26; antipode dial until P24's threat ring; no gamepad (P27); jump hang ~0.73 s vs
+  GDD ~1.2 s; no tome/tech numbers playtested; `CLAUDE.md` module map lacks `techs`/`tomes`.
+
+## 2026-09-27 — Wave 2: P03 Items 22 → 38 + P04 Accessibility & display settings
+- **P03:** the 15 GDD §7 items (Orbital Yo-Yo, Comet Tail, The Overheat, Downhill Momentum,
+  Second Astronaut, Encirclement Bonus, Icarus/Anti-Grav Boots, Little Black Hole, Dead Man's
+  Tether, Cracked Helmet, The Static Radio, Widow's Ring, Signal Flare, Devoured Sun Shard) in
+  every loot pool; per-copy Rarity Grades (+50% per rung over native) and the Cursed family; one
+  `run::roll_item` for every loot source; ONE death-save resolver (Tether > Warden hook >
+  Antipode/Boomerang hook > Widow's Ring); host-simulated items with `NetItemVis` + item events on
+  the hazard lane; camera glides (never snaps) on a Tether rewind. Fixed: the teleporter never
+  opened for a boss killed during The Static; a joiner's gold was sent before its Gold gain.
+- **P04:** one tabbed settings panel (GENERAL/DISPLAY/VISION/ASSIST) from menu and pause;
+  simulation-picked colorblind palettes for danger + rarity; danger outlines; flash reduction and
+  photosensitivity that work through base color (unlit materials ignore emissive) with ONE
+  screen-wide flash budget; UI scale 75–150% that fits 720p/Steam Deck; damage-number modes;
+  0–100% screenshake; §13 assists (density, enemy damage, "one more chance") that flag the run
+  ASSISTED and keep a separate daily board; telegraph rings lie flat and read by shape/motion;
+  Burrower crack decals (on the hazard lane for joiners).
+- **Integration:** conflicts in 10 files. `Rarity::color` takes the palette, and every palette
+  gained a Cursed color (Standard keeps P03's static-magenta, which collapses to ΔE 3.6 against a
+  grade for deuteranopes; picked by the same Machado-2009/CIELAB scoring: olive for deut/prot, min
+  ΔE 40.7; violet for tritanopes, min ΔE 33.8); the VISION swatches show it. P04's photosensitive
+  chain zaps were ported into P03's `fire_volley` (so Second Astronaut's ghost zaps share the
+  budget too; an empty chain no longer spends it). `apply_player_hits`: damage = hit × assist ×
+  Cracked Helmet's damage taken × armor; on a lethal hit the item resolver goes first and the
+  revive token is the LAST link, as both packages documented. Chest/shop/pause take P04's
+  fit-to-screen layout with P03's grade colors and graded lines. Both branches had taken
+  `PROTOCOL_ID` 0xA570B0_5, so the merged wire is `_6`; HazardEvent keeps P03's variants, then
+  P04's `Crack`, appended. Cross-package fixes: the in-run panels' bottom band now follows the
+  weapon tray's real height (P03's wrapping item chips put P04's level-up status line on top of
+  the second chip row at 150%), the item status line steps aside under panels like the tutorial
+  line, the `--assist` probe expects Cracked Helmet's ×2, and `--deathsave` now scripts the whole
+  chain (with `--coop2 --assist`: Tether → Widow's Ring → one more chance → down).
+- **Verified:** build clean (24 warnings, all pre-existing). Smoke 6/6 PASS plain and with
+  `--assist`. Every P03/P04 headless flag passes (ITEMS OK on moon/darkmoon/coop2, DEATHSAVE OK,
+  Radio/Shard/Flare fast-boss co-op, ASSIST OK ×4), plus the new combined
+  `--coop2 --deathsave --assist` (normal and fast-boss). Windowed: solo 56 s clean, main menu and
+  VISION tab (6 swatches) clean; `--items new --assist --give stormcore,deathray --a11y
+  deut,outline,flash,photo,ui=125,numbers=crits` ran to results with the ASSISTED RUN line and a
+  spent token; level-up at 150% with 15 items sits clear of both chip rows. Real co-op 70 s:
+  client streams proxies with `local_sim=0`; a 90 s co-op run with items + assists + outline/photo
+  shows item events crossing the wire, both revive tokens spent after the item saves, and the
+  joiner's HUD reading WIDOW +30% / TETHER SPENT / ONE MORE CHANCE: USED with the Widow halo.
+- **Known gaps:** Boomerang Insurance out of the pools until P06; Warden hook (post-1.0); Sun Shard
+  stand-in until P07; joiners don't see teammates' ghost/Anti-Grav volleys, damage numbers or a
+  results screen; §13 enemy-outline thickness and clutter merge moved to P24; no playtest of grade
+  steps, cursed rates, proc numbers or assist ranges. Seen, pre-existing (not wave 2): the
+  results screen always shows LEVEL 1 / GOLD 0 and `counters.best_level` never passes 1, because
+  `bank_results` (OnEnter Results) reads the LocalPlayer after `despawn_stage` (OnExit InRun) has
+  removed it; some UI strings still use glyphs the font lacks.
+
+## 2026-09-27 — Wave 1: P01 Core rules conformance + P02 Co-op client parity
+- **P01:** new `run::scaling` is the one place enemy scaling is worked out (GDD §3 HP/DMG/spawn/
+  elite over chain-wide `t`, depth `d`, planet threat `T`, Difficulty `Δ`; spawn rate follows the
+  §3 run-arc beats and "breathes" around bosses). Choice economy: 2 free refreshes then
+  15·1.5^n Gold (Fortuna always free), Skip pays XP + Gold, 3 Banish charges. Evolution cap 1
+  (`evo_cap()` hook for Tome of Ascension). Guaranteed MINIBOSS CACHE after miniboss #1 (free
+  pick of 3 items, replicated via `RunSnapMsg.reward_chest`). §10 Silver payout with an itemised
+  results breakdown. Fixed never-incremented chest/evolve counters (Chests10 / EvolveWeapon
+  quests were uncompletable). Pause screen shows threat + economy.
+- **P02:** joiners get parity: per-astronaut Comet Combo (`NetComet`), Mars dust storm on clients
+  (`InStorm` hides a peer from ranged enemies), Anubot beam + Beamer aim lines drawn on clients,
+  teammates wear their own hero (`NetHero`, hero rides the connect token). Sessions outlive runs
+  (`RunOverMsg`, `run_gen`), clean leave/end-session paths with readable reasons, soft client
+  reconciliation, and fixes for the HOST CO-OP menu crash and the `--stagenow` co-op insert panic.
+- **Integration:** conflicts in `enemies.rs` (imports), `headless.rs` (P01 `balance_probe` + P02
+  `tally_xp`; P02's per-link XP-pipeline check kept, it already covers the fast-boss flake P01
+  skipped) and `net.rs` (both added `RunSnapMsg` fields). Both packages had bumped `PROTOCOL_ID`
+  to `0xA570B0_3` independently, so it is now `0xA570B0_4`. Cross-package fix: windowed
+  `--bossnow` (P02) now also winds `total_elapsed`, which P01's scaling reads, so the boss
+  arrives with the late-game horde at late-game HP as `--fast-boss`/`--minibossnow` already do.
+- **Verified:** build clean (33 warnings, all pre-existing). Smoke matrix 6/6 PASS, plain and with
+  `--choices`; every new P01/P02 headless flag passes (RULES OK, CHOICES, miniboss cache on
+  moon/darkmoon/coop2, COMETPEER, STORMPEER, PEERHERO, fortuna `--choices` no longer hangs);
+  `--fast-boss --coop2` 12/12. Windowed solo 56 s and main menu clean; level-up panel shows
+  Refresh/Banish/Skip; solo, co-op host and co-op client pause menus show P01's threat lines
+  with P02's session buttons. Real co-op 70 s: client streams proxies with `local_sim=0`;
+  `--dev --minibossnow --stagenow` co-op shows the cache on both machines in the same second,
+  client rebuilds stage 1 with a matching layout, the wipe ends the run and the session stays
+  open; Mars `--bossnow` co-op draws the Anubot beam, aim lines and storm on both sides.
+- **Known gaps:** balance not human-playtested (§3 curve is softer in late T1, harder in chained
+  worlds; `--balance` probe); Silver income outpaces v0.1 sinks until P05/P21/P26; co-op client
+  can't open the miniboss cache (P14); joiners bank nothing (host-only save; no owner yet);
+  version mismatch shows only after the ~15 s netcode timeout; several pre-existing UI strings
+  still use glyphs missing from the ASCII-only font.
+
 Entries are newest first.
 - From Session 2l on, **every commit has its own entry, tagged with its hash**, and dates are git commit dates (US Eastern).
 - Sessions 1 to 1m carry their original pre-git dates (2026-07-13). git dates the first commit, 02300e3, to 2026-07-23; see the note in Session 1c. **The commit hashes are authoritative for ordering.**

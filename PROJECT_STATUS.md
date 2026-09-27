@@ -248,10 +248,10 @@ cargo build --release          # produces target/release/astrobonk.exe (~69 MB),
 | 1-4 | Pick a level-up card. On the chest panel, 1 takes and 2 leaves; in the shop, 1-3 buy | src/ui/panels.rs:160, 328-334, 450 |
 | R / B / S | Refresh / Banish / Skip on the level-up panel. **S is also move-back** | src/ui/panels.rs:171-183 |
 | Esc | Pause and resume (Settings and Abandon Run are in the pause menu); also closes panels | src/ui/panels.rs:525-526, 568 |
-| **B (DEV)** | **Summons the current planet's stage boss** during play. It shares the key with Banish. This ships ungated (M14) | src/enemies.rs:913-936 |
-| **T (DEV)** | Replays the tutorial | src/tutorial.rs:42-45 |
+| **B (DEV, `--dev` only)** | **Summons the current planet's stage boss** during play (gated since P30, M14) | src/enemies.rs `debug_spawn_boss` |
+| **T (DEV, `--dev` only)** | Replays the tutorial | src/tutorial.rs |
 
-**Known text error:** tutorial line 4 says "Shift to slide" (src/tutorial.rs:24). Slide is actually Ctrl or C.
+Slide is Shift, Ctrl or C since P06, so the tutorial's "Shift to slide" is true.
 
 ### 4.3 Headless smoke tests (no window)
 
@@ -723,3 +723,37 @@ For the current netcode picture, trust this section and docs/TECHNICAL_REFERENCE
 | 2026-09-26 | Verified catch-up audit; new creative direction locked; plan/ and docs/ written; published to GitHub | (documentation) |
 
 Session-by-session detail is in [DEVLOG.md](DEVLOG.md).
+
+---
+
+## 11. Build-out in progress (branch `claude/pensive-keller-0cood4`, PR #1)
+
+Since 2026-09-27 the rest of the game is being built package by package on
+`claude/pensive-keller-0cood4`. The plan and live status table are in
+[docs/BUILD_PLAN.md](docs/BUILD_PLAN.md); per-wave notes are at the top of DEVLOG.md.
+Sections 1-10 above describe `main` at 99d012f. They will be rewritten against the
+finished code in the final documentation pass (BUILD_PLAN P29). The locked creative
+direction in §2 is folded into the plan. Where the 2026-07 GDD and §2 disagree, §2 wins.
+
+Behaviour changes already merged on the branch that differ from §1-§10:
+- **Silver income vs sinks (since P01).** Banking follows the GDD §10 formula. A T1 run that
+   clears and then farms ~1:30 of The Static now banks about 4,700 Silver (about 2,300 from
+   the formula, mostly `kills / 4`, plus about 2,400 picked up). The v0.1 formula paid about
+   2,650 for the same run, and its performance part was about 250. The sinks are still v0.1
+   prices: tomes cost `8·l^1.5` over 20 ranks and quests pay 20-250 Silver. P05 moves tomes
+   to the §7 price (`100 × 1.6^level`, 10 ranks), P21 re-prices quests and P26 adds the
+   Unlock Web (1,200-15,000 per node). Until they land, meta progress runs fast.
+- **Enemy HP curve (since P01).** HP follows GDD §3, `(1 + 0.11·t)^1.35`, with `t` counted
+   across the whole chain, and is anchored so the cold-open Shambler still dies to one
+   starter hit (`config::SCALE_HP_BASE`). Late T1 is softer than the v0.1 curve (x2.7 at
+   10:00 vs x8). Chained worlds start far harder, because v0.1 reset to x1 at every
+   teleporter; a T3 finale now reaches about x11. Tune against `--headless 21000 --balance`,
+   which keeps the bot alive and prints spawns/s against kills/s and the live count every
+   30 s. Don't tune against bot deaths: the bot dies to contact damage around minute 3-4
+   whatever the curve.
+- **Co-op sessions (since P02).** A session outlives the host's runs: at run end the host
+   sends `RunOverMsg` and joiners return to the menu still connected, then follow the host into
+   its next run (`RunSnapMsg.run_gen` drops stragglers). Only the host banks; a joiner's Silver
+   lands in the shared run pot and the host's save. Per-player meta rewards for joiners have no
+   owning package yet. The pattern for new co-op features is a host-only SIM system plus an
+   ungated VISUALS system (see NETCODE NOTES 2e in `src/net.rs`); `--netlog` prints NETPARITY.

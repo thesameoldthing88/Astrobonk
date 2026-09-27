@@ -7,11 +7,12 @@ use crate::content::Rarity;
 use crate::fx::{self, Pcolor, ParticleAssets};
 use crate::messages::*;
 use crate::pickups::Pickup;
-use crate::planet::{random_dir, CurrentPlanet, StageScoped};
+use crate::planet::{random_dir, CurrentPlanet, PropColliders, StageScoped};
 use crate::player::Player;
-use crate::run::{ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
+use crate::run::{roll_item, ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
+use crate::techs::GrindLines;
 use bevy::prelude::*;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -32,15 +33,17 @@ pub enum InteractKind {
     Microwave,
     Cage,
     Teleporter,
+    /// The guaranteed cache miniboss #1 drops (§3 run arc): free, pick one of three.
+    RewardChest,
 }
 
 #[derive(Component)]
 pub struct Interactable {
     pub kind: InteractKind,
     pub used: bool,
-    /// Chests remember their rolled item; shady guys their stock.
-    pub chest_item: Option<ItemKind>,
-    pub stock: Vec<(ItemKind, u64, bool)>, // item, price, sold
+    /// Chests remember their rolled item (and its grade); shady guys their stock.
+    pub chest_item: Option<(ItemKind, Rarity)>,
+    pub stock: Vec<(ItemKind, Rarity, u64, bool)>, // item, grade, price, sold
 }
 
 #[derive(Component)]
@@ -60,7 +63,7 @@ pub struct InteractPrompt(pub Option<String>);
 #[derive(Resource, Default)]
 pub struct ChestPanel {
     pub open: bool,
-    pub item: Option<ItemKind>,
+    pub item: Option<(ItemKind, Rarity)>,
     pub cost: u64,
     pub chest: Option<Entity>,
 }
@@ -70,7 +73,7 @@ pub struct ChestPanel {
 pub struct ShopPanel {
     pub open: bool,
     pub vendor: Option<Entity>,
-    pub offers: Vec<(ItemKind, u64, bool)>,
+    pub offers: Vec<(ItemKind, Rarity, u64, bool)>,
 }
 
 pub struct InteractDefs;
@@ -85,46 +88,194 @@ impl InteractDefs {
             InteractKind::Microwave => Color::srgb(0.9, 0.9, 0.95),
             InteractKind::Cage => Color::srgb(0.5, 0.4, 0.3),
             InteractKind::Teleporter => Color::srgb(0.3, 1.0, 0.8),
+            InteractKind::RewardChest => Color::srgb(1.0, 0.78, 0.2),
         }
     }
 }
 
-fn roll_item(run: &PlayerState, luck: f32, rng: &mut impl Rng) -> ItemKind {
-    let rarity = Rarity::roll(luck, rng);
-    let candidates: Vec<ItemKind> = ItemKind::ALL
-        .iter()
-        .copied()
-        .filter(|i| !run.banned_items.contains(i))
-        .filter(|i| run.item_count(*i) < i.def().max_stacks)
-        .filter(|i| i.def().rarity == rarity)
-        .collect();
-    if let Some(i) = candidates.choose(rng) {
-        return *i;
+/// The miniboss cache's hand: `REWARD_CACHE_CHOICES` DISTINCT items rolled at bonus luck.
+/// A fork offering the same item twice is not a fork.
+pub fn reward_cache_options(ps: &PlayerState, rng: &mut impl Rng) -> Vec<UpgradeOption> {
+    let mut picked: Vec<(ItemKind, Rarity)> = Vec::new();
+    for _ in 0..REWARD_CACHE_CHOICES * 8 {
+        if picked.len() >= REWARD_CACHE_CHOICES {
+            break;
+        }
+        let (item, grade) = roll_item(ps, ps.stats.luck + REWARD_CACHE_LUCK, rng);
+        if !picked.iter().any(|(i, _)| *i == item) {
+            picked.push((item, grade));
+        }
     }
-    // fall back to anything available
-    let any: Vec<ItemKind> = ItemKind::ALL
-        .iter()
-        .copied()
-        .filter(|i| run.item_count(*i) < i.def().max_stacks)
-        .collect();
-    *any.choose(rng).unwrap_or(&ItemKind::SpaceBorgar)
+    picked.into_iter().map(|(i, g)| UpgradeOption::item(i, g, ps)).collect()
 }
 
-fn price(rarity: Rarity, discount: f32) -> u64 {
-    let base = match rarity {
+/// A shrine/Moai hand: `n` rolled items, one card per item (two grades of one item is not a
+/// choice).
+fn item_hand(ps: &PlayerState, luck: f32, n: usize, rng: &mut impl Rng) -> Vec<UpgradeOption> {
+    let mut picked: Vec<(ItemKind, Rarity)> = Vec::new();
+    for _ in 0..n * 8 {
+        if picked.len() >= n {
+            break;
+        }
+        let (item, grade) = roll_item(ps, luck, rng);
+        if !picked.iter().any(|(i, _)| *i == item) {
+            picked.push((item, grade));
+        }
+    }
+    picked.into_iter().map(|(i, g)| UpgradeOption::item(i, g, ps)).collect()
+}
+
+/// Marks the one miniboss cache entity so `sync_reward_cache` can find it; remembers the
+/// stage it dropped on.
+#[derive(Component)]
+pub struct RewardCache {
+    pub stage: usize,
+}
+
+/// Keep the miniboss cache entity in step with `RunState::reward_chest`, on host AND client:
+/// the host sets/clears the field (miniboss #1 dies / cache opened) and a client adopts it
+/// from `RunSnapMsg`, so this one reconcile both spawns the chest where the corpse fell and
+/// pops it when anyone opens it — no separate wire event to lose.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_reward_cache(
+    mut commands: Commands,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    q: Query<(Entity, &Transform, &RewardCache)>,
+    particles: Option<Res<ParticleAssets>>,
+    role: Option<Res<crate::net::NetRole>>,
+    mut banners: MessageWriter<BannerMsg>,
+) {
+    let existing = q.iter().next();
+    match (run.reward_chest, existing) {
+        (Some(dir), None) => {
+            spawn_reward_cache(&mut commands, &mut meshes, &mut materials, &planet, dir, run.stage);
+            info!("REWARD miniboss cache up at {:.2?}", dir);
+            // Only the host's astronaut can open it until peers get interact requests (P14),
+            // so a client's banner must not promise a pick it can't take.
+            let client = role.is_some_and(|r| matches!(*r, crate::net::NetRole::Client));
+            let banner = if client { "MINIBOSS CACHE DROPPED" } else { "MINIBOSS CACHE DROPPED: FREE PICK" };
+            banners.write(BannerMsg(banner.into()));
+        }
+        (None, Some((e, tf, cache))) => {
+            // A client learns of a stage change in the same snapshot that clears the field;
+            // then the stage sweep takes the chest, and a gold burst would celebrate nothing.
+            let opened = cache.stage == run.stage;
+            if let (true, Some(pa)) = (opened, &particles) {
+                fx::burst(&mut commands, pa, tf.translation, tf.translation.normalize_or_zero(), Pcolor::Gold, 28, 9.0);
+            }
+            // try_: the stage sweep (StageScoped) can take it in the same frame
+            commands.entity(e).try_despawn();
+            if opened {
+                info!("REWARD miniboss cache opened");
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A gold chest on a pedestal under a tall light column — the column is what makes it
+/// readable from over the horizon, where it usually lands after a running miniboss fight.
+fn spawn_reward_cache(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    planet: &CurrentPlanet,
+    dir: Vec3,
+    stage: usize,
+) {
+    let c = InteractDefs::color(InteractKind::RewardChest);
+    let gold = materials.add(StandardMaterial {
+        base_color: c,
+        emissive: c.to_linear() * 2.2,
+        metallic: 0.6,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    let base_mat = materials.add(StandardMaterial {
+        base_color: c.darker(0.35),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let beam = materials.add(StandardMaterial {
+        base_color: c.with_alpha(0.35),
+        emissive: c.to_linear() * 2.5,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    let pos = planet.surface_point(dir);
+    let rot = sphere::frame_quat(dir, sphere::tangent_frame(dir).0);
+    commands
+        .spawn((
+            Interactable { kind: InteractKind::RewardChest, used: false, chest_item: None, stock: Vec::new() },
+            RewardCache { stage },
+            Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.95, 0.5)))),
+            MeshMaterial3d(base_mat),
+            Transform::from_translation(pos + dir * 0.25).with_rotation(rot),
+            StageScoped,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cuboid::new(1.3, 0.8, 0.85)))),
+                MeshMaterial3d(gold.clone()),
+                Transform::from_xyz(0.0, 0.8, 0.0),
+            ));
+            // domed lid, slightly proud of the box so the silhouette reads "chest"
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.43, 1.34)))),
+                MeshMaterial3d(gold),
+                Transform::from_xyz(0.0, 1.2, 0.0).with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+            ));
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.35, 40.0)))),
+                MeshMaterial3d(beam),
+                Transform::from_xyz(0.0, 20.0, 0.0),
+            ));
+        });
+}
+
+/// Shady Guy price by the grade the item was ROLLED at — a Legendary-grade Borgar costs
+/// what a Legendary does.
+fn price(grade: Rarity, discount: f32) -> u64 {
+    let base = match grade {
         Rarity::Common => 30.0,
         Rarity::Rare => 60.0,
         Rarity::Epic => 120.0,
         Rarity::Legendary => 240.0,
+        Rarity::Cursed => CURSED_ITEM_PRICE,
     };
     (base * (1.0 - discount)).round().max(1.0) as u64
 }
 
-/// A random direction at least `min_arc` meters (great-circle) from `avoid`.
-fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, avoid: Vec3, min_arc: f32) -> Vec3 {
+/// Where interactables may not stand: the Grind-Lines — a chest or a shrine on a rail would
+/// be ridden straight through — and the solid props (L7: one inside a big boulder could be
+/// neither reached nor jumped onto). Both are the terrain's and the stage seed's, the same on
+/// every machine, so the retries they cost keep the layout stream machine-independent.
+pub struct Keepout<'a> {
+    pub rails: &'a GrindLines,
+    pub props: &'a PropColliders,
+}
+
+impl Keepout<'_> {
+    fn clear(&self, d: Vec3, planet: &CurrentPlanet) -> bool {
+        self.rails.closest(d).is_none_or(|(arc, ..)| arc > GRIND_INTERACT_CLEARANCE)
+            && self.props.0.iter().all(|c| {
+                // compare cosines: no acos per prop per try
+                let reach = (c.radius + INTERACT_PROP_CLEARANCE) / planet.radius;
+                reach >= std::f32::consts::PI || d.dot(c.dir) < reach.cos()
+            })
+    }
+}
+
+/// A random direction at least `min_arc` meters (great-circle) from `avoid` and clear of
+/// the `Keepout`.
+fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, keep: &Keepout, avoid: Vec3, min_arc: f32) -> Vec3 {
     for _ in 0..40 {
         let d = random_dir(rng);
-        if sphere::arc_dist(d, avoid, planet.radius) > min_arc {
+        if sphere::arc_dist(d, avoid, planet.radius) > min_arc && keep.clear(d, planet) {
             return d;
         }
     }
@@ -140,9 +291,12 @@ pub fn spawn_interactables(
     run: &RunState,
     ps: &PlayerState,
     save: &MetaSave,
+    rails: &GrindLines,
+    props: &PropColliders,
     player_dir: Vec3,
 ) {
     let def = planet.kind.def();
+    let keep = Keepout { rails, props };
     // deterministic interactable layout + vendor stock from the run seed
     let mut rng = StdRng::seed_from_u64(run.run_seed.wrapping_add(run.stage as u64).wrapping_mul(0x9e37));
 
@@ -159,7 +313,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..def.pots {
-        let dir = place_dir(&mut rng, planet, player_dir, 8.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 8.0);
         let silverish = rng.gen_bool(0.1);
         commands.spawn((
             Pot { broken: false },
@@ -195,7 +349,7 @@ pub fn spawn_interactables(
     let pedestal = meshes.add(Mesh::from(Cylinder::new(0.8, 0.5)));
     let icon = meshes.add(Mesh::from(Sphere::new(0.4)));
 
-    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, u64, bool)>, chest_item: Option<ItemKind>| {
+    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| -> Entity {
         let c = InteractDefs::color(kind);
         let mat = materials.add(StandardMaterial {
             base_color: c,
@@ -229,36 +383,44 @@ pub fn spawn_interactables(
                     _ => Mesh3d(icon.clone()),
                 };
                 p.spawn((shape, MeshMaterial3d(mat), Transform::from_xyz(0.0, 1.0, 0.0)));
-            });
+            })
+            .id()
     };
 
-    // Chests
+    // Chests — some of them Mimics (§9). The roll is drawn for every chest from the layout
+    // stream, so both machines agree which ones bite; its first breath is hashed off where
+    // it stands, so the tell starts out of step from chest to chest.
     for _ in 0..7 {
-        let dir = place_dir(&mut rng, planet, player_dir, 12.0);
-        spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 12.0);
+        let mimic = rng.gen_bool(MIMIC_CHEST_CHANCE);
+        let chest = spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        if mimic {
+            let first = MIMIC_TELL_SECS.0 + (dir.x * 43.7 + dir.y * 9.1).fract().abs() * (MIMIC_TELL_SECS.1 - MIMIC_TELL_SECS.0);
+            commands.entity(chest).insert(crate::bestiary::MimicDisguise { tell: first, breath: 0.0 });
+        }
     }
     // Shady guys with pre-rolled stock (fixed at stage entry, luck applies now)
     for _ in 0..2 {
         let mut stock = Vec::new();
         for _ in 0..3 {
-            let item = roll_item(ps, ps.stats.luck, &mut rng);
-            stock.push((item, price(item.def().rarity, ps.stats.chest_discount), false));
+            let (item, grade) = roll_item(ps, ps.stats.luck, &mut rng);
+            stock.push((item, grade, price(grade, ps.stats.chest_discount), false));
         }
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::ShadyGuy, dir, stock, None);
     }
     // Shrines
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::GreedShrine, dir, Vec::new(), None);
     }
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::MagnetShrine, dir, Vec::new(), None);
     }
-    let dir = place_dir(&mut rng, planet, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, &keep, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Moai, dir, Vec::new(), None);
-    let dir = place_dir(&mut rng, planet, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, &keep, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Microwave, dir, Vec::new(), None);
     // The draw happens UNCONDITIONALLY even though the cage itself is conditional.
     // `place_dir` consumes a variable number of rng draws (it retries up to 40 times), so
@@ -266,12 +428,15 @@ pub fn spawn_interactables(
     // whose saves disagree about `chimp_freed` would then stand in DIFFERENT rings, and
     // "converge on the shrine together" silently cannot work. The cage stays per-machine
     // (it is a per-machine unlock); only the rng stream is made machine-independent.
-    let cage_dir = place_dir(&mut rng, planet, player_dir, 25.0);
+    let cage_dir = place_dir(&mut rng, planet, &keep, player_dir, 25.0);
     if planet.kind == crate::content::planets::PlanetKind::Moon && !save.counters.chimp_freed {
         spawn_simple(commands, InteractKind::Cage, cage_dir, Vec::new(), None);
     }
 
-    // Charge shrines (stand in the ring)
+    // Charge shrines (stand in the ring). Bevy's Torus lies in its local XZ plane and
+    // frame_quat maps local Y to the surface normal, so the ring lies flat on the ground and
+    // outlines the 4.2 m charge zone. (It used to take an extra quarter-turn about X, which
+    // stood it on its edge like an arch — the zone you stand in was never drawn.)
     let ring_mesh = meshes.add(Mesh::from(Torus::new(3.6, 3.9)));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.4, 1.0, 0.9),
@@ -281,7 +446,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..5 {
-        let dir = place_dir(&mut rng, planet, player_dir, 18.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 18.0);
         let pos = planet.surface_point(dir);
         commands.spawn((
             ChargeShrine { progress: 0.0, done: false },
@@ -289,7 +454,7 @@ pub fn spawn_interactables(
             Mesh3d(ring_mesh.clone()),
             MeshMaterial3d(ring_mat.clone()),
             Transform::from_translation(pos + dir * 0.2)
-                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0)),
             StageScoped,
         ));
     }
@@ -342,7 +507,7 @@ pub fn charge_shrines(
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     save: Res<MetaSave>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(&Transform, &PlayerState), With<Player>>,
     mut q: Query<(&mut ChargeShrine, &mut Transform), Without<Player>>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
@@ -351,7 +516,8 @@ pub fn charge_shrines(
     if dt <= 0.0 || *phase != RunPhase::Playing {
         return;
     }
-    let ppos: Vec<Vec3> = q_player.iter().map(|t| t.translation).collect();
+    // only astronauts standing charge a ring: not a Beacon rolling through it (L19)
+    let ppos: Vec<Vec3> = q_player.iter().filter(|(_, ps)| !ps.dead).map(|(t, _)| t.translation).collect();
     let mut rng = rand::thread_rng();
     for (mut s, mut tf) in &mut q {
         if s.done {
@@ -373,15 +539,7 @@ pub fn charge_shrines(
             sfx.write(SfxMsg(Sfx::Shrine));
             banners.write(BannerMsg("SHRINE CHARGED".into()));
             let Ok(ps) = q_ps.single() else { continue };
-            let mut opts = Vec::new();
-            for _ in 0..3 {
-                let item = roll_item(ps, ps.stats.luck + 0.3, &mut rng);
-                opts.push(if ps.item_count(item) == 0 {
-                    UpgradeOption::NewItem(item)
-                } else {
-                    UpgradeOption::ItemUp(item)
-                });
-            }
+            let opts = item_hand(ps, ps.stats.luck + 0.3, 3, &mut rng);
             *panel = ChoicePanel { title: "SHRINE BLESSING".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;
             let _ = &save;
@@ -402,7 +560,7 @@ pub fn interact_system(
     mut panels: (ResMut<ChestPanel>, ResMut<ShopPanel>),
     mut pending: ResMut<crate::director::PendingStage>,
     q_player: Query<(Entity, &Transform), (With<Player>, With<crate::player::LocalPlayer>)>,
-    mut q: Query<(Entity, &mut Interactable, &Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut Interactable, &Transform, Has<crate::bestiary::MimicDisguise>), Without<Player>>,
     mut pickups: Query<&mut Pickup>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
@@ -415,10 +573,15 @@ pub fn interact_system(
     }
     let Ok((actor_entity, ptf)) = q_player.single() else { return };
     let Ok(mut ps) = q_ps.single_mut() else { return };
+    // a Beacon can't open, buy or teleport (§11: the downed wait for a teammate)
+    if ps.dead {
+        prompt.0 = None;
+        return;
+    }
     let mut rng = rand::thread_rng();
 
     let mut nearest: Option<(Entity, f32)> = None;
-    for (e, i, tf) in q.iter() {
+    for (e, i, tf, _) in q.iter() {
         if i.used {
             continue;
         }
@@ -432,7 +595,7 @@ pub fn interact_system(
         prompt.0 = None;
         return;
     };
-    let Ok((_, mut inter, tf)) = q.get_mut(entity) else {
+    let Ok((_, mut inter, tf, is_mimic)) = q.get_mut(entity) else {
         prompt.0 = None;
         return;
     };
@@ -448,14 +611,17 @@ pub fn interact_system(
         InteractKind::MagnetShrine => "[E] Magnet Shrine (vacuum the planet)".into(),
         InteractKind::Moai => "[E] Consult the Moai".into(),
         InteractKind::Microwave => {
-            if run.microwave_used {
-                "The microwave hums, spent".into()
-            } else {
+            if ps.free_microwave > 0 {
+                "[E] Microwave (duplicate an item: FREE, Tome of Duplication)".into()
+            } else if !run.microwave_used {
                 "[E] Microwave (duplicate an item)".into()
+            } else {
+                "The microwave hums, spent".into()
             }
         }
         InteractKind::Cage => "[E] Open the cage".into(),
         InteractKind::Teleporter => "[E] TELEPORT OUT".into(),
+        InteractKind::RewardChest => "[E] Open the miniboss cache (free)".into(),
     });
 
     if !keys.just_pressed(KeyCode::KeyE) {
@@ -468,7 +634,24 @@ pub fn interact_system(
                 banners.write(BannerMsg("NOT ENOUGH GOLD".into()));
                 return;
             }
+            if is_mimic {
+                // Greed, punished (§9): trying the lid pays the price into its mouth. It
+                // springs (`bestiary::mimic_spring`); kill it and the payer gets it back.
+                ps.gold -= cost_now;
+                inter.used = true;
+                commands.entity(entity).insert(crate::bestiary::MimicSprung { payer: actor_entity, paid: cost_now });
+                return;
+            }
             let item = *inter.chest_item.get_or_insert_with(|| roll_item(&ps, ps.stats.luck, &mut rng));
+            // A chest that rolled an item it can no longer deal (capped since, or banished)
+            // rolls again rather than offering a dead card.
+            let item = if crate::run::item_available(&ps, item.0) {
+                item
+            } else {
+                let fresh = roll_item(&ps, ps.stats.luck, &mut rng);
+                inter.chest_item = Some(fresh);
+                fresh
+            };
             *panels.0 = ChestPanel { open: true, item: Some(item), cost: cost_now, chest: Some(entity) };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Chest));
@@ -499,35 +682,44 @@ pub fn interact_system(
         }
         InteractKind::Moai => {
             inter.used = true;
-            let mut opts = Vec::new();
-            for _ in 0..3 {
-                let item = roll_item(&ps, ps.stats.luck + 0.15, &mut rng);
-                opts.push(if ps.item_count(item) == 0 {
-                    UpgradeOption::NewItem(item)
-                } else {
-                    UpgradeOption::ItemUp(item)
-                });
-            }
+            let opts = item_hand(&ps, ps.stats.luck + 0.15, 3, &mut rng);
             *panel = ChoicePanel { title: "THE MOAI SPEAKS".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Shrine));
         }
         InteractKind::Microwave => {
-            if run.microwave_used || ps.items.is_empty() {
+            // The stage's own use, or a free one from Tome of Duplication (§7 "one free use
+            // per stage"). The free one goes first: P16 puts a Gold price (Salvage-discounted
+            // like chests) on the stage's own, and a free use is the one worth spending.
+            let free = ps.free_microwave > 0;
+            if (run.microwave_used && !free) || ps.items.is_empty() {
                 return;
             }
-            run.microwave_used = true;
-            let mut owned: Vec<ItemKind> = ps
+            // §7: a duplicate comes out one grade below the best copy held (never under the
+            // item's native grade) — unless Tome of Duplication's later ranks keep it whole.
+            // P16 adds the gamble and the Gold price.
+            let keep = ps.stats.dupe_keep_grade.clamp(0.0, 1.0) as f64;
+            let mut owned: Vec<(ItemKind, Rarity)> = ps
                 .items
                 .iter()
-                .filter(|(k, c)| *c < k.def().max_stacks)
-                .map(|(k, _)| *k)
+                .filter(|s| crate::run::item_available(&ps, s.kind))
+                .map(|s| {
+                    let steps = u32::from(!rng.gen_bool(keep));
+                    (s.kind, s.best().step_down(steps, s.kind.def().rarity))
+                })
                 .collect();
             owned.shuffle(&mut rng);
-            let opts: Vec<UpgradeOption> = owned.into_iter().take(3).map(UpgradeOption::ItemUp).collect();
+            let opts: Vec<UpgradeOption> =
+                owned.into_iter().take(3).map(|(k, g)| UpgradeOption::ItemUp(k, g)).collect();
             if opts.is_empty() {
+                // nothing to put in: the use is not spent
                 banners.write(BannerMsg("NOTHING FITS IN THE MICROWAVE".into()));
                 return;
+            }
+            if free {
+                ps.free_microwave -= 1;
+            } else {
+                run.microwave_used = true;
             }
             *panel = ChoicePanel { title: "MICROWAVE: DUPLICATE".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;
@@ -546,6 +738,17 @@ pub fn interact_system(
             inter.used = true;
             sfx.write(SfxMsg(Sfx::Teleport));
             pending.0 = Some(run.stage + 1);
+        }
+        InteractKind::RewardChest => {
+            // Clearing the field is what despawns the chest (sync_reward_cache), here and
+            // on every client.
+            inter.used = true;
+            run.reward_chest = None;
+            run.chests_opened += 1;
+            let options = reward_cache_options(&ps, &mut rng);
+            *panel = ChoicePanel { title: "MINIBOSS CACHE".into(), options, banishing: false, is_levelup: false };
+            *phase = RunPhase::Modal;
+            sfx.write(SfxMsg(Sfx::Chest));
         }
     }
 }

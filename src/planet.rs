@@ -1,9 +1,11 @@
 //! Planet + sky construction: icosphere terrain with analytic hills, scattered props,
-//! starfield, sun, and (on the Moon) an Earthrise.
+//! starfield, sun, and (on the Moon) an Earthrise. The sun turns in `daynight`; the flora's
+//! rules (thorns, spore caps) are `gimmicks`.
 
 use crate::content::planets::{FloraStyle, PlanetDef, PlanetKind};
 use crate::sphere::{self, Terrain};
 use bevy::asset::RenderAssetUsages;
+use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use rand::rngs::StdRng;
@@ -94,6 +96,23 @@ pub fn despawn_stage(mut commands: Commands, q: Query<Entity, With<StageScoped>>
     }
 }
 
+/// A stable handle for one terrain: keyed by everything `planet_mesh` reads, so a world
+/// whose constants change (or a future seeded terrain) never reuses a stale mesh. A
+/// `Handle::Uuid` does not reference-count, so the mesh outlives the stage that built it.
+fn terrain_mesh_handle(planet: &CurrentPlanet) -> Handle<Mesh> {
+    use std::hash::{Hash, Hasher};
+    let t = &planet.terrain;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (planet.kind, t.seed, t.craters).hash(&mut h);
+    for f in [planet.radius, t.amp, t.rugged, t.crater_depth, t.crater_width] {
+        f.to_bits().hash(&mut h);
+    }
+    Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(TERRAIN_MESH_UUID_HI, h.finish()), default())
+}
+
+/// The high half of every cached terrain mesh's UUID (the low half is the terrain's hash).
+const TERRAIN_MESH_UUID_HI: u64 = 0xA570_B0_7E_77A1_0001;
+
 /// Build the icosphere terrain mesh with per-vertex displacement + biome vertex colors.
 fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     // subdiv 7 gives ~4× the terrain resolution of the old mesh — crisper mountains,
@@ -111,8 +130,9 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
         let h = terrain.height(dir);
         let r = def.radius * (1.0 + def.hill_amp * h);
         positions.push([dir.x * r, dir.y * r, dir.z * r]);
-        // color by height band: crater floors dark, peaks bright
-        let t = (h * 0.38 + 0.5).clamp(0.0, 1.0);
+        // color by height band: crater floors dark, peaks bright — in flat painted steps
+        // (the toon look's contour bands), not a smooth ramp
+        let t = toon_height_band((h * 0.38 + 0.5).clamp(0.0, 1.0));
         let c = if t < 0.5 {
             mix(low, mid, t * 2.0)
         } else {
@@ -126,7 +146,34 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(faces));
     mesh.compute_smooth_normals();
+    toon_terrain_normals(&mut mesh);
     mesh
+}
+
+/// Snap a 0..1 terrain height to one of TOON_TERRAIN_BANDS flat color steps, each blending
+/// into the next over a sliver of height — a vertex apart, so the steps read as painted
+/// contour lines rather than as a staircase of triangles.
+fn toon_height_band(t: f32) -> f32 {
+    let n = crate::config::TOON_TERRAIN_BANDS as f32;
+    let x = t * n;
+    let step = x.floor().min(n - 1.0);
+    let edge = ((x - step - (1.0 - 0.15)) / 0.15).clamp(0.0, 1.0);
+    ((step + edge) / (n - 1.0)).clamp(0.0, 1.0)
+}
+
+/// Cel bands quantize N·L, so every small bump in a noisy normal field turns into a speckle
+/// of triangles flipping between bands. Lean the shading normals toward the planet's own
+/// radial normal: the terminator becomes one clean line across the world and only the big
+/// hills and crater walls step into their own bands. Visual only — collision stays analytic.
+fn toon_terrain_normals(mesh: &mut Mesh) {
+    let Some(pos) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else { return };
+    let radial: Vec<Vec3> = pos.iter().map(|p| Vec3::from(*p).normalize_or_zero()).collect();
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(nrm)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+        for (n, up) in nrm.iter_mut().zip(radial) {
+            let lean = up.lerp(Vec3::from(*n), crate::config::TOON_TERRAIN_NORMAL_DETAIL).normalize_or_zero();
+            *n = lean.to_array();
+        }
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
@@ -139,22 +186,30 @@ fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
 
 use crate::meshkit::icosphere;
 
-/// Spawn terrain, props, sky, lights for the current stage.
+/// Spawn terrain, props, sky, lights for the current stage. Returns the solid props and the
+/// Grind-Lines for the caller to insert as resources — after `interact::spawn_interactables`
+/// has placed the stage's chests and shrines clear of the rails.
 pub fn spawn_stage(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
     seed: u64,
-) -> PropColliders {
+) -> (PropColliders, crate::techs::GrindLines) {
     let def = planet.kind.def();
     // deterministic prop scatter from the run seed (terrain was already seed-driven)
     let mut rng = StdRng::seed_from_u64(seed ^ 0xA11CE ^ planet.terrain.seed as u64);
     // solid props collected as we place them
     let mut colliders: Vec<PropCollider> = Vec::new();
 
-    // Terrain
-    let mesh = meshes.add(planet_mesh(&def, &planet.terrain));
+    // The space behind the world (L6) is set with the rest of the planet's look by
+    // `toon::apply_world_look`, whenever CurrentPlanet changes.
+
+    // Terrain: 163,842 vertices of pure function of the planet's constants, so it is built
+    // once per world per session and re-used on every later visit (L8: rebuilding it on
+    // every stage entry and every retry was a hitch on host and joiner alike).
+    let mesh = terrain_mesh_handle(planet);
+    let _ = meshes.get_or_insert_with(&mesh, || planet_mesh(&def, &planet.terrain));
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
@@ -204,6 +259,9 @@ pub fn spawn_stage(
         );
         let dir = (dir + jitter).normalize();
         let scale = rng.gen_range(0.4..2.4) * Vec3::new(rng.gen_range(0.8..1.3), rng.gen_range(0.6..1.1), rng.gen_range(0.8..1.3));
+        if !clear_of_start(dir, planet) {
+            continue; // after the draws, so the rest of the layout is unchanged by the skip
+        }
         let pos = planet.surface_point(dir) - dir * scale.y * 0.25;
         let fwd = sphere::tangent_frame(dir).0;
         commands.spawn((
@@ -225,7 +283,7 @@ pub fn spawn_stage(
         .map(|i| make_rock(meshes, 400 + i * 17 + planet.terrain.seed, 0.6, 1))
         .collect();
     for _ in 0..(def.rocks / 20).max(4) {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let scale = rng.gen_range(3.0..6.0);
         let pos = planet.surface_point(dir) - dir * scale * 0.3;
         let fwd = sphere::tangent_frame(dir).0;
@@ -250,7 +308,7 @@ pub fn spawn_stage(
     });
     let crystal_mesh = meshes.add(Mesh::from(Cone::new(0.35, 1.6)));
     for _ in 0..def.crystals {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let pos = planet.surface_point(dir);
         let fwd = sphere::tangent_frame(dir).0;
         let scale = rng.gen_range(0.6..1.5);
@@ -283,7 +341,7 @@ pub fn spawn_stage(
         w.add_box(Vec3::new(0.9, 0.05, 0.7), at(Vec3::new(0.3, 0.75, -0.2)), Color::srgb(0.4, 0.4, 0.45)); // torn panel
         let wreck_mesh = meshes.add(w.build());
         for _ in 0..def.rocks / 45 + 3 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let scale = rng.gen_range(1.4..2.4);
             let pos = planet.surface_point(dir) - dir * scale * 0.4; // half-sunk
             let fwd = sphere::tangent_frame(dir).0;
@@ -321,7 +379,7 @@ pub fn spawn_stage(
         let beacon_mesh = meshes.add(b.build());
         let light_mesh = meshes.add(Mesh::from(Sphere::new(0.09)));
         for _ in 0..def.crystals / 8 + 4 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let rot = sphere::frame_quat(dir, fwd);
@@ -343,6 +401,7 @@ pub fn spawn_stage(
     }
 
     // Flora: per-world plant archetypes built from shared primitive parts.
+    let mut flora = crate::gimmicks::WorldFlora { style: (def.flora > 0).then_some(def.flora_style), plants: Vec::new() };
     if def.flora > 0 {
         let (part_a, part_b, mat_a, mat_b): (Handle<Mesh>, Handle<Mesh>, Handle<StandardMaterial>, Handle<StandardMaterial>) =
             match def.flora_style {
@@ -391,12 +450,12 @@ pub fn spawn_stage(
                 ),
             };
         for _ in 0..def.flora {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let scale = rng.gen_range(0.7..1.6);
             let rot = sphere::frame_quat(dir, fwd) * Quat::from_rotation_y(rng.gen_range(0.0..6.28));
-            commands
+            let plant = commands
                 .spawn((
                     Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
                     Visibility::default(),
@@ -434,8 +493,29 @@ pub fn spawn_stage(
                             ));
                         }
                     }
-                });
+                })
+                .id();
+            // §8 gimmicks read the flora: Mars's thorns snag, the Dark Moon's caps detonate
+            flora.plants.push(crate::gimmicks::Plant { dir, scale, entity: plant });
         }
+    }
+    commands.insert_resource(flora);
+
+    // Grind-Lines (§4): the ridged crests' exposed spines, and the rail that shows them.
+    // Traced from the terrain alone — no draw from `rng` — so the layout stream above is
+    // untouched and every machine lays the same rails (CLAUDE.md rule 5).
+    let lines = grind_lines(planet, &colliders);
+    if !lines.spines.is_empty() {
+        commands.spawn((
+            Mesh3d(meshes.add(rail_mesh(planet, &lines))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: crate::techs::RAIL_COLOR,
+                unlit: true,
+                ..default()
+            })),
+            Transform::IDENTITY,
+            StageScoped,
+        ));
     }
 
     // Starfield
@@ -453,11 +533,16 @@ pub fn spawn_stage(
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(star_mat.clone()),
             Transform::from_translation(dir * d).with_scale(Vec3::splat(rng.gen_range(0.8..2.6))),
+            // the sky casts no shadows: directional shadows clamp far casters onto the map, so
+            // a star (or the Earth, or the sun's own disc) that the turning sun passes behind
+            // would print its shadow across the planet
+            NotShadowCaster,
             StageScoped,
         ));
     }
 
-    // Earthrise
+    // Earthrise — and on the Moon the Earth's cyan fill, which lights Earthside only (§8
+    // Earthside/Farside, §12 "Earthrise casts cyan fill on the night side").
     if def.has_earthrise {
         let earth_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.25, 0.5, 0.95),
@@ -465,25 +550,40 @@ pub fn spawn_stage(
             perceptual_roughness: 0.7,
             ..default()
         });
-        let dir = Vec3::new(0.5, 0.62, 0.35).normalize();
+        let dir = crate::daynight::earth_dir();
         commands.spawn((
             Mesh3d(meshes.add(Mesh::from(Sphere::new(90.0)))),
             MeshMaterial3d(earth_mat),
             Transform::from_translation(dir * 1500.0),
+            NotShadowCaster,
+            StageScoped,
+        ));
+        commands.spawn((
+            DirectionalLight {
+                color: Color::srgb(0.45, 0.78, 1.0),
+                illuminance: crate::config::EARTHLIGHT_LUX,
+                shadows_enabled: false,
+                ..default()
+            },
+            crate::daynight::EarthFill,
+            Transform::from_translation(dir * 10.0).looking_at(Vec3::ZERO, sphere::tangent_frame(dir).0),
             StageScoped,
         ));
     }
 
-    // Sun: directional light + visible disc.
-    let sun_dir = Vec3::new(-0.55, 0.35, -0.75).normalize();
+    // Sun: key light + visible disc. `daynight::apply_sky` turns both with the run's sun
+    // every frame (and dims and shrinks them as the sun is eaten); placed at the stage's
+    // dawn here so the first frame is already lit right.
+    let sun = crate::daynight::sunward(planet.kind, 0.0);
     commands.spawn((
         DirectionalLight {
             color: def.sun,
-            illuminance: 9_000.0,
+            illuminance: def.light.sun_lux,
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_translation(-sun_dir * 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        crate::daynight::SunLight,
+        Transform::from_translation(sun * 10.0).looking_at(Vec3::ZERO, sphere::tangent_frame(sun).0),
         StageScoped,
     ));
     let sun_mat = materials.add(StandardMaterial {
@@ -495,11 +595,108 @@ pub fn spawn_stage(
     commands.spawn((
         Mesh3d(meshes.add(Mesh::from(Sphere::new(45.0)))),
         MeshMaterial3d(sun_mat),
-        Transform::from_translation(-sun_dir * 1600.0),
+        crate::daynight::SunDisc,
+        Transform::from_translation(sun * 1600.0),
+        NotShadowCaster,
         StageScoped,
     ));
 
-    PropColliders(colliders)
+    (PropColliders(colliders), lines)
+}
+
+/// The stage's Grind-Lines: the terrain's crest spines, smoothed, and cut short of every
+/// solid prop — a rail never runs through a boulder, it stops before it.
+fn grind_lines(planet: &CurrentPlanet, colliders: &[PropCollider]) -> crate::techs::GrindLines {
+    use crate::config::{GRIND_MIN_LEN, GRIND_PROP_CLEARANCE, GRIND_STEP};
+    let min_pts = (GRIND_MIN_LEN / GRIND_STEP) as usize + 1;
+    let blocked = |d: Vec3| {
+        colliders.iter().any(|c| d.dot(c.dir) > ((c.radius + GRIND_PROP_CLEARANCE) / planet.radius).cos())
+    };
+    let mut out: Vec<Vec<Vec3>> = Vec::new();
+    for mut line in planet.terrain.ridge_spines(planet.radius) {
+        // two passes of a 3-point average: the crest trace's cross-section search leaves a
+        // few centimetres of zig-zag that a rail (and a rider's camera) would feel
+        for _ in 0..2 {
+            let prev = line.clone();
+            for i in 1..prev.len().saturating_sub(1) {
+                line[i] = (prev[i - 1] + prev[i] * 2.0 + prev[i + 1]).normalize();
+            }
+        }
+        let mut run: Vec<Vec3> = Vec::new();
+        for d in line {
+            if blocked(d) {
+                if run.len() >= min_pts {
+                    out.push(std::mem::take(&mut run));
+                }
+                run.clear();
+            } else {
+                run.push(d);
+            }
+        }
+        if run.len() >= min_pts {
+            out.push(run);
+        }
+    }
+    crate::techs::GrindLines::new(out, planet.radius)
+}
+
+/// The rails, as ONE mesh for the whole stage: a thin glowing bar along every spine at
+/// GRIND_RAIL_LIFT over the crest, on a "vertebra" fin every few metres so it reads as the
+/// ridge's own exposed spine rather than a pipe laid on the ground, and a knob at each end
+/// (where a rider comes off).
+fn rail_mesh(planet: &CurrentPlanet, lines: &crate::techs::GrindLines) -> Mesh {
+    use crate::config::GRIND_RAIL_LIFT;
+    use crate::meshkit::MeshData;
+    let fin = Color::srgb(0.32, 0.5, 0.56);
+    let rail = |d: Vec3| planet.surface_point(d) + d * GRIND_RAIL_LIFT;
+    let mut m = MeshData::new();
+    for sp in &lines.spines {
+        for (i, w) in sp.pts.windows(2).enumerate() {
+            let (a, b) = (rail(w[0]), rail(w[1]));
+            let len = (b - a).length();
+            if len < 1e-4 {
+                continue;
+            }
+            let run = (b - a) / len;
+            m.add_cylinder(
+                0.075,
+                len + 0.03,
+                6,
+                Transform::from_translation((a + b) * 0.5).with_rotation(Quat::from_rotation_arc(Vec3::Y, run)),
+                Color::WHITE,
+            );
+            if i % 2 == 0 {
+                let up = w[0];
+                let h = GRIND_RAIL_LIFT + 0.35;
+                m.add_box(
+                    Vec3::new(0.07, h, 0.34),
+                    Transform::from_translation(planet.surface_point(up) + up * (h * 0.5 - 0.3))
+                        .with_rotation(sphere::frame_quat(up, run)),
+                    fin,
+                );
+            }
+        }
+        for end in [sp.pts[0], sp.pts[sp.pts.len() - 1]] {
+            m.add_sphere(0.16, 1, Transform::from_translation(rail(end)), Color::WHITE);
+        }
+    }
+    m.build()
+}
+
+/// Outside the drop zone every stage starts in (see `START_CLEAR_ARC`). A pure function of
+/// the direction, so it never makes two machines' layouts diverge.
+fn clear_of_start(dir: Vec3, planet: &CurrentPlanet) -> bool {
+    sphere::arc_dist(dir, Vec3::Y, planet.radius) > crate::config::START_CLEAR_ARC
+}
+
+/// A random placement for a prop: uniform over the sphere, re-drawn inside the drop zone.
+fn prop_dir(rng: &mut impl Rng, planet: &CurrentPlanet) -> Vec3 {
+    loop {
+        let d = random_dir(rng);
+        if clear_of_start(d, planet) {
+            return d;
+        }
+    }
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
@@ -515,3 +712,24 @@ pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The painted height steps: flat plateaus, climbing monotonically from floor to peak.
+    #[test]
+    fn toon_height_band_is_monotonic_and_stepped() {
+        let n = crate::config::TOON_TERRAIN_BANDS;
+        let mut last = -1.0;
+        let mut levels = Vec::new();
+        for i in 0..=1000 {
+            let b = super::toon_height_band(i as f32 / 1000.0);
+            assert!((0.0..=1.0).contains(&b) && b >= last - 1e-6, "not monotonic at {i}");
+            if levels.last().is_none_or(|l: &f32| (b - l).abs() > 1e-4) && (b * (n - 1) as f32).fract() < 1e-4 {
+                levels.push(b);
+            }
+            last = b;
+        }
+        assert_eq!(levels.len(), n, "want {n} flat levels, got {levels:?}");
+    }
+}
+

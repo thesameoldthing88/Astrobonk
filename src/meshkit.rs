@@ -5,6 +5,10 @@
 //! Vertex colors are a *multiplier* over the material's base color: pass `Color::WHITE`
 //! for a body part (shows the material color fully) and a darker shade for accents
 //! (visors, mouths, undersides) so each kind keeps one readable signal color + detail.
+//!
+//! Every shape is wound counter-clockwise seen from outside — Bevy's front face — so under
+//! default back-face culling the NEAR walls draw, lit by their own normals, and an inverted
+//! hull (front faces culled) shows the far ones. `winding_self_check` pins it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -15,12 +19,42 @@ pub struct MeshData {
     pos: Vec<[f32; 3]>,
     nrm: Vec<[f32; 3]>,
     col: Vec<[f32; 4]>,
+    /// Emissive mask coordinate per vertex: `GLOW_UV` for accent parts, `BODY_UV` otherwise.
+    uv: Vec<[f32; 2]>,
     idx: Vec<u32>,
+    glow: bool,
+}
+
+/// UVs into `glow_mask_image`, a 2×1 texture: left texel black, right texel white. A
+/// material that uses it as its `emissive_texture` lights only the accent parts, so one
+/// material (one draw call per kind) can carry one glowing detail.
+pub const BODY_UV: [f32; 2] = [0.25, 0.5];
+pub const GLOW_UV: [f32; 2] = [0.75, 0.5];
+
+/// The 2×1 emissive mask the `GLOW_UV`/`BODY_UV` coordinates sample (nearest filtering, so
+/// the two texels never bleed into each other).
+pub fn glow_mask_image() -> Image {
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut img = Image::new(
+        Extent3d { width: 2, height: 1, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![0, 0, 0, 255, 255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    img.sampler = ImageSampler::nearest();
+    img
 }
 
 impl MeshData {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Shapes added while this is on are the model's emissive accent (see `GLOW_UV`).
+    pub fn set_glow(&mut self, on: bool) {
+        self.glow = on;
     }
 
     fn push(&mut self, verts: &[Vec3], normals: &[Vec3], tris: &[u32], tf: Transform, color: Color) {
@@ -33,6 +67,7 @@ impl MeshData {
             self.pos.push([p.x, p.y, p.z]);
             self.nrm.push([nn.x, nn.y, nn.z]);
             self.col.push(ca);
+            self.uv.push(if self.glow { GLOW_UV } else { BODY_UV });
         }
         self.idx.extend(tris.iter().map(|i| base + i));
     }
@@ -50,7 +85,11 @@ impl MeshData {
             (Vec3::NEG_Z, [Vec3::new(hx, -hy, -hz), Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, hy, -hz), Vec3::new(hx, hy, -hz)]),
         ];
         for (n, v) in faces {
-            self.push(&v, &[n; 4], &[0, 1, 2, 0, 2, 3], tf, color);
+            // wind each quad so it faces out along its normal, whichever way the table
+            // lists its corners (the ±X/±Y rows run clockwise seen from outside)
+            let ccw = (v[1] - v[0]).cross(v[2] - v[0]).dot(n) > 0.0;
+            let tris = if ccw { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] };
+            self.push(&v, &[n; 4], &tris, tf, color);
         }
     }
 
@@ -91,10 +130,12 @@ impl MeshData {
             norms.push(n);
             let nb = ((i + 1) % seg) as u32 * 2;
             let b0 = i as u32 * 2;
-            tris.extend([b0, nb, b0 + 1, nb, nb + 1, b0 + 1]);
+            tris.extend([b0, b0 + 1, nb, nb, b0 + 1, nb + 1]);
             let _ = b;
         }
         // caps
+        // the ring runs counter-clockwise seen from +Y, so the top cap keeps its order and
+        // the bottom one (seen from -Y) reverses it
         for (yy, ny, flip) in [(hy, Vec3::Y, false), (-hy, Vec3::NEG_Y, true)] {
             let center = verts.len() as u32;
             verts.push(Vec3::new(0.0, yy, 0.0));
@@ -108,9 +149,9 @@ impl MeshData {
             for i in 0..seg as u32 {
                 let n = (i + 1) % seg as u32;
                 if flip {
-                    tris.extend([center, ring + n, ring + i]);
-                } else {
                     tris.extend([center, ring + i, ring + n]);
+                } else {
+                    tris.extend([center, ring + n, ring + i]);
                 }
             }
         }
@@ -135,7 +176,7 @@ impl MeshData {
             let b = verts.len() as u32;
             verts.extend([apex, p0, p1]);
             norms.extend([n, n, n]);
-            tris.extend([b, b + 1, b + 2]);
+            tris.extend([b, b + 2, b + 1]);
         }
         // base cap
         let center = verts.len() as u32;
@@ -149,7 +190,7 @@ impl MeshData {
         }
         for i in 0..seg as u32 {
             let n = (i + 1) % seg as u32;
-            tris.extend([center, ring + n, ring + i]);
+            tris.extend([center, ring + i, ring + n]);
         }
         self.push(&verts, &norms, &tris, tf, color);
     }
@@ -167,6 +208,7 @@ impl MeshData {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.pos);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.nrm);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.col);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uv);
         mesh.insert_indices(Indices::U32(self.idx));
         mesh
     }
@@ -221,4 +263,34 @@ pub fn icosphere(subdiv: u32) -> (Vec<Vec3>, Vec<u32>) {
         faces = next;
     }
     (verts, faces.into_iter().flatten().collect())
+}
+
+/// Headless self-check (M12): every triangle of every shape faces the way its normals say,
+/// under an arbitrary rotation. The ±X/±Y box faces, cylinders and cones used to be wound
+/// clockwise, so back-face culling drew their far walls (lit from behind) and an inverted-
+/// hull outline built from them culled the wrong side.
+pub fn winding_self_check() -> Result<(), String> {
+    let tf = Transform::from_translation(Vec3::new(0.3, -1.2, 2.0))
+        .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.7, -1.1, 0.4));
+    let shapes: [(&str, fn(&mut MeshData, Transform)); 6] = [
+        ("box", |m, tf| m.add_box(Vec3::new(0.8, 1.3, 0.5), tf, Color::WHITE)),
+        ("cylinder", |m, tf| m.add_cylinder(0.4, 1.1, 9, tf, Color::WHITE)),
+        ("cone", |m, tf| m.add_cone(0.5, 0.9, 7, tf, Color::WHITE)),
+        ("sphere", |m, tf| m.add_sphere(0.6, 1, tf, Color::WHITE)),
+        ("ellipsoid", |m, tf| m.add_ellipsoid(Vec3::new(0.7, 0.3, 0.5), 1, tf, Color::WHITE)),
+        ("capsule", |m, tf| m.add_capsule(0.3, 0.8, tf, Color::WHITE)),
+    ];
+    for (name, add) in shapes {
+        let mut m = MeshData::new();
+        add(&mut m, tf);
+        for tri in m.idx.chunks(3) {
+            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from_array(m.pos[i as usize]));
+            let face = (b - a).cross(c - a);
+            let normal: Vec3 = [tri[0], tri[1], tri[2]].iter().map(|i| Vec3::from_array(m.nrm[*i as usize])).sum();
+            if face.length_squared() > 1e-12 && face.dot(normal) <= 0.0 {
+                return Err(format!("meshkit {name}: a triangle is wound clockwise seen from outside"));
+            }
+        }
+    }
+    Ok(())
 }

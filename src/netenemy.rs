@@ -32,7 +32,7 @@ use crate::content::enemies::EnemyKind;
 use crate::enemies::{Enemy, EnemyAssets};
 use crate::content::enemies::BossKind;
 use crate::enemies::{AnubotBeam, Boss, CraterpillarHead, CraterpillarSegment, WORM_SEGMENTS};
-use crate::enemies::{EnemyProjectile, MortarShell, Telegraph};
+use crate::enemies::{AimLine, Beamer, CrackDecal, EnemyProjectile, MortarShell, Telegraph};
 use crate::net::{
     BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole,
     PeerSlots, PickupEvent, PickupEventMsg,
@@ -100,6 +100,17 @@ impl NetEnemyIds {
 #[derive(Resource, Default)]
 pub struct ClientResidency(HashMap<Entity, HashSet<u16>>);
 
+impl ClientResidency {
+    /// A client left: drop what we believed it had.
+    pub fn forget(&mut self, client: Entity) {
+        self.0.remove(&client);
+    }
+    /// The session ended.
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// Snapshot cadence + sequence number.
 #[derive(Resource, Default)]
 pub struct SnapClock {
@@ -140,6 +151,8 @@ pub struct NetBossIndex(HashMap<u16, Entity>);
 #[derive(Resource, Default)]
 pub struct NetEnemyStats {
     pub records: u32,
+    /// Enemy-state lane records received (P08).
+    pub states: u32,
     pub chunks: u32,
     pub bytes: u32,
     pub seq_gaps: u32,
@@ -159,37 +172,21 @@ impl Plugin for EnemyStreamPlugin {
             .init_resource::<PickupIds>()
             .init_resource::<NetPickupIndex>()
             .init_resource::<NetEnemyStats>()
+            // HOST streams, only while a run is live. Hosting starts from the MAIN MENU
+            // (HOST CO-OP, then the hero pick), where there is no CurrentPlanet yet — and a
+            // missing Res is a hard error, so ungated this crashed the moment you hosted.
             .add_systems(
                 Update,
-                assign_net_ids
-                    .run_if(crate::net::is_simulating)
-                    .run_if(is_networked),
-            )
-            .add_systems(
-                Update,
-                stream_pickups
-                    .run_if(crate::net::is_simulating)
-                    .run_if(is_networked),
-            )
-
-            .add_systems(
-                Update,
-                stream_hazards
-                    .run_if(crate::net::is_simulating)
-                    .run_if(is_networked),
-            )
-
-            .add_systems(
-                Update,
-                stream_bosses
-                    .run_if(crate::net::is_simulating)
-                    .run_if(is_networked),
-            )
-
-            .add_systems(
-                Update,
-                stream_enemies
-                    .after(assign_net_ids)
+                (
+                    assign_net_ids,
+                    stream_pickups,
+                    stream_hazards,
+                    stream_bosses,
+                    stream_enemies.after(assign_net_ids),
+                    // after the crowd: it only sends ids that are resident on each client
+                    stream_enemy_states.after(stream_enemies),
+                )
+                    .run_if(in_state(crate::AppState::InRun))
                     .run_if(crate::net::is_simulating)
                     .run_if(is_networked),
             )
@@ -205,8 +202,10 @@ impl Plugin for EnemyStreamPlugin {
                     receive_pickups,
                     receive_hazards,
                     receive_enemies,
+                    receive_enemy_states,
                     drive_boss_proxies,
                     drive_proxies,
+                    drive_net_aim_lines,
                     animate_net_pickups,
                 )
                     .chain()
@@ -263,8 +262,12 @@ fn assign_net_ids(
     }
     *known = live;
 
+    // `try_insert`: an enemy spawned last frame can be swept by a stage change queued this
+    // same frame (the teleporter despawns everything StageScoped), and a plain insert on it
+    // panics the host the moment the despawn lands first. Its id is simply never recorded;
+    // the wrapping counter hands the value out again in time.
     for e in &fresh {
-        commands.entity(e).insert(NetId(ids.claim()));
+        commands.entity(e).try_insert(NetId(ids.claim()));
     }
 }
 
@@ -465,6 +468,113 @@ fn stream_enemies(
     }
 }
 
+/// Bytes in one enemy-state record: id (2), state (1), altitude (1), heading (3 × i8).
+pub const STATE_RECORD_BYTES: usize = 7;
+/// Altitude range an enemy-state record can carry (a Sunskimmer's cruise, bob included).
+const STATE_ALT_MAX: f32 = SKIM_ALTITUDE * 1.25;
+
+/// Pack one new-kind enemy's look (`bestiary::EnemyVis`) onto the enemy-state lane. The
+/// heading goes as a WORLD vector (three signed bytes, re-flattened onto the proxy's own
+/// tangent plane on arrival) rather than an angle in a tangent frame: the frame at the
+/// proxy's drawn spot is not quite the host's, and near its pole it flips.
+pub fn encode_state(buf: &mut Vec<u8>, id: u16, vis: &crate::bestiary::EnemyVis) {
+    buf.extend_from_slice(&(id & ID_MASK).to_le_bytes());
+    buf.push(vis.state);
+    buf.push(((vis.alt / STATE_ALT_MAX).clamp(0.0, 1.0) * 255.0).round() as u8);
+    for c in vis.heading.to_array() {
+        buf.push(((c.clamp(-1.0, 1.0) * 127.0).round() as i8) as u8);
+    }
+}
+
+/// Unpack one record (`STATE_RECORD_BYTES` long).
+pub fn decode_state(rec: &[u8]) -> (u16, crate::bestiary::EnemyVis) {
+    let id = u16::from_le_bytes([rec[0], rec[1]]) & ID_MASK;
+    let heading = Vec3::new(rec[4] as i8 as f32, rec[5] as i8 as f32, rec[6] as i8 as f32) / 127.0;
+    (
+        id,
+        crate::bestiary::EnemyVis {
+            state: rec[2],
+            alt: rec[3] as f32 / 255.0 * STATE_ALT_MAX,
+            heading: heading.normalize_or_zero(),
+        },
+    )
+}
+
+/// Headless RULES: a record survives the wire.
+pub fn state_lane_self_check() -> Result<(), String> {
+    let vis = crate::bestiary::EnemyVis { state: 3, alt: 7.3, heading: Vec3::new(0.3, -0.5, 0.81).normalize() };
+    let mut buf = Vec::new();
+    encode_state(&mut buf, 0x7ABC, &vis);
+    if buf.len() != STATE_RECORD_BYTES {
+        return Err(format!("an enemy-state record is {} bytes, not {STATE_RECORD_BYTES}", buf.len()));
+    }
+    let (id, back) = decode_state(&buf);
+    if id != 0x7ABC || back.state != 3 || (back.alt - 7.3).abs() > 0.1 || back.heading.angle_between(vis.heading) > 0.02 {
+        return Err(format!("the enemy-state lane garbled a record: {vis:?} came back as {back:?} (id {id:X})"));
+    }
+    let codes: Vec<u8> = EnemyKind::ALL.iter().map(|k| kind_code(*k)).collect();
+    if EnemyKind::ALL.iter().any(|k| kind_from_code(kind_code(*k)) != *k) || codes.iter().enumerate().any(|(i, c)| *c as usize != i) {
+        return Err(format!("enemy kind codes do not round-trip in ALL order: {codes:?}"));
+    }
+    Ok(())
+}
+
+/// HOST: the enemy-state lane — each client gets the look of the new-kind enemies it has
+/// proxies for (its residency set), at NET_ENEMY_STATE_HZ.
+fn stream_enemy_states(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    residency: Res<ClientResidency>,
+    clients: Query<Entity, (With<ConnectedClient>, With<AuthorizedClient>)>,
+    q: Query<(&NetId, &crate::bestiary::EnemyVis)>,
+    mut out: MessageWriter<ToClients<crate::net::EnemyStateMsg>>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 / NET_ENEMY_STATE_HZ {
+        return;
+    }
+    *acc = 0.0;
+    let recs: Vec<(u16, &crate::bestiary::EnemyVis)> = q.iter().map(|(n, v)| (n.0, v)).collect();
+    if recs.is_empty() {
+        return;
+    }
+    let per_chunk = NET_ENEMY_CHUNK_BYTES / STATE_RECORD_BYTES;
+    for client in &clients {
+        let Some(resident) = residency.0.get(&client) else { continue };
+        let mine: Vec<&(u16, &crate::bestiary::EnemyVis)> = recs.iter().filter(|(id, _)| resident.contains(id)).collect();
+        for chunk in mine.chunks(per_chunk) {
+            let mut data = Vec::with_capacity(chunk.len() * STATE_RECORD_BYTES);
+            for (id, vis) in chunk {
+                encode_state(&mut data, *id, vis);
+            }
+            out.write(ToClients {
+                targets: SendTargets::Single(ClientId::Client(client)),
+                message: crate::net::EnemyStateMsg { n: chunk.len() as u16, data },
+            });
+        }
+    }
+}
+
+/// CLIENT: apply the enemy-state lane to the proxies it names (a record for a proxy not
+/// built yet is dropped; the next one, 100 ms on, carries the same state).
+fn receive_enemy_states(
+    mut msgs: MessageReader<crate::net::EnemyStateMsg>,
+    index: Res<NetEnemyIndex>,
+    mut stats: ResMut<NetEnemyStats>,
+    mut q: Query<&mut crate::bestiary::EnemyVis, With<NetEnemy>>,
+) {
+    for m in msgs.read() {
+        for rec in m.data.chunks_exact(STATE_RECORD_BYTES).take(m.n as usize) {
+            let (id, vis) = decode_state(rec);
+            stats.states += 1;
+            let Some(e) = index.0.get(&id).copied() else { continue };
+            if let Ok(mut v) = q.get_mut(e) {
+                *v = vis;
+            }
+        }
+    }
+}
+
 /// Marks a hazard visual a client built from a streamed event. These carry real
 /// `EnemyProjectile` / `Telegraph` / `MortarShell` components so the existing integrators
 /// animate them for free — but always with `damage: 0.0`, because the host resolves all
@@ -477,14 +587,109 @@ pub struct NetHazard;
 /// Uses `Added<T>` rather than touching all nine spawn sites across enemies.rs — the
 /// component values at spawn are exactly the event payload, so the spawn code stays
 /// untouched and no future hazard can be added without this seeing it.
+#[allow(clippy::too_many_arguments)]
 fn stream_hazards(
-    added_proj: Query<&EnemyProjectile, Added<EnemyProjectile>>,
-    added_tel: Query<&Telegraph, Added<Telegraph>>,
+    added_proj: Query<(&EnemyProjectile, Option<&crate::bestiary::CurveShot>), Added<EnemyProjectile>>,
+    added_tel: Query<(&Telegraph, Option<&crate::bestiary::TelegraphOwner>), Added<Telegraph>>,
+    nids: Query<&NetId>,
     added_mortar: Query<&MortarShell, Added<MortarShell>>,
+    added_lines: Query<(Entity, &AimLine), Added<AimLine>>,
+    added_cracks: Query<&CrackDecal, (Added<CrackDecal>, Without<NetHazard>)>,
+    added_spores: Query<&crate::gimmicks::SporeBurst, Added<crate::gimmicks::SporeBurst>>,
+    beamers: Query<(&NetId, &Beamer)>,
+    astronauts: Query<&PlayerId>,
+    mut removed_lines: RemovedComponents<AimLine>,
+    // line entity -> its beamer's NetId, because by the time a removal is seen the line
+    // (and possibly the beamer) is gone and can no longer be asked
+    mut live_lines: Local<HashMap<Entity, u16>>,
+    // The one-shots other systems already say as local messages ride this lane as-is: §7 items
+    // (a yo-yo throw, a singularity, an ignition, a death-save), §4 movement techs (a Slam
+    // landing, a blink), §6/§12 weapons (an evolution's fanfare, THE ANGELUS's wisps), §9 new
+    // enemies (an uppercut, a tracker, a sprung mimic), §11 co-op (a revive, a shove, STATIC
+    // CASCADE, a duo, a drop-in landing)
+    (mut item_fx, mut tech_fx, mut weapon_fx, mut bestiary_fx, mut coop_fx): (
+        MessageReader<crate::items::ItemFxMsg>,
+        MessageReader<crate::techs::TechFxMsg>,
+        MessageReader<crate::arsenal::WeaponFxMsg>,
+        MessageReader<crate::bestiary::BestiaryFxMsg>,
+        MessageReader<crate::coop::CoopFxMsg>,
+    ),
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
+    use crate::items::ItemFx;
+    use crate::techs::TechFx;
     let mut events: Vec<HazardEvent> = Vec::new();
-    for p in &added_proj {
+    for m in item_fx.read().filter(|m| !m.from_wire) {
+        events.push(match m.fx {
+            ItemFx::Orbit { owner, chunks, radius, dur } => HazardEvent::ItemOrbit { owner, chunks, radius, dur },
+            ItemFx::Singularity { dir, radius, dur } => HazardEvent::Singularity { dir: dir.to_array(), radius, dur },
+            ItemFx::Ignite { owner } => HazardEvent::TrailIgnite { owner },
+            ItemFx::DeathSave { owner, save, dir } => HazardEvent::DeathSave { owner, kind: save.code(), dir: dir.to_array() },
+        });
+    }
+    for m in tech_fx.read().filter(|m| !m.from_wire) {
+        events.push(match m.fx {
+            TechFx::Slam { owner, dir, power } => HazardEvent::Slam { owner, dir: dir.to_array(), power },
+            TechFx::Blink { owner, from, to, axis, insured } => HazardEvent::Blink {
+                owner,
+                from: from.to_array(),
+                to: to.to_array(),
+                axis: axis.to_array(),
+                insured,
+            },
+        });
+    }
+    for m in weapon_fx.read().filter(|m| !m.from_wire) {
+        use crate::arsenal::WeaponFx;
+        events.push(match m.fx {
+            WeaponFx::Evolve { owner, weapon } => HazardEvent::Evolve { owner, weapon: weapon.code() },
+            WeaponFx::Wisp { owner, dir, power } => HazardEvent::Wisp { owner, dir: dir.to_array(), power },
+        });
+    }
+    for m in bestiary_fx.read().filter(|m| !m.from_wire) {
+        use crate::bestiary::BestiaryFx;
+        events.push(match m.fx {
+            BestiaryFx::Uppercut { dir, launched } => HazardEvent::Uppercut { dir: dir.to_array(), launched },
+            BestiaryFx::Tracked { owner, secs } => HazardEvent::Tracked { owner, secs },
+            BestiaryFx::MimicSprung { dir } => HazardEvent::MimicSprung { dir: dir.to_array() },
+        });
+    }
+    for m in coop_fx.read().filter(|m| !m.from_wire) {
+        use crate::coop::CoopFx;
+        events.push(match m.fx {
+            CoopFx::Revived { rescuer, downed, dir } => HazardEvent::Revived { rescuer, downed, dir: dir.to_array() },
+            CoopFx::Shove { target, vel, pop } => HazardEvent::Shove { target, vel: vel.to_array(), pop },
+            CoopFx::Cascade { a, b, axis } => HazardEvent::Cascade { a, b, axis: axis.to_array() },
+            CoopFx::Duo { feat, a, b, dir, first } => HazardEvent::Duo { feat: feat.code(), a, b, dir: dir.to_array(), first },
+            CoopFx::DropIn { owner, level, dir } => HazardEvent::DropIn { owner, level, dir: dir.to_array() },
+        });
+    }
+    // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
+    // tracks that astronaut and every client already knows where they all are.
+    for (le, line) in &added_lines {
+        let Ok((nid, b)) = beamers.get(line.owner) else { continue };
+        let Some(target) = b.target.and_then(|t| astronauts.get(t).ok()) else { continue };
+        live_lines.insert(le, nid.0);
+        events.push(HazardEvent::AimLine { enemy: nid.0, target: target.0, charge: b.charging });
+    }
+    for le in removed_lines.read() {
+        if let Some(enemy) = live_lines.remove(&le) {
+            events.push(HazardEvent::AimLineEnd { enemy });
+        }
+    }
+    for (p, curve) in &added_proj {
+        if let Some(c) = curve {
+            events.push(HazardEvent::CurveBolt {
+                dir: p.dir.to_array(),
+                heading: p.heading.to_array(),
+                speed: p.speed,
+                life: p.life,
+                r0: c.r0,
+                r1: c.r1,
+                span: c.span,
+            });
+            continue;
+        }
         events.push(HazardEvent::Projectile {
             dir: [p.dir.x, p.dir.y, p.dir.z],
             heading: [p.heading.x, p.heading.y, p.heading.z],
@@ -494,7 +699,18 @@ fn stream_hazards(
             style: if p.speed > 30.0 { 1 } else { 0 },
         });
     }
-    for t in &added_tel {
+    for (t, owner) in &added_tel {
+        // an owned ring names its owner, so the client's copy dies with the proxy
+        if let Some(nid) = owner.and_then(|o| nids.get(o.0).ok()) {
+            events.push(HazardEvent::OwnedTelegraph {
+                enemy: nid.0,
+                dir: t.dir.to_array(),
+                radius: t.radius,
+                max: t.max,
+                ring: t.ring,
+            });
+            continue;
+        }
         events.push(HazardEvent::Telegraph {
             dir: [t.dir.x, t.dir.y, t.dir.z],
             radius: t.radius,
@@ -509,11 +725,23 @@ fn stream_hazards(
             dur: m.dur,
         });
     }
+    for c in &added_cracks {
+        events.push(HazardEvent::Crack { dir: c.dir.to_array(), dur: c.timer });
+    }
+    // Dark Moon spore caps: the plant's index is enough, both machines lay the same flora
+    for b in added_spores.iter().filter(|b| b.live) {
+        events.push(HazardEvent::Spore { plant: b.plant });
+    }
     if events.is_empty() {
         return;
     }
     out.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: HazardEventMsg { events } });
 }
+
+/// A client's streamed Beamer that is painting an aim line: whose astronaut it tracks.
+/// The proxy also wears a real `Beamer`, so the shared `aim_line_visuals` draws the line.
+#[derive(Component)]
+pub struct NetAimTarget(pub u8);
 
 /// CLIENT: build the visual for each event and let the normal integrators animate it.
 fn receive_hazards(
@@ -521,11 +749,116 @@ fn receive_hazards(
     mut msgs: MessageReader<HazardEventMsg>,
     assets: Option<Res<EnemyAssets>>,
     planet: Option<Res<CurrentPlanet>>,
+    index: Res<NetEnemyIndex>,
+    lines: Query<(Entity, &AimLine)>,
+    mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
+    mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
+    mut weapon_fx: MessageWriter<crate::arsenal::WeaponFxMsg>,
+    flora: Option<Res<crate::gimmicks::WorldFlora>>,
+    mut bestiary_fx: MessageWriter<crate::bestiary::BestiaryFxMsg>,
+    mut coop_fx: MessageWriter<crate::coop::CoopFxMsg>,
 ) {
+    use crate::bestiary::{BestiaryFx, BestiaryFxMsg};
+    use crate::items::{DeathSave, ItemFx, ItemFxMsg};
+    use crate::techs::{TechFx, TechFxMsg};
     let (Some(assets), Some(planet)) = (assets, planet) else { return };
     for m in msgs.read() {
         for ev in &m.events {
+            // Item one-shots become the SAME local message the host's item systems write,
+            // so `items::item_fx_presentation` draws them identically on both machines.
+            let fx = match *ev {
+                HazardEvent::ItemOrbit { owner, chunks, radius, dur } => Some(ItemFx::Orbit { owner, chunks, radius, dur }),
+                HazardEvent::Singularity { dir, radius, dur } => Some(ItemFx::Singularity { dir: Vec3::from(dir), radius, dur }),
+                HazardEvent::TrailIgnite { owner } => Some(ItemFx::Ignite { owner }),
+                HazardEvent::DeathSave { owner, kind, dir } => {
+                    Some(ItemFx::DeathSave { owner, save: DeathSave::from_code(kind), dir: Vec3::from(dir) })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                item_fx.write(ItemFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and so do the movement techs', for `techs::tech_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Slam { owner, dir, power } => Some(TechFx::Slam { owner, dir: Vec3::from(dir), power }),
+                HazardEvent::Blink { owner, from, to, axis, insured } => Some(TechFx::Blink {
+                    owner,
+                    from: Vec3::from(from),
+                    to: Vec3::from(to),
+                    axis: Vec3::from(axis),
+                    insured,
+                }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                tech_fx.write(TechFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the weapons', for `arsenal::weapon_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Evolve { owner, weapon } => crate::content::weapons::WeaponKind::from_code(weapon)
+                    .map(|weapon| crate::arsenal::WeaponFx::Evolve { owner, weapon }),
+                HazardEvent::Wisp { owner, dir, power } => {
+                    Some(crate::arsenal::WeaponFx::Wisp { owner, dir: Vec3::from(dir), power })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                weapon_fx.write(crate::arsenal::WeaponFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the new enemies', for `bestiary::bestiary_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Uppercut { dir, launched } => Some(BestiaryFx::Uppercut { dir: Vec3::from(dir), launched }),
+                HazardEvent::Tracked { owner, secs } => Some(BestiaryFx::Tracked { owner, secs }),
+                HazardEvent::MimicSprung { dir } => Some(BestiaryFx::MimicSprung { dir: Vec3::from(dir) }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                bestiary_fx.write(BestiaryFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the co-op one-shots, for `coop::coop_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Revived { rescuer, downed, dir } => Some(crate::coop::CoopFx::Revived { rescuer, downed, dir: Vec3::from(dir) }),
+                HazardEvent::Shove { target, vel, pop } => Some(crate::coop::CoopFx::Shove { target, vel: Vec3::from(vel), pop }),
+                HazardEvent::Cascade { a, b, axis } => Some(crate::coop::CoopFx::Cascade { a, b, axis: Vec3::from(axis) }),
+                HazardEvent::Duo { feat, a, b, dir, first } => crate::content::duos::CoopFeat::from_code(feat)
+                    .map(|feat| crate::coop::CoopFx::Duo { feat, a, b, dir: Vec3::from(dir), first }),
+                HazardEvent::DropIn { owner, level, dir } => Some(crate::coop::CoopFx::DropIn { owner, level, dir: Vec3::from(dir) }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                coop_fx.write(crate::coop::CoopFxMsg { fx, from_wire: true });
+                continue;
+            }
             match *ev {
+                HazardEvent::AimLine { enemy, target, charge } => {
+                    // A beamer outside our interest set has no proxy — and is then far
+                    // outside its own 26 m range of anything we can see anyway.
+                    let Some(proxy) = index.0.get(&enemy).copied() else { continue };
+                    let Ok(mut ec) = commands.get_entity(proxy) else { continue };
+                    ec.insert((
+                        // INERT cooldown, as with boss proxies: nothing on a client fires
+                        Beamer { cd: f32::INFINITY, charging: charge, aim: Vec3::ZERO, target: None },
+                        NetAimTarget(target),
+                    ));
+                    commands.spawn((
+                        AimLine { owner: proxy, march: 0.0 },
+                        NetHazard,
+                        Mesh3d(assets.aim_mesh.clone()),
+                        MeshMaterial3d(assets.ring_mat.clone()),
+                        // zero-scaled: the proxy's aim is unknown until drive_net_aim_lines
+                        // sweeps it, and a unit-sized line would sit at the pole meanwhile
+                        Transform::from_translation(planet.surface_point(Vec3::Y)).with_scale(Vec3::ZERO),
+                        crate::planet::StageScoped,
+                    ));
+                }
+                HazardEvent::AimLineEnd { enemy } => {
+                    let Some(proxy) = index.0.get(&enemy).copied() else { continue };
+                    end_aim_line(&mut commands, proxy, &lines);
+                }
                 HazardEvent::Projectile { dir, heading, speed, life, style } => {
                     let dir = Vec3::from(dir);
                     let mat = if style == 1 { assets.ring_mat.clone() } else { assets.proj_mat.clone() };
@@ -552,18 +885,79 @@ fn receive_hazards(
                 HazardEvent::Telegraph { dir, radius, max, ring } => {
                     let dir = Vec3::from(dir);
                     commands.spawn((
-                        Telegraph { timer: max, max, radius, damage: 0.0, dir, ring },
+                        crate::enemies::telegraph_bundle(
+                            &assets,
+                            &planet,
+                            Telegraph { timer: max, max, radius, damage: 0.0, dir, ring },
+                        ),
                         NetHazard,
-                        Mesh3d(assets.ring_mesh.clone()),
-                        MeshMaterial3d(assets.ring_mat.clone()),
-                        Transform::from_translation(planet.surface_point(dir) + dir * 0.15)
-                            .with_rotation(
-                                sphere::frame_quat(dir, sphere::tangent_frame(dir).0)
-                                    * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
+                    ));
+                }
+                HazardEvent::Crack { dir, dur } => {
+                    let crack = crate::enemies::spawn_crack_decal(&mut commands, &assets, &planet, Vec3::from(dir), dur);
+                    commands.entity(crack).insert(NetHazard);
+                }
+                HazardEvent::OwnedTelegraph { enemy, dir, radius, max, ring } => {
+                    let ring_e = commands
+                        .spawn((
+                            crate::enemies::telegraph_bundle(
+                                &assets,
+                                &planet,
+                                Telegraph { timer: max, max, radius, damage: 0.0, dir: Vec3::from(dir), ring },
                             ),
+                            NetHazard,
+                        ))
+                        .id();
+                    // tied to the proxy when we have one: `reap_owned_telegraphs` drops the
+                    // ring the moment the host's despawn of its owner lands
+                    if let Some(proxy) = index.0.get(&enemy).copied() {
+                        commands.entity(ring_e).insert(crate::bestiary::TelegraphOwner(proxy));
+                    }
+                }
+                HazardEvent::CurveBolt { dir, heading, speed, life, r0, r1, span } => {
+                    let dir = Vec3::from(dir);
+                    commands.spawn((
+                        EnemyProjectile { dir, heading: Vec3::from(heading), speed, damage: 0.0, life, hover: 1.0 },
+                        crate::bestiary::CurveShot { r0, r1, span, flown: 0.0 },
+                        NetHazard,
+                        Mesh3d(assets.proj_mesh.clone()),
+                        MeshMaterial3d(assets.ring_mat.clone()),
+                        Transform::from_translation(dir * r0).with_scale(Vec3::new(0.5, 0.5, 3.0)),
                         crate::planet::StageScoped,
                     ));
                 }
+                HazardEvent::Spore { plant } => {
+                    // a cap on a world we are not standing on (a straggler across a stage
+                    // change) has no plant to swell
+                    let Some(pl) = flora
+                        .as_ref()
+                        .filter(|f| f.style == Some(crate::content::planets::FloraStyle::GlowShrooms))
+                        .and_then(|f| f.plants.get(plant as usize).copied())
+                    else {
+                        continue;
+                    };
+                    commands.spawn((
+                        crate::gimmicks::spore_bundle(&planet, crate::gimmicks::SporeBurst::new(plant, pl.dir, false)),
+                        NetHazard,
+                    ));
+                }
+                // handled above, as ItemFxMsg / TechFxMsg / BestiaryFxMsg / WeaponFxMsg
+                HazardEvent::ItemOrbit { .. }
+                | HazardEvent::Singularity { .. }
+                | HazardEvent::TrailIgnite { .. }
+                | HazardEvent::DeathSave { .. }
+                | HazardEvent::Slam { .. }
+                | HazardEvent::Blink { .. }
+                | HazardEvent::Uppercut { .. }
+                | HazardEvent::Tracked { .. }
+                | HazardEvent::MimicSprung { .. }
+                | HazardEvent::Evolve { .. }
+                | HazardEvent::Wisp { .. }
+                | HazardEvent::Revived { .. }
+                | HazardEvent::Shove { .. }
+                | HazardEvent::Cascade { .. }
+                | HazardEvent::Duo { .. }
+                | HazardEvent::DropIn { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
@@ -577,6 +971,68 @@ fn receive_hazards(
                     ));
                 }
             }
+        }
+    }
+}
+
+/// Retire a client-side aim line: the line entity goes, and the proxy stops being a
+/// charging Beamer so it can take the next AimLine cleanly.
+fn end_aim_line(commands: &mut Commands, proxy: Entity, lines: &Query<(Entity, &AimLine)>) {
+    for (le, line) in lines.iter() {
+        if line.owner == proxy {
+            commands.entity(le).try_despawn();
+        }
+    }
+    if let Ok(mut ec) = commands.get_entity(proxy) {
+        ec.remove::<(Beamer, NetAimTarget)>();
+    }
+}
+
+/// CLIENT: sweep each streamed aim line exactly as the host's Beamer does — track the
+/// locked astronaut until the final BEAMER_LOCK_SECS, then hold — and retire it when the
+/// charge runs out (the host fires at that moment; the railbolt arrives on its own event).
+pub fn drive_net_aim_lines(
+    mut commands: Commands,
+    time: Res<Time>,
+    mine: Res<MyPlayerId>,
+    q_local: Query<&Transform, (With<crate::player::LocalPlayer>, Without<Enemy>)>,
+    q_mates: Query<(&PlayerId, &Transform), (With<crate::remote::RemoteAstronaut>, Without<Enemy>)>,
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &NetAimTarget, &Transform, Option<&crate::bestiary::EnemyVis>)>,
+    lines: Query<(Entity, &AimLine)>,
+) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (proxy, e, mut b, target, tf, vis) in &mut q {
+        b.charging -= dt;
+        if b.charging <= 0.0 {
+            end_aim_line(&mut commands, proxy, &lines);
+            continue;
+        }
+        // A Beamer Prime LEADS its mark, which no client can re-derive from where the mark
+        // stands: its aim comes over the enemy-state lane, eased between records.
+        if let Some(vis) = vis.filter(|_| e.kind == crate::content::enemies::EnemyKind::BeamerPrime) {
+            let want = (vis.heading - e.dir * vis.heading.dot(e.dir)).normalize_or_zero();
+            if want != Vec3::ZERO {
+                b.aim = if b.aim == Vec3::ZERO { want } else { crate::bestiary::turn_toward(b.aim, want, e.dir, 6.0 * dt) };
+            }
+            continue;
+        }
+        if b.charging <= BEAMER_LOCK_SECS && b.aim != Vec3::ZERO {
+            continue; // locked: the line holds while the shot comes
+        }
+        // Where the mark is drawn on THIS screen: our own predicted body, or a teammate.
+        let pos = if mine.0 == Some(target.0) {
+            q_local.single().ok().map(|t| t.translation)
+        } else {
+            q_mates.iter().find(|(pid, _)| pid.0 == target.0).map(|(_, t)| t.translation)
+        };
+        let Some(pos) = pos else { continue };
+        let v = pos - tf.translation;
+        let vt = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
+        if vt != Vec3::ZERO {
+            b.aim = vt;
         }
     }
 }
@@ -605,14 +1061,30 @@ fn stream_pickups(
     fresh: Query<(Entity, &Pickup), Without<PickupNetId>>,
     mut known: Local<HashMap<Entity, u16>>,
     live: Query<(Entity, &PickupNetId)>,
+    mut withdrawn: RemovedComponents<crate::pickups::HorizonBound>,
+    settled: Query<(&PickupNetId, &Pickup), Without<crate::pickups::HorizonBound>>,
+    called: Query<(&PickupNetId, &crate::pickups::HorizonBound), Changed<crate::pickups::HorizonBound>>,
     mut out: MessageWriter<ToClients<PickupEventMsg>>,
 ) {
     let mut events: Vec<PickupEvent> = Vec::new();
+    // Tome of the Horizon: the one flight a client cannot work out for itself. A withdrawn
+    // call first (a gem collected or merged is despawned, fails the lookup and goes out as
+    // a Despawn below), then new calls — Changed, so a gem re-called by someone else after
+    // it settled is announced again.
+    for e in withdrawn.read() {
+        if let Ok((id, p)) = settled.get(e) {
+            events.push(PickupEvent::HorizonSettle { id: id.0, dir: p.dir.to_array() });
+        }
+    }
+    for (id, hb) in &called {
+        events.push(PickupEvent::Horizon { id: id.0, owner: hb.0 });
+    }
 
     for (e, p) in &fresh {
         ids.next = ids.next.wrapping_add(1).max(1);
         let id = ids.next;
-        commands.entity(e).insert(PickupNetId(id));
+        // try_insert: the same stage-change race as `assign_net_ids`
+        commands.entity(e).try_insert(PickupNetId(id));
         let (kind, value) = match p.kind {
             PickupKind::Xp(v) => (0u8, v.to_bits()),
             PickupKind::Gold(g) => (1, g as u32),
@@ -658,6 +1130,7 @@ fn receive_pickups(
     mut commands: Commands,
     mut msgs: MessageReader<PickupEventMsg>,
     mut index: ResMut<NetPickupIndex>,
+    mut q_pickups: Query<&mut Pickup>,
     assets: Option<Res<PickupAssets>>,
     planet: Option<Res<CurrentPlanet>>,
 ) {
@@ -690,7 +1163,7 @@ fn receive_pickups(
                     };
                     let e = commands
                         .spawn((
-                            Pickup { kind: k, dir, flying: false, speed: 0.0, bob, target: None },
+                            Pickup::new(k, dir, bob),
                             PickupNetId(id),
                             Mesh3d(mesh),
                             MeshMaterial3d(mat),
@@ -709,6 +1182,21 @@ fn receive_pickups(
                         }
                     }
                 }
+                PickupEvent::Horizon { id, owner } => {
+                    // `animate_net_pickups` flies it home to that astronaut from here on
+                    let Some(&e) = index.0.get(&id) else { continue };
+                    if let Ok(mut p) = q_pickups.get_mut(e) {
+                        p.call_home();
+                        commands.entity(e).try_insert(crate::pickups::HorizonBound(owner));
+                    }
+                }
+                PickupEvent::HorizonSettle { id, dir } => {
+                    let Some(&e) = index.0.get(&id) else { continue };
+                    if let Ok(mut p) = q_pickups.get_mut(e) {
+                        p.settle(Vec3::from(dir));
+                        commands.entity(e).remove::<crate::pickups::HorizonBound>();
+                    }
+                }
             }
         }
     }
@@ -719,11 +1207,17 @@ fn receive_pickups(
 /// Purely cosmetic — collection and the XP grant belong to the host, and `pickup_update` is
 /// gated off here. Without this a joiner's gems would hang motionless in the air and then
 /// blink out when the host collected them.
+#[allow(clippy::type_complexity)]
 fn animate_net_pickups(
+    mut commands: Commands,
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
     q_players: Query<(&Player, &crate::run::PlayerState, &Transform), Without<Pickup>>,
-    mut q: Query<(&mut Pickup, &mut Transform), Without<Player>>,
+    bodies: Query<
+        (&PlayerId, &Transform, Option<&crate::run::PlayerState>, Option<&crate::net::PlayerVitals>),
+        (Or<(With<Player>, With<crate::remote::RemoteAstronaut>)>, Without<Pickup>),
+    >,
+    mut q: Query<(Entity, &mut Pickup, &mut Transform, Option<&crate::pickups::HorizonBound>), Without<Player>>,
 ) {
     let Some(planet) = planet else { return };
     let dt = time.delta_secs();
@@ -737,7 +1231,28 @@ fn animate_net_pickups(
         .map(|(_, ps, tf)| (tf.translation, ps.pickup_range()))
         .collect();
 
-    for (mut p, mut tf) in &mut q {
+    for (e, mut p, mut tf, called) in &mut q {
+        // Called home over the horizon (the host announced it): the host's own flight
+        // (`Pickup::fly_home`, then the magnet) to whichever astronaut called it — ours or a
+        // teammate's. The host's despawn ends it, or its HorizonSettle withdraws it.
+        let caller = called.and_then(|hb| bodies.iter().find(|(id, ..)| id.0 == hb.0));
+        if let Some((_, body, ps, vitals)) = caller {
+            if ps.is_some_and(|ps| ps.dead) || vitals.is_some_and(|v| v.down) {
+                // The host drops a call whose caller went down; stop here rather than fly
+                // to a body the gem will never reach (its HorizonSettle puts it exactly).
+                let dir = p.dir;
+                p.settle(dir);
+                commands.entity(e).remove::<crate::pickups::HorizonBound>();
+                continue;
+            }
+            let body = body.translation;
+            tf.translation = if p.arc {
+                p.fly_home(body.normalize_or_zero(), dt, &planet)
+            } else {
+                p.magnet_step(tf.translation, body, dt)
+            };
+            continue;
+        }
         let near = attractors
             .iter()
             .filter(|(pos, range)| tf.translation.distance(*pos) < *range)
@@ -749,9 +1264,7 @@ fn animate_net_pickups(
             .map(|(pos, _)| *pos);
         if let Some(pos) = near {
             p.flying = true;
-            p.speed = (p.speed + 60.0 * dt).min(crate::config::PICKUP_FLY_SPEED * 1.8);
-            let to = (pos - tf.translation).normalize_or_zero();
-            tf.translation += to * p.speed * dt;
+            tf.translation = p.magnet_step(tf.translation, pos, dt);
         } else {
             let up = p.dir;
             tf.translation =
@@ -766,7 +1279,8 @@ fn animate_net_pickups(
 /// `director::stage_transition` is unreachable on a client — its only trigger is the
 /// teleporter interaction, which is host-only — so without this the joiner keeps the entire
 /// previous planet (terrain, rocks, chests, shrines) while its HUD describes the new one,
-/// and every streamed enemy decodes against the wrong planet radius.
+/// and every streamed enemy decodes against the wrong planet radius. The same rebuild
+/// covers a world built from any seed other than the host's (see `RunSync::built_for`).
 ///
 /// This deliberately mirrors only the TEARDOWN+REBUILD half of stage_transition. The victory
 /// branch and the `save.counters.cleared` writes stay host-only: a client must never bank
@@ -784,12 +1298,22 @@ fn client_stage_transition(
     mut indices: (ResMut<NetEnemyIndex>, ResMut<NetBossIndex>, ResMut<NetPickupIndex>),
     scoped: Query<Entity, With<crate::planet::StageScoped>>,
     mine: Query<&crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+    my_id: Res<MyPlayerId>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     let Some(stage) = sync.pending_stage.take() else { return };
 
-    // Carry our build across, exactly as the host carries every player's.
-    let carried = mine.single().ok().cloned();
+    // Carry our build across, exactly as the host carries every player's — but only into
+    // the next stage of the SAME run. A world from another seed means another run, and a
+    // sheet from it (levels, gold, items) must not come along.
+    let same_run = sync.built_for.map(|(seed, _)| seed) == Some(run.run_seed);
+    let mut carried = if same_run { mine.single().ok().cloned() } else { None };
+    // the host rejoins everyone left down through the teleporter (§11) — so do we, rather
+    // than wear the old Beacon until its vitals catch up
+    if let Some(ps) = carried.as_mut() {
+        ps.rejoin();
+    }
+    sync.built_for = Some((run.run_seed, stage));
 
     // Tear the old stage down. This eats our astronaut and every streamed proxy too —
     // they are all StageScoped — so the id maps must be cleared or `receive_*` would
@@ -804,8 +1328,7 @@ fn client_stage_transition(
     let stage_seed = run.run_seed.wrapping_add(stage as u64);
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run.planet());
-    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
+    let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     crate::player::spawn_player(
         &mut commands,
         &mut meshes,
@@ -813,7 +1336,8 @@ fn client_stage_transition(
         &planet,
         &run,
         &save,
-        0,
+        // our own slot's drop point — where the host re-seats our server-side body
+        my_id.0.unwrap_or(0),
         carried.as_ref().map(|p| p.character).unwrap_or(run.character),
         true,
         carried,
@@ -826,8 +1350,12 @@ fn client_stage_transition(
         &run,
         &crate::run::PlayerState::new(run.character, &save),
         &save,
+        &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
     *phase = crate::run::RunPhase::Playing;
     banners.write(crate::messages::BannerMsg(format!(
@@ -896,7 +1424,7 @@ fn receive_bosses(
     assets: Option<Res<EnemyAssets>>,
     planet: Option<Res<CurrentPlanet>>,
     time: Res<Time>,
-    mut q: Query<(&mut Enemy, &mut Boss, &mut NetBoss)>,
+    mut q: Query<(&mut Enemy, &mut Boss, &mut NetBoss, Option<&mut AnubotBeam>)>,
 ) {
     let (Some(assets), Some(planet)) = (assets, planet) else { return };
     let now = time.elapsed_secs();
@@ -908,11 +1436,21 @@ fn receive_bosses(
             let dir = Vec3::from(r.dir);
             let kind = boss_from_code(r.kind);
             if let Some(ent) = index.0.get(&r.id).copied() {
-                if let Ok((mut e, mut b, mut nb)) = q.get_mut(ent) {
+                if let Ok((mut e, mut b, mut nb, beam)) = q.get_mut(ent) {
                     nb.target = dir;
                     nb.last_seen = now;
                     e.hp = r.hp_frac;
                     b.phase = r.phase;
+                    if let Some(mut beam) = beam {
+                        // A new state restarts the local timer the charge-up pose reads;
+                        // the angle is re-anchored every snapshot and spun in between by
+                        // drive_boss_proxies with the host's own sweep speeds.
+                        if beam.state != r.beam_state {
+                            beam.state = r.beam_state;
+                            beam.timer = AnubotBeam::state_secs(r.beam_state, r.phase);
+                        }
+                        beam.angle = r.beam_angle;
+                    }
                 }
                 continue;
             }
@@ -984,6 +1522,17 @@ fn receive_bosses(
                     ));
                 }
             }
+            // THE VERDICT BEAM rides the boss record (angle + state), not the hazard lane:
+            // it is continuous, and a proxy wearing a real AnubotBeam gets the shared
+            // anubot_beam_visuals — pose tell and slab — for free.
+            if kind == BossKind::Anubot {
+                commands.entity(ent).insert(AnubotBeam {
+                    angle: r.beam_angle,
+                    state: r.beam_state,
+                    timer: AnubotBeam::state_secs(r.beam_state, r.phase),
+                });
+                crate::enemies::spawn_anubot_beam_vis(&mut commands, &assets, ent, pos);
+            }
             index.0.insert(r.id, ent);
             info!("NET boss proxy spawned: {:?} (id {})", kind, r.id);
         }
@@ -998,11 +1547,12 @@ fn receive_bosses(
     }
 }
 
-/// CLIENT: ease boss proxies toward their streamed position.
-fn drive_boss_proxies(
+/// CLIENT: ease boss proxies toward their streamed position, and keep Anubot's beam
+/// sweeping between snapshots.
+pub fn drive_boss_proxies(
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
-    mut q: Query<(&mut Enemy, &mut NetBoss, &mut Transform, &Boss)>,
+    mut q: Query<(&mut Enemy, &mut NetBoss, &mut Transform, &Boss, Option<&mut AnubotBeam>)>,
 ) {
     let Some(planet) = planet else { return };
     let dt = time.delta_secs();
@@ -1010,7 +1560,11 @@ fn drive_boss_proxies(
         return;
     }
     let k = 1.0 - (-NET_ENEMY_SMOOTH_RATE * dt).exp();
-    for (mut e, mut nb, mut tf, b) in &mut q {
+    for (mut e, mut nb, mut tf, b, beam) in &mut q {
+        if let Some(mut beam) = beam {
+            beam.angle = (beam.angle + AnubotBeam::spin(beam.state, b.phase) * dt) % std::f32::consts::TAU;
+            beam.timer = (beam.timer - dt).max(0.0);
+        }
         let ang = nb.shown.angle_between(nb.target);
         nb.shown = if ang * planet.radius > NET_ENEMY_SNAP_ARC {
             nb.target
@@ -1022,6 +1576,10 @@ fn drive_boss_proxies(
         let def = b.kind.def();
         tf.translation = planet.surface_point(up) + up * def.scale * 0.8;
         tf.rotation = sphere::frame_quat(up, sphere::tangent_frame(up).0);
+        // Re-set every frame, as enemy_move does on the host: the beam's charge-up pose
+        // multiplies onto scale, and without a reset it would compound until the proxy
+        // towered over the planet.
+        tf.scale = Vec3::splat(def.scale);
     }
 }
 
@@ -1036,7 +1594,7 @@ fn planet_index(planet: &CurrentPlanet) -> usize {
 
 /// Explicit discriminants rather than a derived index: this is a WIRE format, so the
 /// mapping must not silently shift if the enum is ever reordered.
-fn kind_code(k: EnemyKind) -> u8 {
+pub fn kind_code(k: EnemyKind) -> u8 {
     match k {
         EnemyKind::Shambler => 0,
         EnemyKind::Sprinter => 1,
@@ -1047,9 +1605,17 @@ fn kind_code(k: EnemyKind) -> u8 {
         EnemyKind::Beamer => 6,
         EnemyKind::Lobber => 7,
         EnemyKind::Ghost => 8,
+        // ---- appended (P08): never reorder ----
+        EnemyKind::Rollo => 9,
+        EnemyKind::Trencher => 10,
+        EnemyKind::AegisDrone => 11,
+        EnemyKind::Sunskimmer => 12,
+        EnemyKind::BeaconTick => 13,
+        EnemyKind::Mimic => 14,
+        EnemyKind::BeamerPrime => 15,
     }
 }
-fn kind_from_code(c: u8) -> EnemyKind {
+pub fn kind_from_code(c: u8) -> EnemyKind {
     match c {
         1 => EnemyKind::Sprinter,
         2 => EnemyKind::Bruiser,
@@ -1059,6 +1625,13 @@ fn kind_from_code(c: u8) -> EnemyKind {
         6 => EnemyKind::Beamer,
         7 => EnemyKind::Lobber,
         8 => EnemyKind::Ghost,
+        9 => EnemyKind::Rollo,
+        10 => EnemyKind::Trencher,
+        11 => EnemyKind::AegisDrone,
+        12 => EnemyKind::Sunskimmer,
+        13 => EnemyKind::BeaconTick,
+        14 => EnemyKind::Mimic,
+        15 => EnemyKind::BeamerPrime,
         _ => EnemyKind::Shambler,
     }
 }
@@ -1158,6 +1731,10 @@ fn receive_enemies(
                     crate::planet::StageScoped,
                 ))
                 .id();
+            if crate::bestiary::has_vis(kind) {
+                // the new kinds' look, filled in by the enemy-state lane
+                commands.entity(e).insert(crate::bestiary::vis_bundle(dir));
+            }
             index.0.insert(id, e);
         }
 
@@ -1203,7 +1780,7 @@ fn receive_enemies(
 /// CLIENT: ease each proxy toward its last streamed position and animate it with the same
 /// crowd animator the host uses, so a streamed horde is indistinguishable from a simulated
 /// one. Also reaps proxies whose updates stopped arriving.
-fn drive_proxies(
+pub fn drive_proxies(
     mut commands: Commands,
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
@@ -1289,6 +1866,17 @@ pub fn log_stream_stats(
     ),
     planet: Option<Res<CurrentPlanet>>,
     mine: Res<MyPlayerId>,
+    // What a joiner must SEE of the per-player and event state — the co-op parity lanes.
+    parity: (
+        Query<&Visibility, With<crate::enemies::AnubotBeamVis>>,
+        Query<(), With<AimLine>>,
+        Res<crate::events_world::DustStorm>,
+        Res<crate::comet::Comet>,
+        Query<(&PlayerId, Has<crate::events_world::InStorm>, &crate::net::NetComet, Option<&crate::net::NetHero>)>,
+        // prediction error: our body vs the host's copy of it
+        Query<&Player, With<crate::player::LocalPlayer>>,
+        Query<(&PlayerId, &crate::net::NetTransform), Without<Player>>,
+    ),
 ) {
     let (n_boss, n_segs, seg_pos, n_pick, my_ps, n_hazard) = &counts;
     let Some(planet) = planet else { return };
@@ -1298,6 +1886,37 @@ pub fn log_stream_stats(
         return;
     }
     stats.next_print = now + 1.0;
+    let (beam_vis, aim_lines, storm, comet, per_player, local, copies) = &parity;
+    let pred_err = local
+        .iter()
+        .next()
+        .zip(mine.0)
+        .and_then(|(p, id)| copies.iter().find(|(pid, _)| pid.0 == id).map(|(_, nt)| (p.dir, nt.dir)))
+        .map(|(a, b)| sphere::arc_dist(a, b, planet.radius));
+    let parity_line = format!(
+        "pred_err={} beam_vis={}/{} aim_lines={} storm={}{} comet[me x{} {:.0}% fires={}] players[{}]",
+        pred_err.map(|e| format!("{e:.2}m")).unwrap_or_else(|| "-".into()),
+        beam_vis.iter().filter(|v| **v != Visibility::Hidden).count(),
+        beam_vis.iter().count(),
+        aim_lines.iter().count(),
+        if storm.active { "on" } else { "off" },
+        if storm.player_inside { "(me inside)" } else { "" },
+        comet.count,
+        comet.progress * 100.0,
+        comet.fires,
+        per_player
+            .iter()
+            .map(|(id, hidden, nc, hero)| format!(
+                "p{}:{}{} comet{}/f{}",
+                id.0,
+                hero.map(|h| crate::net::hero_from_code(h.0).def().name).unwrap_or("?"),
+                if hidden { " IN-STORM" } else { "" },
+                nc.count,
+                nc.fires
+            ))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
     match *role {
         NetRole::Host => {
             let resident: usize = residency.0.values().map(|s| s.len()).sum();
@@ -1345,10 +1964,12 @@ pub fn log_stream_stats(
                     .collect::<Vec<_>>()
                     .join(" ")
             );
+            info!("NETPARITY[Host] {parity_line}");
         }
         NetRole::Client => {
+            info!("NETPARITY[Client] {parity_line}");
             info!(
-                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s states={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
                 local_sim.iter().count(),
                 n_boss.iter().count(),
@@ -1371,6 +1992,7 @@ pub fn log_stream_stats(
                 my_ps.iter().next().map(|p| p.hp).unwrap_or(0.0),
                 my_ps.iter().next().map(|p| p.gold).unwrap_or(0),
                 stats.records,
+                stats.states,
                 stats.chunks,
                 stats.bytes,
                 stats.bytes as f32 / 1024.0,
@@ -1378,6 +2000,7 @@ pub fn log_stream_stats(
                 mine.0
             );
             stats.records = 0;
+            stats.states = 0;
             stats.chunks = 0;
             stats.bytes = 0;
         }

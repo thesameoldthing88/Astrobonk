@@ -6,6 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
+use crate::config::{EDGE_MARKER_OCCLUDER_INSET, HURT_TINT_PEAK, HURT_TINT_PEAK_REDUCED, HURT_TINT_SECS};
 use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
@@ -41,15 +42,47 @@ pub struct BossBarFill;
 pub struct BossBarName;
 #[derive(Component)]
 pub struct PowerupText;
+/// What the local astronaut's conditional items are doing right now (jammed, hovering,
+/// encircled, the Widow's bonus, the tether, the eaten sun).
+#[derive(Component)]
+pub struct ItemStatusText;
+/// The HP bar, XP bar and weapon tray at the bottom of the screen (its height sets the
+/// in-run panels' bottom band, `keep_panels_clear_of_hud`).
+#[derive(Component)]
+pub struct HudBottomCluster;
+/// The bottom cluster's distance from the screen's bottom edge, and the clear gap the
+/// in-run panels keep above it, in UI units.
+const HUD_BOTTOM_CLUSTER_Y: f32 = 12.0;
+const HUD_BAND_GAP: f32 = 8.0;
 #[derive(Component)]
 pub struct Vignette;
 #[derive(Component)]
 pub struct CometText;
 #[derive(Component)]
 pub struct DustOverlay;
+/// §13 assists in force (and the "one more chance" token), under the counters.
+#[derive(Component)]
+pub struct AssistText;
 /// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
 #[derive(Component)]
 pub struct EdgeMarker;
+/// The antipode dial's distance from the screen's left and bottom edges, in UI units.
+const ANTIPODE_DIAL_X: f32 = 14.0;
+const ANTIPODE_DIAL_Y: f32 = 44.0;
+/// The antipode dial (§4: the HUD tell for Antipode Blink): who waits on the far side of
+/// the planet, and whether the blink is charged. Shown while the local astronaut carries a
+/// blink (Antipode Blink or Boomerang Insurance).
+#[derive(Component)]
+pub struct AntipodeDial;
+/// The dial's ring: its border is the far side's band colour, pulsing when it's a wall.
+#[derive(Component)]
+pub struct AntipodeRing;
+#[derive(Component)]
+pub struct AntipodeCount;
+#[derive(Component)]
+pub struct AntipodeBandText;
+#[derive(Component)]
+pub struct AntipodeBlinkText;
 
 #[derive(Resource, Default)]
 pub struct BannerQueue {
@@ -105,6 +138,52 @@ pub fn spawn_hud(mut commands: Commands) {
                 ));
             }
 
+            // the antipode dial, bottom-left: a ring naming the far side's crowd, over the
+            // blink's charge. Clear of the bottom cluster (which starts at 18% across); it
+            // steps aside while a card panel is up, like the other mid-screen lines.
+            root.spawn((
+                AntipodeDial,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(ANTIPODE_DIAL_X),
+                    // above the bottom line the off-screen edge markers run along (34 px
+                    // in); the left one's markers step round it (`update_edge_markers`)
+                    bottom: Val::Px(ANTIPODE_DIAL_Y),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(1.0),
+                    padding: UiRect::axes(Val::Px(6.0), Val::Px(4.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                // a dark backing: the dial sits over the day side's bright regolith too
+                BackgroundColor(Color::srgba(0.03, 0.04, 0.08, 0.55)),
+                Visibility::Hidden,
+                Pickable::IGNORE,
+            ))
+            .with_children(|d| {
+                d.spawn((txt("ANTIPODE", 11.0, Color::srgb(0.7, 0.8, 0.9)),));
+                d.spawn((
+                    AntipodeRing,
+                    Node {
+                        width: Val::Px(52.0),
+                        height: Val::Px(52.0),
+                        border: UiRect::all(Val::Px(4.0)),
+                        border_radius: BorderRadius::MAX,
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.08, 0.75)),
+                    BorderColor::all(Color::WHITE),
+                ))
+                .with_children(|r| {
+                    r.spawn((AntipodeCount, txt("0", FONT_MED, Color::WHITE)));
+                });
+                d.spawn((AntipodeBandText, txt("CLEAR", 12.0, Color::WHITE)));
+                d.spawn((AntipodeBlinkText, txt("", 12.0, Color::WHITE)));
+            });
+
             // dust-storm haze (Mars) — fades in while you're inside the storm
             root.spawn((
                 DustOverlay,
@@ -142,12 +221,13 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((CometText, txt("", FONT_MED, Color::srgb(1.0, 0.8, 0.3))));
                 });
 
-            // boss bar under the timer
+            // boss bar under the timer — and under the comet readout (52 px + a 20 px line),
+            // which it used to overprint: a boss fight is exactly when a comet tail forms
             root.spawn((
                 BossBarWrap,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(64.0),
+                    top: Val::Px(80.0),
                     left: Val::Percent(25.0),
                     width: Val::Percent(50.0),
                     flex_direction: FlexDirection::Column,
@@ -193,12 +273,15 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((GoldText, txt("GOLD 0", FONT_MED, Color::srgb(1.0, 0.85, 0.3))));
                     c.spawn((SilverText, txt("SILVER +0", FONT_MED, Color::srgb(0.75, 0.85, 1.0))));
                     c.spawn((PowerupText, txt("", FONT_SMALL, Color::srgb(0.85, 0.5, 1.0))));
+                    c.spawn((ItemStatusText, txt("", FONT_SMALL, Color::srgb(1.0, 0.75, 0.45))));
+                    c.spawn((AssistText, txt("", FONT_SMALL, Color::srgb(0.55, 0.9, 1.0)), TextLayout::new_with_justify(Justify::Right)));
                 });
 
-            // banner center
+            // banner center, clear of the boss bar (80 px + a name line + the bar). In px, not
+            // a share of the screen height, so it keeps its distance at every UI scale
             root.spawn((Node {
                 position_type: PositionType::Absolute,
-                top: Val::Percent(22.0),
+                top: Val::Px(124.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -232,9 +315,9 @@ pub fn spawn_hud(mut commands: Commands) {
                 });
 
             // bottom cluster: hp bar, xp bar, weapon row
-            root.spawn((Node {
+            root.spawn((HudBottomCluster, Node {
                 position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
+                bottom: Val::Px(HUD_BOTTOM_CLUSTER_Y),
                 left: Val::Percent(18.0),
                 width: Val::Percent(64.0),
                 flex_direction: FlexDirection::Column,
@@ -242,13 +325,18 @@ pub fn spawn_hud(mut commands: Commands) {
                 ..default()
             },))
                 .with_children(|c| {
-                    // weapons tray
+                    // weapons tray, then item chips. It WRAPS, growing upward from the bars:
+                    // a late build holds 20+ distinct items, and one row ran off the screen.
                     c.spawn((
                         WeaponRow,
                         Node {
+                            width: Val::Percent(100.0),
+                            min_height: Val::Px(34.0),
+                            flex_wrap: FlexWrap::Wrap,
                             column_gap: Val::Px(6.0),
+                            row_gap: Val::Px(4.0),
                             align_items: AlignItems::Center,
-                            height: Val::Px(34.0),
+                            align_content: AlignContent::FlexEnd,
                             ..default()
                         },
                     ));
@@ -330,7 +418,10 @@ pub fn update_hud(
         Query<&mut Node, With<XpFill>>,
         Query<&mut Node, With<HpFill>>,
     )>,
-    mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
+    mut vignette: Query<(&mut BackgroundColor, Ref<Vignette>)>,
+    (save, time): (Res<crate::save::MetaSave>, Res<Time>),
+    // (HP + shield last frame, seconds of hurt tint left)
+    mut hurt: Local<(f32, f32)>,
 ) {
     let Ok(ps) = q_ps.single() else { return };
     if let Ok(mut t) = sets.p0().single_mut() {
@@ -376,24 +467,223 @@ pub fn update_hud(
     if let Ok(mut n) = fills.p1().single_mut() {
         n.width = Val::Percent((ps.hp / ps.stats.max_hp * 100.0).clamp(0.0, 100.0));
     }
-    if let Ok(mut bg) = vignette.single_mut() {
-        bg.0 = Color::srgba(1.0, 0.1, 0.1, (ps.iframes * 0.55).clamp(0.0, 0.4));
+    if let Ok((mut bg, vignette)) = vignette.single_mut() {
+        // The hurt tint marks what a hit TOOK — HP or shield — seen here, on the HUD's own
+        // machine: a joiner gets it from the vitals the host streams, and a revive's grace
+        // (HP going up) never tints. A fresh HUD (new run, other hero) starts from its own
+        // numbers, not the last run's. Flash reduction keeps it to a faint wash.
+        let pool = ps.hp.max(0.0) + ps.shield.max(0.0);
+        if vignette.is_added() {
+            *hurt = (pool, 0.0);
+        } else if pool < hurt.0 - 0.01 {
+            hurt.1 = HURT_TINT_SECS;
+        }
+        hurt.0 = pool;
+        hurt.1 = (hurt.1 - time.delta_secs()).max(0.0);
+        let peak = if save.accessibility.flash_reduction { HURT_TINT_PEAK_REDUCED } else { HURT_TINT_PEAK };
+        bg.0 = save.accessibility.palette.danger().with_alpha(peak * hurt.1 / HURT_TINT_SECS);
     }
+}
+
+/// The HUD's mid-screen lines (the Mission Control tutorial, the interact prompt) and the
+/// item status line (P03; long enough to reach under the rightmost card) sit where a choice
+/// panel or the pause menu draws its cards — at a large UI scale right across them. While
+/// one is open those lines step aside; they are back the moment play resumes.
+pub fn hide_mid_hud_under_panels(
+    phase: Res<crate::run::RunPhase>,
+    mut q: Query<&mut Visibility, Or<(With<crate::tutorial::TutorialText>, With<PromptText>, With<ItemStatusText>)>>,
+) {
+    use crate::run::RunPhase;
+    let want = if matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused) {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+/// Keep the in-run panels' bands clear of the HUD: the top band grows while a boss bar is
+/// showing, so a level-up or the pause menu never prints over a boss's name, and the bottom
+/// band grows with the weapon tray, whose item chips wrap onto more rows as a build fills
+/// out (P03) — so a card, a button or the panel's status line never lands on a chip.
+pub fn keep_panels_clear_of_hud(
+    boss_bar: Query<&Visibility, With<BossBarWrap>>,
+    cluster: Query<&ComputedNode, With<HudBottomCluster>>,
+    mut q: Query<&mut Node, With<super::RunOverlay>>,
+) {
+    let boss = boss_bar.iter().any(|v| *v != Visibility::Hidden);
+    let top = Val::Px(if boss { crate::config::HUD_TOP_BAND_BOSS } else { crate::config::HUD_TOP_BAND });
+    // ComputedNode sizes are physical pixels; × inverse_scale_factor gives the UI units
+    // Val::Px is written in (the same units at every UI scale). Whole units, so layout
+    // jitter of a fraction of a pixel never re-lays the panel.
+    let tray = cluster
+        .iter()
+        .next()
+        .map_or(0.0, |c| (c.size().y * c.inverse_scale_factor()).ceil() + HUD_BOTTOM_CLUSTER_Y + HUD_BAND_GAP);
+    let bottom = Val::Px(crate::config::HUD_BOTTOM_BAND.max(tray));
+    for mut n in &mut q {
+        if n.padding.top != top {
+            n.padding.top = top;
+        }
+        if n.padding.bottom != bottom {
+            n.padding.bottom = bottom;
+        }
+    }
+}
+
+/// The assists in force, so nobody mistakes an eased run for a canon one — including a
+/// joiner, whose run is the host's (`RunState::assist` arrives in RunSnapMsg) — and the
+/// "one more chance" token while it is still in hand.
+pub fn update_assist_hud(
+    run: Res<RunState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
+    mut q: Query<&mut Text, With<AssistText>>,
+) {
+    let Ok(mut t) = q.single_mut() else { return };
+    let token = match q_ps.single() {
+        Ok(ps) if run.assist.revive_token => {
+            if ps.revive_token_ready(&run.assist) { "\nONE MORE CHANCE: READY" } else { "\nONE MORE CHANCE: USED" }
+        }
+        _ => "",
+    };
+    let line = if run.assisted { format!("ASSISTED{token}") } else { String::new() };
+    if t.0 != line {
+        t.0 = line;
+    }
+}
+
+/// The antipode dial (§4 "the off-screen threat ring shows antipode density"): the count
+/// the host takes at the local astronaut's far pole every quarter second, named in a band
+/// word (shape + text + colour, §13 — never colour alone), The Static or a boss called out,
+/// and the blink's charge. It reads only the local body's `NetItemVis` — written by the host
+/// for its own body, adopted by a joiner from the host's copy of it — so both HUDs are one
+/// path. The ring pulses (well under 3 Hz, and never a flash) while the far side is a wall.
+#[allow(clippy::type_complexity)]
+pub fn update_antipode_dial(
+    time: Res<Time<Real>>,
+    save: Res<crate::save::MetaSave>,
+    phase: Res<crate::run::RunPhase>,
+    q_ps: Query<(&PlayerState, &crate::net::NetItemVis), With<crate::player::LocalPlayer>>,
+    mut dial: Query<&mut Visibility, With<AntipodeDial>>,
+    mut ring: Query<&mut BorderColor, With<AntipodeRing>>,
+    mut texts: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<AntipodeCount>>,
+        Query<(&mut Text, &mut TextColor), With<AntipodeBandText>>,
+        Query<(&mut Text, &mut TextColor), With<AntipodeBlinkText>>,
+    )>,
+) {
+    use crate::content::items::ItemKind;
+    use crate::net::{ITEMVIS_ANTIPODE_BOSS, ITEMVIS_ANTIPODE_STATIC, ITEMVIS_INSURED};
+    use crate::techs::AntipodeBand;
+    let Ok(mut vis) = dial.single_mut() else { return };
+    let Ok((ps, net)) = q_ps.single() else {
+        *vis = Visibility::Hidden;
+        return;
+    };
+    let blink = ps.has_item(ItemKind::AntipodeBlink);
+    let insured = ps.has_item(ItemKind::BoomerangInsurance);
+    use crate::run::RunPhase;
+    let panel = matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused);
+    let want = if (blink || insured) && !panel { Visibility::Inherited } else { Visibility::Hidden };
+    if *vis != want {
+        *vis = want;
+    }
+    if want == Visibility::Hidden {
+        return;
+    }
+    let danger = save.accessibility.palette.danger();
+    let count = net.antipode as u32;
+    let band = AntipodeBand::of(count);
+    let (label, color) = if net.flags & ITEMVIS_ANTIPODE_STATIC != 0 {
+        ("THE STATIC", Color::srgb(0.85, 0.65, 1.0))
+    } else if net.flags & ITEMVIS_ANTIPODE_BOSS != 0 {
+        ("BOSS", danger)
+    } else {
+        match band {
+            AntipodeBand::Clear => (band.label(), Color::srgb(0.45, 1.0, 0.8)),
+            AntipodeBand::Thin => (band.label(), Color::srgb(0.85, 0.95, 1.0)),
+            AntipodeBand::Crowded => (band.label(), Color::srgb(1.0, 0.75, 0.3)),
+            AntipodeBand::Wall => (band.label(), danger),
+        }
+    };
+    let alarm = band == AntipodeBand::Wall || net.flags & (ITEMVIS_ANTIPODE_STATIC | ITEMVIS_ANTIPODE_BOSS) != 0;
+    let pulse = if alarm { 0.7 + 0.3 * (time.elapsed_secs() * std::f32::consts::TAU * 1.2).sin() } else { 1.0 };
+    if let Ok(mut b) = ring.single_mut() {
+        *b = BorderColor::all(color.with_alpha(pulse));
+    }
+    let count_line = if count >= 255 { "255+".to_string() } else { count.to_string() };
+    let charged = net.blink_cd == 0;
+    let blink_line = match (blink, insured) {
+        (true, _) if charged => "[Q] BLINK".to_string(),
+        (true, _) => format!("BLINK {}s", net.blink_cd),
+        (false, _) if !charged => format!("RECHARGE {}s", net.blink_cd),
+        (false, _) => String::new(),
+    };
+    let policy = if !insured {
+        ""
+    } else if net.flags & ITEMVIS_INSURED != 0 {
+        "INSURED"
+    } else {
+        "POLICY PAID"
+    };
+    let blink_line = match (blink_line.is_empty(), policy.is_empty()) {
+        (_, true) => blink_line,
+        (true, false) => policy.to_string(),
+        (false, false) => format!("{blink_line}\n{policy}"),
+    };
+    let ready = Color::srgb(0.5, 0.95, 1.0);
+    let waiting = Color::srgb(0.75, 0.78, 0.85);
+    set_text(&mut texts.p0(), &count_line, color);
+    set_text(&mut texts.p1(), label, color);
+    set_text(&mut texts.p2(), &blink_line, if charged { ready } else { waiting });
+}
+
+/// Write a HUD line only when it changed (a text edit re-lays the node).
+fn set_text<F: bevy::ecs::query::QueryFilter>(q: &mut Query<(&mut Text, &mut TextColor), F>, s: &str, c: Color) {
+    if let Ok((mut t, mut tc)) = q.single_mut() {
+        if t.0 != s {
+            t.0 = s.to_string();
+        }
+        if tc.0 != c {
+            tc.0 = c;
+        }
+    }
+}
+
+/// What the weapon row was last built from (it is rebuilt only when this changes).
+#[derive(PartialEq)]
+pub struct WeaponRowKey {
+    weapons: Vec<(WeaponKind, u32)>,
+    items: Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)>,
+    palette: crate::content::palettes::Palette,
 }
 
 /// Rebuild the weapon tray when loadout changes.
 pub fn update_weapon_row(
     mut commands: Commands,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
-    mut cache: Local<Vec<(WeaponKind, u32)>>,
+    save: Res<crate::save::MetaSave>,
+    mut cache: Local<Option<WeaponRowKey>>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {
     let Ok(run) = q_ps.single() else { return };
     let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
-    if *cache == current {
+    let palette = save.accessibility.palette;
+    // rebuilt on any change to the loadout — a new copy of an item, or a better grade of it —
+    // or to the palette its grade colors are drawn in
+    let key = WeaponRowKey {
+        weapons: current.clone(),
+        items: run.items.iter().map(|s| (s.kind, s.count(), s.best())).collect(),
+        palette,
+    };
+    if cache.as_ref() == Some(&key) {
         return;
     }
-    *cache = current.clone();
+    *cache = Some(key);
     let Ok(row) = q_row.single() else { return };
     commands.entity(row).despawn_related::<Children>();
     commands.entity(row).with_children(|c| {
@@ -417,9 +707,10 @@ pub fn update_weapon_row(
                 slot.spawn(txt(format!("{} {}", tag.to_uppercase(), level), 13.0, def.color));
             });
         }
-        // item chips
-        for (item, count) in run.items.iter() {
-            let d = item.def();
+        // item chips, coloured by the best grade held of each
+        for stack in run.items.iter() {
+            let d = stack.kind.def();
+            let color = stack.best().color(palette);
             c.spawn((
                 Node {
                     padding: UiRect::axes(Val::Px(5.0), Val::Px(2.0)),
@@ -428,14 +719,95 @@ pub fn update_weapon_row(
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.7)),
-                BorderColor::all(d.rarity.color()),
+                BorderColor::all(color),
             ))
             .with_children(|chip| {
-                let tag: String = d.name.chars().take(2).collect();
-                chip.spawn(txt(format!("{tag}{count}"), 11.0, d.rarity.color()));
+                chip.spawn(txt(format!("{}{}", d.tag, stack.count()), 11.0, color));
             });
         }
     });
+}
+
+/// One line of what the local astronaut's conditional items and tomes are doing — the
+/// numbers they deal damage from, so "+12% from the descent" is something you can read —
+/// and the ground's own rules where they stand (night, Farside, thorns).
+pub fn update_item_status(
+    run: Res<RunState>,
+    planet: Res<crate::planet::CurrentPlanet>,
+    q_ps: Query<(&PlayerState, &crate::items::ItemProcs, &crate::arsenal::WeaponProcs, &crate::player::Player), With<crate::player::LocalPlayer>>,
+    mut q: Query<&mut Text, With<ItemStatusText>>,
+) {
+    use crate::config::*;
+    use crate::content::items::ItemKind;
+    use crate::content::weapons::{Behavior, WeaponKind};
+    let Ok(mut text) = q.single_mut() else { return };
+    let Ok((ps, procs, wprocs, body)) = q_ps.single() else { return };
+    let mut parts: Vec<String> = Vec::new();
+    // the ground's rules first: they apply to everyone standing here
+    if ps.night && ps.night_bonus() <= 0.0 {
+        parts.push("NIGHT".into());
+    }
+    if crate::daynight::is_farside(crate::daynight::has_farside(planet.kind), body.dir) {
+        parts.push("FARSIDE".into());
+    }
+    if ps.thorned > 0.0 {
+        parts.push("THORNS".into());
+    }
+    if procs.jam > 0.0 {
+        parts.push("JAMMED".into());
+    }
+    if ps.has_item(ItemKind::AntiGravBoots) && ps.airborne {
+        parts.push(format!("HOVER {:.1}s", procs.hover_left.max(0.0)));
+    }
+    if ps.has_item(ItemKind::IcarusBoots) {
+        parts.push(if ps.airborne { "ICARUS UP".into() } else { "ICARUS GROUNDED".into() });
+    }
+    let dirs = ps.encircle_dirs.count_ones();
+    if dirs > 0 {
+        let pct = ENCIRCLE_DMG_PER_DIR * dirs as f32 * ps.item_power(ItemKind::EncirclementBonus) * 100.0;
+        parts.push(format!("ENCIRCLED {dirs}/8 +{pct:.0}%"));
+    }
+    let downhill = DOWNHILL_DMG_PER_M * ps.descent_m * ps.item_power(ItemKind::DownhillMomentum) * 100.0;
+    if downhill >= 1.0 {
+        parts.push(format!("DOWNHILL +{downhill:.0}%"));
+    }
+    if ps.widow_active() {
+        parts.push(format!("WIDOW +{:.0}%", WIDOW_STAT_BONUS * 100.0));
+    } else if ps.has_item(ItemKind::WidowsRing) && procs.widow_cd > 0.0 {
+        parts.push(format!("RING {:.0}s", procs.widow_cd));
+    }
+    if ps.has_item(ItemKind::DeadMansTether) {
+        parts.push(if ps.tether_used { "TETHER SPENT".into() } else { "TETHER READY".into() });
+    }
+    if run.sun_shrink > 0.0 {
+        parts.push(format!("SUN -{:.0}%", run.sun_shrink * 100.0));
+    }
+    // the tomes' conditions (Encirclement, Nightfall, Momentum)
+    if ps.crowd_bonus() >= 0.005 {
+        parts.push(format!("CROWD {} +{:.0}%", ps.crowd, ps.crowd_bonus() * 100.0));
+    }
+    if ps.night_bonus() > 0.0 {
+        parts.push(format!("NIGHT +{:.0}%", ps.night_bonus() * 100.0));
+    }
+    if ps.momentum_bonus() >= 0.005 {
+        parts.push(format!("MOMENTUM +{:.0}%", ps.momentum_bonus() * 100.0));
+    }
+    // the weapons that run on a condition: the Yo-Yo's un-hit combo, FULL DISCHARGE's charge
+    if ps.weapons.iter().any(|w| matches!(w.kind.def().behavior, Behavior::Tether { .. })) {
+        let bonus = (crate::arsenal::combo_mult(wprocs.combo) - 1.0) * 100.0;
+        if wprocs.payout > 0.95 {
+            parts.push(format!("YO-YO x{:.0} GARROTE", wprocs.combo.floor()));
+        } else {
+            parts.push(format!("YO-YO x{:.0} +{bonus:.0}%", wprocs.combo.floor()));
+        }
+    }
+    if ps.weapons.iter().any(|w| w.kind == WeaponKind::FullDischarge) {
+        parts.push(format!("DISCHARGE {:.0}%", (wprocs.discharge / FULL_DISCHARGE_SECS * 100.0).min(100.0)));
+    }
+    let line = parts.join("  ");
+    if text.0 != line {
+        text.0 = line;
+    }
 }
 
 /// Point edge markers at important things beyond the screen/horizon: bosses (red),
@@ -444,22 +816,38 @@ pub fn update_weapon_row(
 /// this is how you navigate to them.
 #[allow(clippy::type_complexity)]
 pub fn update_edge_markers(
+    ui_scale: Res<UiScale>,
+    save: Res<crate::save::MetaSave>,
     camera: Query<(&Camera, &GlobalTransform), With<crate::player::PlayerRig>>,
     q_boss: Query<&Transform, With<crate::enemies::Boss>>,
     q_inter: Query<(&Transform, &crate::interact::Interactable)>,
     q_charge: Query<(&Transform, &crate::interact::ChargeShrine)>,
+    dial: Query<(&ComputedNode, &Visibility), With<AntipodeDial>>,
     mut markers: Query<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<EdgeMarker>>,
+    planet: Option<Res<crate::planet::CurrentPlanet>>,
 ) {
     use crate::interact::InteractKind;
     let Ok((cam, cam_tf)) = camera.single() else { return };
+    // The planet hides what is over its limb even when it projects inside the viewport (a
+    // boss or teleporter 40-200 m ahead does) — that is the marker's main job (M22).
+    let eye = cam_tf.translation();
     let Some(size) = cam.logical_viewport_size() else { return };
     let center = size / 2.0;
     let margin = 34.0;
+    let ui = ui_scale.0.max(0.01);
+    // The antipode dial sits on the left edge's marker line: while it shows, a marker that
+    // would land on it steps up the edge to just above it, so neither hides the other.
+    // (UI units, like the markers' own Val::Px; ComputedNode sizes are physical pixels.)
+    let dial_rect = dial.iter().find(|(_, v)| **v != Visibility::Hidden).map(|(c, _)| {
+        let dial = c.size() * c.inverse_scale_factor();
+        let bottom = size.y / ui - ANTIPODE_DIAL_Y;
+        Rect::new(ANTIPODE_DIAL_X, bottom - dial.y, ANTIPODE_DIAL_X + dial.x, bottom)
+    });
 
     // collect targets: (world pos, color, marker px size), priority order
     let mut targets: Vec<(Vec3, Color, f32)> = Vec::new();
     for tf in &q_boss {
-        targets.push((tf.translation, Color::srgb(1.0, 0.25, 0.2), 16.0));
+        targets.push((tf.translation, save.accessibility.palette.danger(), 16.0));
     }
     for (tf, inter) in &q_inter {
         if inter.used {
@@ -467,6 +855,7 @@ pub fn update_edge_markers(
         }
         let (color, px) = match inter.kind {
             InteractKind::Teleporter => (Color::srgb(0.3, 1.0, 0.8), 16.0),
+            InteractKind::RewardChest => (Color::srgb(1.0, 0.85, 0.2), 15.0),
             InteractKind::Chest => (Color::srgb(1.0, 0.8, 0.25), 11.0),
             InteractKind::ShadyGuy => (Color::srgb(0.75, 0.5, 1.0), 11.0),
             InteractKind::Cage => (Color::srgb(0.75, 0.55, 0.35), 12.0),
@@ -485,11 +874,17 @@ pub fn update_edge_markers(
     for (world, color, px) in targets.into_iter().take(24) {
         let Some((mut node, mut bg, mut border)) = it.next() else { break };
 
-        // on-screen and in front? then no marker needed
+        // on-screen, in front and not behind the planet? then no marker needed
         let mut visible_on_screen = false;
         if let Ok(v) = cam.world_to_viewport(cam_tf, world) {
             if v.x >= 0.0 && v.y >= 0.0 && v.x <= size.x && v.y <= size.y {
-                visible_on_screen = true;
+                // The planet as a ball at its mean radius — or lower, where the target stands
+                // in a crater, so the ground it stands on never hides it.
+                let hidden = planet.as_ref().is_some_and(|p| {
+                    let r = p.radius.min(p.surface(world.normalize_or_zero())) - EDGE_MARKER_OCCLUDER_INSET;
+                    segment_hits_sphere(eye, world, r)
+                });
+                visible_on_screen = !hidden;
             }
         }
         if visible_on_screen {
@@ -511,7 +906,16 @@ pub fn update_edge_markers(
         let half = center - Vec2::splat(margin);
         let scale_x = if d.x.abs() > 1e-4 { half.x / d.x.abs() } else { f32::MAX };
         let scale_y = if d.y.abs() > 1e-4 { half.y / d.y.abs() } else { f32::MAX };
-        let pos = center + d * scale_x.min(scale_y);
+        // Logical pixels -> UI units: UiScale multiplies every Val::Px.
+        let mut pos = (center + d * scale_x.min(scale_y)) / ui;
+        if let Some(r) = dial_rect {
+            let h = px / 2.0;
+            // a marker on the bottom edge's line passes under the dial: only the left
+            // column's can land on it
+            if pos.x - h < r.max.x + 2.0 && pos.y + h > r.min.y - 2.0 && pos.y - h < r.max.y {
+                pos.y = r.min.y - 2.0 - h;
+            }
+        }
 
         node.left = Val::Px(pos.x - px / 2.0);
         node.top = Val::Px(pos.y - px / 2.0);
@@ -526,6 +930,14 @@ pub fn update_edge_markers(
         node.top = Val::Px(-100.0);
         bg.0 = Color::NONE;
     }
+}
+
+/// The camera-to-target segment passes through the ball of radius `r` about the planet's
+/// centre (the origin).
+fn segment_hits_sphere(a: Vec3, b: Vec3, r: f32) -> bool {
+    let ab = b - a;
+    let t = (-a.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    (a + ab * t).length_squared() < r * r
 }
 
 /// Fade the dust haze in/out based on whether the player is inside the Mars storm.
@@ -544,20 +956,23 @@ pub fn update_dust_overlay(
 }
 
 /// Comet combo indicator: a growing tail counter + a charge meter drawn in text bars.
+/// Plain ASCII on purpose: the game font (Bevy's built-in FiraMono subset) has only the 95
+/// printable ASCII glyphs, so block characters drew a row of identical missing-glyph boxes
+/// and the meter never visibly filled.
 pub fn update_comet_hud(
     comet: Res<crate::comet::Comet>,
     mut q: Query<(&mut Text, &mut TextColor), With<CometText>>,
 ) {
     let Ok((mut text, mut color)) = q.single_mut() else { return };
     if comet.flash > 0.0 {
-        text.0 = "\u{2604} COMET!".into();
+        text.0 = "COMET!".into();
         color.0 = Color::srgb(1.0, 0.9, 0.4);
     } else if comet.active {
-        let filled = (comet.progress() * 12.0).round() as usize;
-        let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(12 - filled);
-        text.0 = format!("\u{2604} x{}  {bar}", comet.count);
+        let filled = (comet.progress * 12.0).round() as usize;
+        let bar: String = "#".repeat(filled) + &"-".repeat(12 - filled);
+        text.0 = format!("COMET x{}  [{bar}]", comet.count);
         // warm up from amber to white-hot as the charge fills
-        let t = comet.progress();
+        let t = comet.progress;
         color.0 = Color::srgb(1.0, 0.8 + 0.2 * t, 0.3 + 0.5 * t);
     } else {
         text.0 = String::new();
@@ -565,11 +980,13 @@ pub fn update_comet_hud(
 }
 
 pub fn update_boss_bar(
+    save: Res<crate::save::MetaSave>,
     q_boss: Query<(&Enemy, &Boss)>,
     mut wrap: Query<&mut Visibility, With<BossBarWrap>>,
-    mut fill: Query<&mut Node, With<BossBarFill>>,
-    mut name: Query<&mut Text, With<BossBarName>>,
+    mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossBarFill>>,
+    mut name: Query<(&mut Text, &mut TextColor), With<BossBarName>>,
 ) {
+    let danger = save.accessibility.palette.danger();
     let Ok(mut vis) = wrap.single_mut() else { return };
     // show the beefiest live boss
     let mut best: Option<(f32, f32, &'static str)> = None;
@@ -582,11 +999,13 @@ pub fn update_boss_bar(
     match best {
         Some((hp, max, n)) => {
             *vis = Visibility::Visible;
-            if let Ok(mut f) = fill.single_mut() {
+            if let Ok((mut f, mut bg)) = fill.single_mut() {
                 f.width = Val::Percent((hp / max * 100.0).clamp(0.0, 100.0));
+                bg.0 = danger;
             }
-            if let Ok(mut t) = name.single_mut() {
+            if let Ok((mut t, mut c)) = name.single_mut() {
                 t.0 = n.to_string();
+                c.0 = danger.mix(&Color::WHITE, 0.35);
             }
         }
         None => {
