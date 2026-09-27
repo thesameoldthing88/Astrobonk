@@ -94,6 +94,23 @@ pub fn despawn_stage(mut commands: Commands, q: Query<Entity, With<StageScoped>>
     }
 }
 
+/// A stable handle for one terrain: keyed by everything `planet_mesh` reads, so a world
+/// whose constants change (or a future seeded terrain) never reuses a stale mesh. A
+/// `Handle::Uuid` does not reference-count, so the mesh outlives the stage that built it.
+fn terrain_mesh_handle(planet: &CurrentPlanet) -> Handle<Mesh> {
+    use std::hash::{Hash, Hasher};
+    let t = &planet.terrain;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (planet.kind, t.seed, t.craters).hash(&mut h);
+    for f in [planet.radius, t.amp, t.rugged, t.crater_depth, t.crater_width] {
+        f.to_bits().hash(&mut h);
+    }
+    Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(TERRAIN_MESH_UUID_HI, h.finish()), default())
+}
+
+/// The high half of every cached terrain mesh's UUID (the low half is the terrain's hash).
+const TERRAIN_MESH_UUID_HI: u64 = 0xA570_B0_7E_77A1_0001;
+
 /// Build the icosphere terrain mesh with per-vertex displacement + biome vertex colors.
 fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     // subdiv 7 gives ~4× the terrain resolution of the old mesh — crisper mountains,
@@ -155,8 +172,15 @@ pub fn spawn_stage(
     // solid props collected as we place them
     let mut colliders: Vec<PropCollider> = Vec::new();
 
-    // Terrain
-    let mesh = meshes.add(planet_mesh(&def, &planet.terrain));
+    // The space behind the world: the planet's own near-black sky, not the renderer's
+    // default mid-grey clear colour (L6). Every machine builds its stage through here.
+    commands.insert_resource(ClearColor(def.sky));
+
+    // Terrain: 163,842 vertices of pure function of the planet's constants, so it is built
+    // once per world per session and re-used on every later visit (L8: rebuilding it on
+    // every stage entry and every retry was a hitch on host and joiner alike).
+    let mesh = terrain_mesh_handle(planet);
+    let _ = meshes.get_or_insert_with(&mesh, || planet_mesh(&def, &planet.terrain));
     let mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         perceptual_roughness: 0.95,
