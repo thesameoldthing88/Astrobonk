@@ -257,31 +257,105 @@ pub struct EnemyAssets {
 #[derive(Component)]
 pub struct BaseMat(pub Handle<StandardMaterial>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SpatialHash {
     pub map: HashMap<IVec3, Vec<(Entity, Vec3)>>,
+    /// The shell the members live in: the least and greatest distance from the planet's
+    /// centre over every member at the last rebuild. The horde is a skin a few metres thick
+    /// on a sphere, so most cells of a query's cube hold nothing and need no probe.
+    pub shell: (f32, f32),
+}
+
+impl Default for SpatialHash {
+    fn default() -> Self {
+        Self { map: HashMap::new(), shell: (f32::INFINITY, f32::NEG_INFINITY) }
+    }
+}
+
+/// Distance from `p` to the cell span `[k·cell, (k+1)·cell)` along one axis (0 inside it).
+fn axis_gap(p: f32, k: i32) -> f32 {
+    let lo = k as f32 * ENEMY_SEPARATION_CELL;
+    (lo - p).max(p - (lo + ENEMY_SEPARATION_CELL)).max(0.0)
 }
 
 impl SpatialHash {
     pub fn key(pos: Vec3) -> IVec3 {
         (pos / ENEMY_SEPARATION_CELL).floor().as_ivec3()
     }
-    /// All enemies within `radius` of `pos` (approximate, cell-based).
+
+    /// Every member that could lie within `radius` of `pos` (cell-based: a superset, never
+    /// missing one). Probes only the cells that both touch the query ball and cross the
+    /// members' shell (M18: the old full-cube scan was 3,375 probes for a homing seeker's
+    /// 14 m and 9,261 for the comet's 22 m; `spatial_hash_self_check` reports the new ones).
     pub fn near<'a>(&'a self, pos: Vec3, radius: f32) -> impl Iterator<Item = (Entity, Vec3)> + 'a {
-        let r = (radius / ENEMY_SEPARATION_CELL).ceil() as i32;
-        let c = Self::key(pos);
-        (-r..=r).flat_map(move |x| {
-            (-r..=r).flat_map(move |y| {
-                (-r..=r).flat_map(move |z| {
-                    self.map
-                        .get(&(c + IVec3::new(x, y, z)))
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                })
-            })
-        })
+        self.cells(pos, radius).flat_map(move |k| self.map.get(&k).into_iter().flatten().copied())
     }
+
+    /// The cells a `near` query probes.
+    fn cells(&self, pos: Vec3, radius: f32) -> impl Iterator<Item = IVec3> {
+        let cell = ENEMY_SEPARATION_CELL;
+        let r = (radius / cell).ceil() as i32;
+        let c = Self::key(pos);
+        let (lo, hi) = self.shell;
+        (-r..=r)
+            .flat_map(move |x| (-r..=r).map(move |y| (c.x + x, c.y + y)))
+            .flat_map(move |(kx, ky)| {
+                // the z cells of this column the ball reaches (none if it misses the column)
+                let (gx, gy) = (axis_gap(pos.x, kx), axis_gap(pos.y, ky));
+                let rest = radius * radius - gx * gx - gy * gy;
+                let (z0, z1) = if rest < 0.0 {
+                    (1, 0)
+                } else {
+                    let s = rest.sqrt();
+                    (((pos.z - s) / cell).floor() as i32, ((pos.z + s) / cell).floor() as i32)
+                };
+                (z0..=z1).map(move |kz| IVec3::new(kx, ky, kz))
+            })
+            .filter(move |k| {
+                // the cell's nearest and farthest points from the planet's centre
+                let min = k.as_vec3() * cell;
+                let max = min + Vec3::splat(cell);
+                let near = Vec3::ZERO.clamp(min, max).length();
+                let far = min.abs().max(max.abs()).length();
+                far >= lo && near <= hi
+            })
+    }
+}
+
+/// Headless self-check (M18): `SpatialHash::near` finds exactly what a brute-force scan
+/// finds within the radius, on a crowd scattered over a planet's skin, for the radii the
+/// game queries — and says how much of the old cube scan it skips.
+pub fn spatial_hash_self_check() -> Result<String, String> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5A7);
+    let radius_planet = 140.0;
+    let mut hash = SpatialHash::default();
+    let mut all: Vec<(Entity, Vec3)> = Vec::new();
+    for i in 0..1200u32 {
+        let dir = random_dir(&mut rng);
+        let pos = dir * (radius_planet + rng.gen_range(-3.0..4.5));
+        all.push((Entity::from_raw_u32(i + 1).unwrap(), pos));
+    }
+    // cluster a third of them around one spot, like a horde on the player
+    let hot = Vec3::Y * radius_planet;
+    for (_, p) in all.iter_mut().take(400) {
+        let jitter = Vec3::new(rng.gen_range(-18.0..18.0), 0.0, rng.gen_range(-18.0..18.0));
+        *p = (hot + jitter).normalize() * (radius_planet + rng.gen_range(-1.0..3.0));
+    }
+    hash.fill(all.iter().copied());
+    let mut report = Vec::new();
+    for (q, radius) in [(hot, 14.0), (hot, 22.0), (hot + Vec3::X * 7.0, 2.2), (hot, 0.8), (Vec3::X * 141.0, 22.0)] {
+        let mut got: Vec<Entity> = hash.near(q, radius).filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| e).collect();
+        let mut want: Vec<Entity> = all.iter().filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| *e).collect();
+        got.sort();
+        want.sort();
+        if got != want {
+            return Err(format!("near({radius} m) found {} of the {} within reach", got.len(), want.len()));
+        }
+        let cube = (2 * (radius / ENEMY_SEPARATION_CELL).ceil() as usize + 1).pow(3);
+        report.push(format!("{radius}m {}/{cube}", hash.cells(q, radius).count()));
+    }
+    Ok(report.join(", "))
 }
 
 #[derive(Resource)]
@@ -665,13 +739,24 @@ pub fn setup_enemy_assets(
 }
 
 pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform), With<Enemy>>) {
-    for v in hash.map.values_mut() {
-        v.clear();
+    hash.fill(q.iter().map(|(e, tf)| (e, tf.translation)));
+}
+
+impl SpatialHash {
+    /// Replace the contents (keeping the cells' allocations) and re-measure the shell.
+    pub fn fill(&mut self, members: impl Iterator<Item = (Entity, Vec3)>) {
+        for v in self.map.values_mut() {
+            v.clear();
+        }
+        let mut shell = (f32::INFINITY, f32::NEG_INFINITY);
+        for (e, pos) in members {
+            let d = pos.length();
+            shell = (shell.0.min(d), shell.1.max(d));
+            self.map.entry(Self::key(pos)).or_default().push((e, pos));
+        }
+        self.map.retain(|_, v| !v.is_empty());
+        self.shell = shell;
     }
-    for (e, tf) in &q {
-        hash.map.entry(SpatialHash::key(tf.translation)).or_default().push((e, tf.translation));
-    }
-    hash.map.retain(|_, v| !v.is_empty());
 }
 
 /// One crowd enemy. Public so the headless probes can stage an exact scene (a comet tail).
