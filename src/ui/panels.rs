@@ -186,7 +186,6 @@ pub fn choice_input(
     mut phase: ResMut<RunPhase>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
-    (mut hitstop, mut screen_flash): (ResMut<crate::fx::Hitstop>, ResMut<crate::fx::ScreenFlash>),
 ) {
     if !matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) || panel.options.is_empty() {
         return;
@@ -280,11 +279,9 @@ pub fn choice_input(
     if evolved {
         // Never advanced before, so the "Evolve any weapon" quest could not complete.
         global.evolves += 1;
-        banners.write(BannerMsg("WEAPON EVOLVED".into()));
-        sfx.write(SfxMsg(Sfx::Evolve));
-        hitstop.timer = 0.18;
-        // the evolution white-flash (§13: flash reduction removes it)
-        screen_flash.fire(Color::WHITE, &save);
+        // The fanfare (§12 — banner, gold ring, assembly pop, brass sting, white flash,
+        // shake, hitstop) is `arsenal`'s: it sees the sheet's weapon turn and plays it on
+        // every machine, for whoever evolved.
     } else {
         sfx.write(SfxMsg(Sfx::Click));
     }

@@ -1,3 +1,4 @@
+mod arsenal;
 mod audio;
 mod combat;
 mod comet;
@@ -130,6 +131,10 @@ fn main() {
         .init_resource::<techs::GrindLines>()
         .init_resource::<techs::TechTelemetry>()
         .init_resource::<player::FlashlightSwitch>()
+        .init_resource::<arsenal::ArsenalTelemetry>()
+        .init_resource::<arsenal::RecentKills>()
+        .init_resource::<arsenal::Fanfare>()
+        .add_message::<arsenal::WeaponFxMsg>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
@@ -302,6 +307,39 @@ fn main() {
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ------------- §6 the Tier-1 weapons' own behaviours: they fly, swing and hit on
+        // every machine (a joiner's hits are dropped — `apply_hits` is the host's); the host
+        // alone counts the Yo-Yo combo, wears stuns off and remembers the dead for THE ANGELUS
+        .add_systems(
+            Update,
+            (
+                arsenal::yoyo_combo.run_if(net::is_simulating),
+                arsenal::adopt_my_weapon_vis.run_if(net::is_client),
+                arsenal::tether_update,
+                arsenal::lob_update,
+                arsenal::splat_fade,
+                arsenal::disc_update,
+                arsenal::repulsor_update,
+                arsenal::wisp_update,
+                arsenal::bell_marks,
+                arsenal::bell_bodies,
+                arsenal::animate_waves,
+                enemies::tick_stuns.run_if(net::is_simulating),
+                arsenal::record_kills.run_if(net::is_simulating),
+            )
+                .chain()
+                .after(combat::aura_follow)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // §12 the evolution fanfare (and THE ANGELUS's wisps): an evolution is picked behind
+        // the level-up card, so these run behind panels too — the fanfare's clock is the
+        // virtual one, so it plays out as the game resumes.
+        .add_systems(
+            Update,
+            (arsenal::detect_evolutions, arsenal::weapon_fx_presentation, arsenal::animate_fanfare)
+                .chain()
+                .run_if(in_state(AppState::InRun)),
         )
         .add_systems(
             Update,
@@ -550,6 +588,8 @@ fn setup_camera(mut commands: Commands) {
         Hdr,
         Bloom::NATURAL,
         bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
+        // the evolution fanfare drains the world's colour through this (`arsenal`)
+        bevy::render::view::ColorGrading::default(),
         Transform::from_xyz(0.0, 140.0, 220.0).looking_at(Vec3::ZERO, Vec3::Y),
         player::PlayerRig,
     ));

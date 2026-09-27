@@ -493,6 +493,8 @@ fn stream_hazards(
     mut item_fx: MessageReader<crate::items::ItemFxMsg>,
     // §4 movement-tech one-shots (a Slam landing, a blink), the same way
     mut tech_fx: MessageReader<crate::techs::TechFxMsg>,
+    // §6/§12 weapon one-shots (an evolution's fanfare, THE ANGELUS's wisps), the same way
+    mut weapon_fx: MessageReader<crate::arsenal::WeaponFxMsg>,
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
     use crate::items::ItemFx;
@@ -516,6 +518,13 @@ fn stream_hazards(
                 axis: axis.to_array(),
                 insured,
             },
+        });
+    }
+    for m in weapon_fx.read().filter(|m| !m.from_wire) {
+        use crate::arsenal::WeaponFx;
+        events.push(match m.fx {
+            WeaponFx::Evolve { owner, weapon } => HazardEvent::Evolve { owner, weapon: weapon.code() },
+            WeaponFx::Wisp { owner, dir, power } => HazardEvent::Wisp { owner, dir: dir.to_array(), power },
         });
     }
     // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
@@ -580,6 +589,7 @@ fn receive_hazards(
     lines: Query<(Entity, &AimLine)>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
     mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
+    mut weapon_fx: MessageWriter<crate::arsenal::WeaponFxMsg>,
 ) {
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
     use crate::techs::{TechFx, TechFxMsg};
@@ -615,6 +625,19 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 tech_fx.write(TechFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the weapons', for `arsenal::weapon_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Evolve { owner, weapon } => crate::content::weapons::WeaponKind::from_code(weapon)
+                    .map(|weapon| crate::arsenal::WeaponFx::Evolve { owner, weapon }),
+                HazardEvent::Wisp { owner, dir, power } => {
+                    Some(crate::arsenal::WeaponFx::Wisp { owner, dir: Vec3::from(dir), power })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                weapon_fx.write(crate::arsenal::WeaponFxMsg { fx, from_wire: true });
                 continue;
             }
             match *ev {
@@ -687,7 +710,9 @@ fn receive_hazards(
                 | HazardEvent::TrailIgnite { .. }
                 | HazardEvent::DeathSave { .. }
                 | HazardEvent::Slam { .. }
-                | HazardEvent::Blink { .. } => {}
+                | HazardEvent::Blink { .. }
+                | HazardEvent::Evolve { .. }
+                | HazardEvent::Wisp { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((

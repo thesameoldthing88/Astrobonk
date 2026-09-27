@@ -49,7 +49,9 @@ use std::time::{Duration, SystemTime};
 // PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
-pub const PROTOCOL_ID: u64 = 0xA570B0_8;
+// Bumped by P12: `HitMsg` stays local, but the replicated `arsenal::NetWeaponVis` (the Yo-Yo
+// combo) and the Evolve / Wisp hazard events are new on the wire: _9.
+pub const PROTOCOL_ID: u64 = 0xA570B0_9;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -477,6 +479,12 @@ pub enum HazardEvent {
     /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
     /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
     Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
+    // ---- appended (P12): weapon one-shots, see `arsenal::WeaponFx` ----
+    /// `owner` evolved a weapon into `weapon` (`WeaponKind::code`): every machine plays the
+    /// §12 fanfare on them.
+    Evolve { owner: u8, weapon: u8 },
+    /// THE ANGELUS raised a friendly wisp for `owner` at `dir` (`power`: its hit, host-only).
+    Wisp { owner: u8, dir: [f32; 3], power: f32 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -701,6 +709,7 @@ impl Plugin for NetPlugin {
             .replicate::<NetHero>()
             .replicate::<NetComet>()
             .replicate::<NetItemVis>()
+            .replicate::<crate::arsenal::NetWeaponVis>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)

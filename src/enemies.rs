@@ -39,6 +39,25 @@ pub struct Enemy {
     pub stride: f32,
 }
 
+/// Reeling from a Sonic Whoopee / BROWN NOTE shove (`combat::apply_hits`): a stunned foe
+/// neither advances nor attacks — every attacker query filters it out — though it still
+/// slides with its knockback. HOST-only (a joiner sees its proxy stop). Bosses are immune.
+#[derive(Component)]
+pub struct Stunned {
+    pub secs: f32,
+}
+
+/// HOST: stuns wear off.
+pub fn tick_stuns(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut Stunned)>) {
+    let dt = time.delta_secs();
+    for (e, mut s) in &mut q {
+        s.secs -= dt;
+        if s.secs <= 0.0 {
+            commands.entity(e).remove::<Stunned>();
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct Boss {
     pub kind: BossKind,
@@ -992,7 +1011,7 @@ pub fn boss_phase_system(
         };
         banners.write(BannerMsg(format!("{name} — {label}!")));
         sfx.write(SfxMsg(Sfx::BossRoar));
-        shake.add(0.55);
+        shake.add(SHAKE_ENEMY_SLAM_MAX);
 
         // encirclement burst: a ring of adds crests the horizon around the player
         let ring = 8 + want as usize * 3;
@@ -1022,7 +1041,7 @@ pub fn boss_phase_system(
 pub fn anubot_beam_system(
     time: Res<Time>,
     q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>)>,
-    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam), Without<Stunned>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     let dt = time.delta_secs();
@@ -1257,7 +1276,7 @@ pub fn enemy_move(
     hash: Res<SpatialHash>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
     mut q: Query<
-        (Entity, &mut Enemy, &mut Transform),
+        (Entity, &mut Enemy, &mut Transform, Has<Stunned>),
         (Without<Buried>, Without<crate::interact::Pot>),
     >,
 ) {
@@ -1285,7 +1304,7 @@ pub fn enemy_move(
         .collect();
     let t_now = time.elapsed_secs();
 
-    for (entity, mut e, mut tf) in &mut q {
+    for (entity, mut e, mut tf, stunned) in &mut q {
         // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
         let target = snaps
             .iter()
@@ -1331,7 +1350,8 @@ pub fn enemy_move(
             player_dir
         };
 
-        let angle = eff_speed * dt / r;
+        // a stunned foe stands reeling (its knockback still carries it, below)
+        let angle = if stunned { 0.0 } else { eff_speed * dt / r };
         let mut new_dir = sphere::step_toward(e.dir, steer_target, angle);
 
         // separation from neighbors (cheap cell lookup)
@@ -1483,7 +1503,7 @@ pub fn enemy_contact(
     time: Res<Time>,
     run: Res<RunState>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &Transform), Without<Buried>>,
+    mut q: Query<(Entity, &mut Enemy, &Transform), (Without<Buried>, Without<Stunned>)>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     if time.delta_secs() <= 0.0 {
@@ -1522,7 +1542,7 @@ pub fn spitter_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
-    mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
+    mut q: Query<(&Enemy, &mut Spitter, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1579,7 +1599,7 @@ pub fn beamer_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform, Has<Stunned>), Without<Buried>>,
     q_lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
@@ -1606,7 +1626,17 @@ pub fn beamer_attack(
         }
     };
 
-    for (entity, e, mut b, tf) in &mut q {
+    for (entity, e, mut b, tf, stunned) in &mut q {
+        // A stunned beamer loses its lock: the telegraph drops rather than hanging frozen
+        // and firing the moment the stun wears off.
+        if stunned {
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
+            continue;
+        }
         // While charging, stay on the LATCHED target (if it still exists); otherwise pick
         // the nearest visible astronaut fresh.
         let latched = b
@@ -1726,7 +1756,7 @@ pub fn lobber_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
-    mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
+    mut q: Query<(&Enemy, &mut Lobber, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1837,7 +1867,8 @@ pub fn boss_attacks(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    mut q: Query<(&Enemy, &mut Boss, &Transform)>,
+    // (bosses are immune to stuns; the filter keeps "stunned foes don't attack" universal)
+    mut q: Query<(&Enemy, &mut Boss, &Transform), Without<Stunned>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     let dt = time.delta_secs();
@@ -1940,7 +1971,7 @@ pub fn telegraphs(
     save: Res<crate::save::MetaSave>,
     mut shake: ResMut<Shake>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(Entity, &Transform), With<Player>>,
+    q_player: Query<(Entity, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
     mut q: Query<(Entity, &mut Telegraph, &mut Transform), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
@@ -1953,7 +1984,8 @@ pub fn telegraphs(
     } else {
         TELEGRAPH_PULSE_HZ
     };
-    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t, _)| (e, t.translation)).collect();
+    let me = q_player.iter().find(|(_, _, local)| *local).map(|(_, t, _)| t.translation);
     for (e, mut tg, mut tf) in &mut q {
         tg.timer -= dt;
         let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
@@ -1979,7 +2011,13 @@ pub fn telegraphs(
                         writer.write(PlayerHitMsg { victim: pe, amount: tg.damage, from: tf.translation, attacker: None });
                     }
                 }
-                shake.add(0.22);
+                // §13 budget: an elite/boss slam kicks 0.22–0.35 (a boss's ring slam the
+                // most), fading out with distance — a mortar across the planet shakes nothing
+                if let Some(me) = me {
+                    let near = (1.0 - tf.translation.distance(me) / SHAKE_ENEMY_SLAM_FALLOFF).clamp(0.0, 1.0);
+                    let kick = if tg.ring { SHAKE_ENEMY_SLAM_MAX } else { SHAKE_ENEMY_SLAM_MIN };
+                    shake.add(kick * near);
+                }
                 if let Some(pa) = &particles {
                     fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Danger, 18, 9.0);
                 }

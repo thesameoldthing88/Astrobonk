@@ -415,6 +415,219 @@ fn storm_peer_check(
     *host_charging = now_host;
 }
 
+/// `--weapons base|evo|evolve|<name,…>`: the §6 Tier-1 weapon probe. The weapons go to
+/// EVERY astronaut at max level (with `--coop2` that includes the peer, so the host is seen
+/// running a joiner's guns too — past the four slots, as a probe may), and the summary
+/// asserts each one visibly did its own thing. `evolve` carries the six base weapons and
+/// evolves one per astronaut mid-run through the real `apply_upgrade`, to watch the §12
+/// fanfare come out of it (for a peer too, as the event a joiner is sent).
+#[derive(Resource, Default)]
+struct WeaponProbe {
+    list: Vec<crate::content::weapons::WeaponKind>,
+    evolve: bool,
+    granted: bool,
+    ticks: u64,
+    /// (player, evolution) the probe performed.
+    evolved: Vec<(u8, crate::content::weapons::WeaponKind)>,
+    /// PlayerIds whose evolution came out as a WeaponFx::Evolve.
+    fx_evolve: Vec<u8>,
+    /// Times the probe had to stage a max Yo-Yo combo for SWORD-YO's garrote.
+    staged_combo: u32,
+    /// Hits a STUNNED foe landed on an astronaut (must stay 0).
+    stunned_attacks: u32,
+}
+
+fn weapons_from_args() -> (Vec<crate::content::weapons::WeaponKind>, bool) {
+    use crate::content::weapons::WeaponKind as W;
+    let args: Vec<String> = std::env::args().collect();
+    let Some(list) = args.iter().position(|a| a == "--weapons").and_then(|i| args.get(i + 1)) else {
+        return (Vec::new(), false);
+    };
+    let base = vec![W::MeatballComet, W::StaticCling, W::RicochetDisc, W::SonicWhoopee, W::CosmonautsBell, W::YoYo];
+    match list.as_str() {
+        "base" => (base, false),
+        "evolve" => (base, true),
+        "evo" => (base.iter().filter_map(|w| w.def().evolves_to).collect(), false),
+        names => {
+            let key = |n: &str| n.to_lowercase().replace([' ', '-', '\'', '_'], "").replace('ù', "u");
+            let all: Vec<W> = W::BASE.into_iter().chain(W::BASE.iter().filter_map(|w| w.def().evolves_to)).collect();
+            let picked = names
+                .split(',')
+                .filter_map(|n| {
+                    let found = all.iter().copied().find(|w| key(w.def().name) == key(n));
+                    if found.is_none() {
+                        println!("  WEAPONS: no weapon called {n:?}");
+                    }
+                    found
+                })
+                .collect();
+            (picked, false)
+        }
+    }
+}
+
+/// Hand out the probe's weapons on the first frame the astronauts stand; with `evolve`,
+/// evolve one per astronaut 3 s in; keep SWORD-YO's garrote exercised.
+fn weapon_probe_drive(
+    mut probe: ResMut<WeaponProbe>,
+    save: Res<MetaSave>,
+    global: Res<RunState>,
+    mut q: Query<(&crate::player::PlayerId, &mut PlayerState, &mut crate::arsenal::WeaponProcs)>,
+    tm: Res<crate::arsenal::ArsenalTelemetry>,
+) {
+    use crate::content::weapons::WeaponKind;
+    if q.is_empty() {
+        return;
+    }
+    probe.ticks += 1;
+    if !probe.granted {
+        probe.granted = true;
+        for (pid, mut ps, _) in &mut q {
+            for w in probe.list.clone() {
+                if !ps.weapons.iter().any(|i| i.kind == w) {
+                    ps.weapons.push(crate::run::WeaponInstance { kind: w, level: MAX_WEAPON_LEVEL, cd: 0.0 });
+                }
+            }
+            println!(
+                "  WEAPONS player {} carries {}",
+                pid.0,
+                ps.weapons.iter().map(|w| w.kind.def().name).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    if probe.evolve && probe.ticks == 90 {
+        for (pid, mut ps, _) in &mut q {
+            let base = probe.list[pid.0 as usize * 2 % probe.list.len()];
+            let Some(evo) = base.def().evolves_to else { continue };
+            if ps.apply_upgrade(&crate::run::UpgradeOption::Evolve(base), &save, global.greed_stacks) {
+                println!("  WEAPONS player {} evolved {} -> {}", pid.0, base.def().name, evo.def().name);
+                probe.evolved.push((pid.0, evo));
+            } else {
+                println!("  WEAPONS player {} could not evolve {}", pid.0, base.def().name);
+            }
+        }
+    }
+    // SWORD-YO garrotes only at max combo, and a bot in a dense crowd is hit before it gets
+    // there on its own: stage the combo every 2 s until the cord has cut something.
+    if probe.ticks % 60 == 0 && probe.ticks >= 300 && tm.garrote_hits == 0 {
+        for (_, ps, mut procs) in &mut q {
+            if ps.weapons.iter().any(|w| w.kind == WeaponKind::SwordYo) && procs.combo < YOYO_COMBO_MAX {
+                procs.combo = YOYO_COMBO_MAX;
+                probe.staged_combo += 1;
+            }
+        }
+    }
+}
+
+fn weapon_probe_watch(
+    mut probe: ResMut<WeaponProbe>,
+    mut fx: MessageReader<crate::arsenal::WeaponFxMsg>,
+    mut hurt: MessageReader<crate::messages::PlayerHitMsg>,
+    stunned: Query<(), With<crate::enemies::Stunned>>,
+) {
+    for m in fx.read() {
+        if let crate::arsenal::WeaponFx::Evolve { owner, .. } = m.fx {
+            if !probe.fx_evolve.contains(&owner) {
+                probe.fx_evolve.push(owner);
+            }
+        }
+    }
+    for h in hurt.read() {
+        if h.attacker.is_some_and(|a| stunned.contains(a)) {
+            probe.stunned_attacks += 1;
+        }
+    }
+}
+
+/// The summary's verdict on `--weapons`: each carried weapon did its own §6 thing.
+fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
+    use crate::content::weapons::WeaponKind as W;
+    let probe = world.resource::<WeaponProbe>();
+    let tm = world.resource::<crate::arsenal::ArsenalTelemetry>();
+    let planet_r = world.resource::<CurrentPlanet>().radius;
+    let secs = probe.ticks as f32 * 0.033;
+    println!(
+        "WEAPONS lobs={} splits={} splats={} lob_hits={} lob_far={:.0}m | hug_hits={} huggers<={} novas={} nova_hits={} | discs={} bounces={} disc_hits={} laps={} | cones={} cone_hits={} panic={:.1}s repulsors={} rep_hits={} stuns={} stunned_attacks={} | tolls={} marks={} mark_crits={} wisps={} wisp_hits={} | yoyo_hits={} combo<={:.0} breaks={} garrote={} staged={} | evolutions={} pops={} fx={:?}",
+        tm.lobs, tm.splits, tm.splats, tm.lob_hits, tm.lob_far, tm.hug_hits, tm.max_huggers, tm.novas, tm.nova_hits,
+        tm.discs, tm.bounces, tm.disc_hits, tm.disc_laps, tm.cones, tm.cone_hits, tm.panic_secs, tm.repulsors,
+        tm.repulsor_hits, tm.stuns, probe.stunned_attacks, tm.tolls, tm.marks, tm.mark_crits, tm.wisps, tm.wisp_hits,
+        tm.yoyo_hits, tm.max_combo, tm.combo_breaks, tm.garrote_hits, probe.staged_combo, tm.evolutions, tm.fanfare_pops,
+        probe.fx_evolve
+    );
+    let mut fails: Vec<String> = Vec::new();
+    let mut need = |c: bool, what: &str| {
+        if !c {
+            fails.push(what.to_string());
+        }
+    };
+    let mut has: Vec<W> = probe.list.clone();
+    has.extend(probe.evolved.iter().map(|(_, w)| *w));
+    let carried = |w: W| has.contains(&w);
+    if carried(W::MeatballComet) || carried(W::RaguRain) {
+        need(tm.lobs > 0 && tm.splats > 0 && tm.lob_hits > 0, "no meatball landed on anything");
+        need(tm.lob_far >= 20.0, "no lob was aimed past 20 m (the horizon)");
+    }
+    if carried(W::RaguRain) {
+        need(tm.splits > 0 && tm.splats > tm.lobs, "RAGÙ RAIN never split on the way down");
+    }
+    if carried(W::StaticCling) || carried(W::FullDischarge) {
+        need(tm.hug_hits > 0, "the hug field never bit");
+    }
+    if carried(W::FullDischarge) {
+        need(tm.novas > 0 && tm.nova_hits > 0, "FULL DISCHARGE never went off");
+    }
+    if carried(W::RicochetDisc) || carried(W::Omnidisc) {
+        need(tm.discs > 0 && tm.disc_hits > 0 && tm.bounces > 0, "no disc bounced enemy to enemy");
+    }
+    if carried(W::Omnidisc) {
+        let lap = std::f32::consts::TAU * planet_r / 46.0;
+        need(secs < lap + 4.0 || tm.disc_laps > 0, "THE OMNIDISC never came all the way round the planet");
+    }
+    if carried(W::SonicWhoopee) {
+        need(tm.cones > 0 && tm.cone_hits > 0, "the Whoopee cone never caught anyone");
+    }
+    if carried(W::BrownNote) {
+        need(tm.repulsors > 0 && tm.repulsor_hits > 0, "THE BROWN NOTE's ring never shoved anyone");
+    }
+    if carried(W::SonicWhoopee) || carried(W::BrownNote) {
+        need(tm.stuns > 0, "nothing was ever stunned");
+    }
+    need(probe.stunned_attacks == 0, "a stunned foe landed a hit");
+    if carried(W::CosmonautsBell) || carried(W::Angelus) {
+        need(tm.tolls > 0 && tm.marks > 0, "the bell never tolled on anyone");
+        need(tm.mark_crits > 0, "a bell mark never turned a hit into a crit");
+    }
+    if carried(W::Angelus) {
+        need(tm.wisps > 0 && tm.wisp_hits > 0, "THE ANGELUS raised no wisp that hit");
+    }
+    if carried(W::YoYo) || carried(W::SwordYo) {
+        need(tm.yoyo_hits > 0, "the yo-yo never hit");
+        need(tm.max_combo >= 2.0, "the un-hit move combo never built");
+    }
+    if carried(W::SwordYo) {
+        need(tm.garrote_hits > 0, "SWORD-YO's cord never garrotted at max combo");
+    }
+    if probe.evolve {
+        need(probe.evolved.len() == peers, "not every astronaut evolved");
+        for (pid, _) in &probe.evolved {
+            need(
+                probe.fx_evolve.contains(pid),
+                &format!("player {pid}'s evolution never became a WeaponFx (what a joiner is sent)"),
+            );
+        }
+        need(tm.fanfare_pops as usize >= probe.evolved.len(), "an evolution's fanfare never popped");
+    }
+    if fails.is_empty() {
+        println!("WEAPONS OK ({})", has.iter().map(|w| w.def().name).collect::<Vec<_>>().join(", "));
+        true
+    } else {
+        for f in fails {
+            println!("FAIL: weapons: {f}");
+        }
+        false
+    }
+}
+
 /// `--items a,b,…` / `--deathsave`: the §7 item probes. Items are handed to EVERY
 /// astronaut (with `--coop2` that includes the peer, so the host is seen simulating a
 /// joiner's items too), and the summary asserts each one visibly did its thing.
@@ -660,7 +873,7 @@ fn tome_probe_drive(
     if t % 300 == 0 && probe.tomes.contains(&crate::content::tomes::TomeKind::Elite) {
         if let Some((e, mut en)) = crowd.iter_mut().find(|(_, en)| en.speed > 0.0 && en.hp > 0.0) {
             en.elite = true;
-            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO });
+            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO, weapon: None });
         }
     }
     for (pid, mut p, mut procs, ps, _) in &mut q {
@@ -1617,6 +1830,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::items::self_check(&MetaSave::default()))
         .and_then(|_| crate::save::settings_self_check())
         .and_then(|_| crate::fx::flash_gate_self_check())
+        .and_then(|_| crate::fx::hitstop_self_check())
+        .and_then(|_| crate::fx::shake_self_check())
+        .and_then(|_| crate::arsenal::self_check())
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
         .and_then(|_| crate::tomes::self_check())
         .and_then(|_| crate::techs::self_check())
@@ -1736,14 +1952,23 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
         .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .insert_resource({
+            let (list, evolve) = weapons_from_args();
+            WeaponProbe { list, evolve, ..default() }
+        })
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
+        .init_resource::<crate::fx::ScreenFlash>()
+        .init_resource::<crate::arsenal::ArsenalTelemetry>()
+        .init_resource::<crate::arsenal::RecentKills>()
+        .init_resource::<crate::arsenal::Fanfare>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
         .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::techs::TechFxMsg>()
+        .add_message::<crate::arsenal::WeaponFxMsg>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
@@ -1798,6 +2023,46 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 .chain()
                 .run_if(crate::playing),
         )
+        // §6 the Tier-1 weapons — the set main.rs runs (headless IS the host, so the
+        // client-only adoption of the replicated combo never runs)
+        .add_systems(
+            Update,
+            (
+                crate::arsenal::yoyo_combo,
+                crate::arsenal::tether_update,
+                crate::arsenal::lob_update,
+                crate::arsenal::splat_fade,
+                crate::arsenal::disc_update,
+                crate::arsenal::repulsor_update,
+                crate::arsenal::wisp_update,
+                crate::arsenal::bell_marks,
+                crate::arsenal::bell_bodies,
+                crate::arsenal::animate_waves,
+                crate::enemies::tick_stuns,
+                crate::arsenal::record_kills,
+            )
+                .chain()
+                .after(crate::combat::drone_update)
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (weapon_probe_drive.before(crate::arsenal::tether_update), weapon_probe_watch)
+                .run_if(|p: Res<WeaponProbe>| !p.list.is_empty())
+                .run_if(crate::playing),
+        )
+        // §12 the fanfare, behind panels too (as in main.rs); and the §13 hitstop clock
+        .add_systems(
+            Update,
+            (
+                crate::arsenal::detect_evolutions,
+                crate::arsenal::weapon_fx_presentation,
+                crate::arsenal::animate_fanfare,
+            )
+                .chain()
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
+        )
+        .add_systems(Update, crate::fx::hitstop_system)
         // §7 items — the same set main.rs runs (headless IS the host, so the client-only
         // trail drops simply never run)
         .add_systems(
@@ -2372,6 +2637,29 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             for f in fails {
                 println!("FAIL: techs: {f}");
             }
+            ok = false;
+        }
+    }
+    if !world.resource::<WeaponProbe>().list.is_empty() && !weapon_probe_verdict(world, peers.len()) {
+        ok = false;
+    }
+    // §13 hitstop canon, every run: only this machine's kills ask, and they stay SPARSE — a
+    // crowd stop at most once per HITSTOP_KILL_GAP of play, whatever the kill rate.
+    {
+        let hs = world.resource::<crate::fx::Hitstop>();
+        let played = world.resource::<Time<Virtual>>().elapsed_secs();
+        let crowd_cap = (played / HITSTOP_KILL_GAP) as u32 + 1;
+        let local_kills = hs.granted.iter().sum::<u32>() + hs.refused;
+        println!(
+            "HITSTOP crowd/elite/boss={:?} refused={} frozen={:.2}s over {played:.0}s",
+            hs.granted, hs.refused, hs.frozen_secs
+        );
+        if hs.granted[0] > crowd_cap {
+            println!("FAIL: {} crowd-kill hitstops in {played:.0}s (cap {crowd_cap}) — not sparse", hs.granted[0]);
+            ok = false;
+        }
+        if run.kills >= 30 && local_kills == 0 {
+            println!("FAIL: {} kills and not one asked for a hitstop (§13: your kills freeze)", run.kills);
             ok = false;
         }
     }
