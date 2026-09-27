@@ -122,95 +122,103 @@ pub struct ContinueBtn;
 pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
-        .with_children(|root| {
-            root.spawn(txt("ASTROBONK", 72.0, Color::srgb(1.0, 0.8, 0.2)));
-            root.spawn(txt(
-                "tiny planets. big swarms. one wrench.",
-                FONT_MED,
-                Color::srgb(0.6, 0.65, 0.8),
-            ));
-            root.spawn(txt(format!("SILVER: {}", save.silver), FONT_MED, Color::srgb(0.75, 0.85, 1.0)));
+        .with_children(|overlay| {
+            overlay.spawn(menu_column()).with_children(|root| {
+                root.spawn(txt("ASTROBONK", 72.0, Color::srgb(1.0, 0.8, 0.2)));
+                root.spawn(txt(
+                    "tiny planets. big swarms. one wrench.",
+                    FONT_MED,
+                    Color::srgb(0.6, 0.65, 0.8),
+                ));
+                root.spawn(txt(format!("SILVER: {}", save.silver), FONT_MED, Color::srgb(0.75, 0.85, 1.0)));
 
-            let buttons: [(&str, fn() -> ()); 0] = [];
-            let _ = buttons;
+                let buttons: [(&str, fn() -> ()); 0] = [];
+                let _ = buttons;
 
-            root.spawn((LaunchBtn, MenuBtn::Launch, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
-                .with_children(|b| {
-                    b.spawn(txt("LAUNCH", FONT_BIG, Color::WHITE));
-                });
+                root.spawn((LaunchBtn, MenuBtn::Launch, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
+                    .with_children(|b| {
+                        b.spawn(txt("LAUNCH", FONT_BIG, Color::WHITE));
+                    });
 
-            // ---- CO-OP ----
-            root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
-                row.spawn((
-                    MenuBtn::HostCoop,
-                    Button,
-                    button_node(),
-                    BackgroundColor(BTN_BG),
-                    BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
-                ))
-                .with_children(|b| {
-                    b.spawn(txt("HOST CO-OP", FONT_MED, Color::WHITE));
+                // ---- CO-OP ----
+                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
+                    row.spawn((
+                        MenuBtn::HostCoop,
+                        Button,
+                        button_node(),
+                        BackgroundColor(BTN_BG),
+                        BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn(txt("HOST CO-OP", FONT_MED, Color::WHITE));
+                    });
+                    row.spawn((
+                        MenuBtn::JoinCoop,
+                        Button,
+                        button_node(),
+                        BackgroundColor(BTN_BG),
+                        BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
+                    ))
+                    .with_children(|b| {
+                        b.spawn(txt("JOIN CO-OP", FONT_MED, Color::WHITE));
+                    });
                 });
-                row.spawn((
-                    MenuBtn::JoinCoop,
-                    Button,
-                    button_node(),
-                    BackgroundColor(BTN_BG),
-                    BorderColor::all(Color::srgb(0.4, 0.9, 1.0)),
-                ))
-                .with_children(|b| {
-                    b.spawn(txt("JOIN CO-OP", FONT_MED, Color::WHITE));
+                // Feedback line: without it a failed host (port already in use) or a bad address
+                // is completely silent and the player just sees nothing happen.
+                // Centred: a failed join explains itself over two lines.
+                root.spawn((
+                    CoopNoteText,
+                    txt("", FONT_SMALL, Color::srgb(0.5, 0.9, 1.0)),
+                    TextLayout::new_with_justify(Justify::Center),
+                ));
+
+                // Daily seeded planet — same tiny world for everyone today.
+                let day = crate::run::today();
+                let dname = crate::run::daily_name(crate::run::daily_seed(day));
+                let (dbest, dassisted) = if save.daily_day == day { (save.daily_best, save.daily_best_assisted) } else { (0, 0) };
+                // The assisted board only shows once it has a score — most players never see it.
+                let assisted_best = if dassisted > 0 { format!(", assisted {dassisted}") } else { String::new() };
+                root.spawn((DailyBtn, MenuBtn::Daily, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.55, 0.85))))
+                    .with_children(|b| {
+                        b.spawn(txt(format!("DAILY: {dname}   (best today: {dbest}{assisted_best})"), FONT_MED, Color::WHITE));
+                    });
+
+                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
+                    row.spawn((TomesBtn, MenuBtn::Tomes, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 1.0))))
+                        .with_children(|b| {
+                            b.spawn(txt("TOMES", FONT_MED, Color::WHITE));
+                        });
+                    row.spawn((QuestsBtn, MenuBtn::Quests, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.8, 0.4))))
+                        .with_children(|b| {
+                            b.spawn(txt("QUESTS", FONT_MED, Color::WHITE));
+                        });
+                    row.spawn((SettingsBtn, MenuBtn::Settings, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
+                        .with_children(|b| {
+                            b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
+                        });
+                    row.spawn((QuitBtn, MenuBtn::Quit, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.4, 0.4))))
+                        .with_children(|b| {
+                            b.spawn(txt("QUIT", FONT_MED, Color::WHITE));
+                        });
                 });
+                // side panel placeholder — a wheel-scrolled list that gives up height first
+                // when a large UI scale leaves the menu short of room
+                root.spawn((
+                    SidePanel,
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(4.0),
+                        padding: UiRect::all(Val::Px(10.0)),
+                        max_height: Val::Vh(46.0),
+                        min_height: Val::Px(0.0),
+                        flex_shrink: 1.0,
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.05, 0.06, 0.1, 0.8)),
+                    wheel_scroll_list(),
+                ));
             });
-            // Feedback line: without it a failed host (port already in use) or a bad address
-            // is completely silent and the player just sees nothing happen.
-            // Centred: a failed join explains itself over two lines.
-            root.spawn((
-                CoopNoteText,
-                txt("", FONT_SMALL, Color::srgb(0.5, 0.9, 1.0)),
-                TextLayout::new_with_justify(Justify::Center),
-            ));
-
-            // Daily seeded planet — same tiny world for everyone today.
-            let day = crate::run::today();
-            let dname = crate::run::daily_name(crate::run::daily_seed(day));
-            let dbest = if save.daily_day == day { save.daily_best } else { 0 };
-            root.spawn((DailyBtn, MenuBtn::Daily, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.55, 0.85))))
-                .with_children(|b| {
-                    b.spawn(txt(format!("DAILY: {dname}   (best today: {dbest})"), FONT_MED, Color::WHITE));
-                });
-
-            root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
-                row.spawn((TomesBtn, MenuBtn::Tomes, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 1.0))))
-                    .with_children(|b| {
-                        b.spawn(txt("TOMES", FONT_MED, Color::WHITE));
-                    });
-                row.spawn((QuestsBtn, MenuBtn::Quests, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.8, 0.4))))
-                    .with_children(|b| {
-                        b.spawn(txt("QUESTS", FONT_MED, Color::WHITE));
-                    });
-                row.spawn((SettingsBtn, MenuBtn::Settings, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
-                    .with_children(|b| {
-                        b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
-                    });
-                row.spawn((QuitBtn, MenuBtn::Quit, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.4, 0.4))))
-                    .with_children(|b| {
-                        b.spawn(txt("QUIT", FONT_MED, Color::WHITE));
-                    });
-            });
-            // side panel placeholder
-            root.spawn((
-                SidePanel,
-                Node {
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(4.0),
-                    padding: UiRect::all(Val::Px(10.0)),
-                    max_height: Val::Percent(46.0),
-                    overflow: Overflow::scroll_y(),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.05, 0.06, 0.1, 0.8)),
-            ));
         });
 }
 
@@ -233,7 +241,7 @@ pub fn main_menu_input(
     mut next: ResMut<NextState<AppState>>,
     mut exit: MessageWriter<AppExit>,
     mut sfx: MessageWriter<SfxMsg>,
-    panel: Query<Entity, With<SidePanel>>,
+    mut panel: Query<(Entity, &mut Node), With<SidePanel>>,
     mut dirty: Local<bool>,
     // Bundled: this system is at Bevy's 16-system-param cap and already uses this trick.
     mut coop: (
@@ -253,8 +261,10 @@ pub fn main_menu_input(
         }
         // A full-screen overlay does not block the buttons behind it — Bevy still delivers
         // Interaction to them. Without this guard, clicking CONNECT also pressed HOST CO-OP
-        // underneath, and the machine became a client AND a host at once.
-        if join_open.0 && !matches!(btn, MenuBtn::JoinConfirm | MenuBtn::JoinCancel) {
+        // underneath, and the machine became a client AND a host at once. The settings card
+        // covers LAUNCH, the co-op row and QUIT, so it gets the same guard (its overlay also
+        // blocks focus; this is the backstop).
+        if (join_open.0 && !matches!(btn, MenuBtn::JoinConfirm | MenuBtn::JoinCancel)) || settings_open.0 {
             continue;
         }
         match btn {
@@ -345,7 +355,7 @@ pub fn main_menu_input(
         }
     }
     for (i, p) in &plus {
-        if *i == Interaction::Pressed {
+        if *i == Interaction::Pressed && !settings_open.0 {
             let lvl = save.tome_level(p.0);
             let cost = p.0.cost(lvl);
             if lvl < p.0.def().max_level && save.silver >= cost {
@@ -358,7 +368,7 @@ pub fn main_menu_input(
         }
     }
     for (i, t) in &toggles {
-        if *i == Interaction::Pressed {
+        if *i == Interaction::Pressed && !settings_open.0 {
             if let Some(idx) = save.tome_loadout.iter().position(|x| *x == t.0) {
                 save.tome_loadout.remove(idx);
             } else if (save.tome_loadout.len() as u32) < save.tome_slots {
@@ -376,7 +386,10 @@ pub fn main_menu_input(
     *dirty = false;
 
     // rebuild side panel
-    let Ok(panel_e) = panel.single() else { return };
+    let Ok((panel_e, mut panel_node)) = panel.single_mut() else { return };
+    // An open list keeps a few rows on screen however little room a large UI scale leaves
+    // (the rest scrolls); a closed one takes none.
+    panel_node.min_height = Val::Px(if *tab == MenuTab::None { 0.0 } else { 120.0 });
     commands.entity(panel_e).despawn_related::<Children>();
     match *tab {
         MenuTab::None => {}
@@ -448,58 +461,91 @@ pub fn main_menu_input(
 pub fn spawn_char_select(mut commands: Commands, save: Res<MetaSave>, selected: Res<Selected>) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
-        .with_children(|root| {
-            root.spawn(txt(
-                if selected.joining { "CHOOSE YOUR ASTRONAUT (JOINING CO-OP)" } else { "CHOOSE YOUR ASTRONAUT" },
-                FONT_BIG,
-                Color::WHITE,
-            ));
-            root.spawn((Node { column_gap: Val::Px(12.0), flex_wrap: FlexWrap::Wrap, justify_content: JustifyContent::Center, row_gap: Val::Px(12.0), ..default() },))
-                .with_children(|row| {
-                    for c in AstronautKind::ALL {
-                        let d = c.def();
-                        let unlocked = save.unlocked_chars.contains(&c);
-                        let is_sel = selected.character == c;
-                        let mut card = row.spawn((
-                            Node {
-                                width: Val::Px(190.0),
-                                padding: UiRect::all(Val::Px(12.0)),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(6.0),
-                                border: UiRect::all(Val::Px(3.0)),
-                                border_radius: BorderRadius::all(Val::Px(8.0)),
-                                ..default()
-                            },
-                            BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
-                            BorderColor::all(if is_sel {
-                                Color::srgb(0.4, 1.0, 0.6)
-                            } else if unlocked {
-                                d.suit
-                            } else {
-                                Color::srgb(0.25, 0.25, 0.3)
-                            }),
-                        ));
-                        if unlocked {
-                            card.insert((Button, CharCard(c)));
-                            card.with_children(|cc| {
-                                cc.spawn(txt(d.name, FONT_MED, d.visor));
-                                cc.spawn(txt(d.agency, FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)));
-                                cc.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                                cc.spawn(txt(format!("Weapon: {}", d.weapon.def().name), FONT_SMALL, d.weapon.def().color));
-                                cc.spawn(txt(d.passive_desc, FONT_SMALL, Color::srgb(0.5, 1.0, 0.7)));
+        .with_children(|overlay| {
+            overlay.spawn(menu_column()).with_children(|root| {
+                root.spawn(txt(
+                    if selected.joining { "CHOOSE YOUR ASTRONAUT (JOINING CO-OP)" } else { "CHOOSE YOUR ASTRONAUT" },
+                    FONT_BIG,
+                    Color::WHITE,
+                ));
+                // The roster scrolls under the mouse wheel when a large UI scale leaves it
+                // more than fits, while the title and BACK stay on screen. The list asks for
+                // the whole screen height and shrinks to what the title and BACK leave (a
+                // wrapping grid's own height would be measured as one unwrapped row); the
+                // grid's auto margins center it in there, and collapse once it overflows.
+                let list = root
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_basis: Val::Vh(100.0),
+                            min_height: Val::Px(150.0),
+                            flex_shrink: 1.0,
+                            flex_direction: FlexDirection::Column,
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        wheel_scroll_list(),
+                    ))
+                    .with_children(|list| {
+                        list.spawn((Node {
+                            width: Val::Percent(100.0),
+                            margin: UiRect::vertical(Val::Auto),
+                            column_gap: Val::Px(12.0),
+                            flex_wrap: FlexWrap::Wrap,
+                            justify_content: JustifyContent::Center,
+                            row_gap: Val::Px(12.0),
+                            flex_shrink: 0.0,
+                            ..default()
+                        },))
+                            .with_children(|row| {
+                                for c in AstronautKind::ALL {
+                                    let d = c.def();
+                                    let unlocked = save.unlocked_chars.contains(&c);
+                                    let is_sel = selected.character == c;
+                                    let mut card = row.spawn((
+                                        Node {
+                                            width: Val::Px(190.0),
+                                            padding: UiRect::all(Val::Px(12.0)),
+                                            flex_direction: FlexDirection::Column,
+                                            row_gap: Val::Px(6.0),
+                                            border: UiRect::all(Val::Px(3.0)),
+                                            border_radius: BorderRadius::all(Val::Px(8.0)),
+                                            ..default()
+                                        },
+                                        BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
+                                        BorderColor::all(if is_sel {
+                                            Color::srgb(0.4, 1.0, 0.6)
+                                        } else if unlocked {
+                                            d.suit
+                                        } else {
+                                            Color::srgb(0.25, 0.25, 0.3)
+                                        }),
+                                    ));
+                                    if unlocked {
+                                        card.insert((Button, CharCard(c)));
+                                        card.with_children(|cc| {
+                                            cc.spawn(txt(d.name, FONT_MED, d.visor));
+                                            cc.spawn(txt(d.agency, FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)));
+                                            cc.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                            cc.spawn(txt(format!("Weapon: {}", d.weapon.def().name), FONT_SMALL, d.weapon.def().color));
+                                            cc.spawn(txt(d.passive_desc, FONT_SMALL, Color::srgb(0.5, 1.0, 0.7)));
+                                        });
+                                    } else {
+                                        card.with_children(|cc| {
+                                            cc.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
+                                            cc.spawn(txt(d.unlock_desc, FONT_SMALL, Color::srgb(0.55, 0.55, 0.65)));
+                                        });
+                                    }
+                                }
                             });
-                        } else {
-                            card.with_children(|cc| {
-                                cc.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
-                                cc.spawn(txt(d.unlock_desc, FONT_SMALL, Color::srgb(0.55, 0.55, 0.65)));
-                            });
-                        }
-                    }
-                });
-            root.spawn((BackBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
-                .with_children(|b| {
-                    b.spawn(txt("BACK", FONT_MED, Color::WHITE));
-                });
+                    })
+                    .id();
+                root.spawn((ScrollHint(list), txt("scroll for more astronauts", FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)), Visibility::Hidden));
+                root.spawn((BackBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
+                    .with_children(|b| {
+                        b.spawn(txt("BACK", FONT_MED, Color::WHITE));
+                    });
+            });
         });
 }
 
@@ -556,71 +602,73 @@ pub fn char_select_input(
 pub fn spawn_planet_select(mut commands: Commands, save: Res<MetaSave>) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
-        .with_children(|root| {
-            root.spawn(txt("PICK A WORLD TO SAVE", FONT_BIG, Color::WHITE));
-            root.spawn((Node { column_gap: Val::Px(16.0), ..default() },)).with_children(|row| {
-                for p in [PlanetKind::Moon, PlanetKind::Mars] {
-                    let d = p.def();
-                    let unlocked = save.unlocked_planets.contains(&p);
-                    row.spawn((
-                        Node {
-                            width: Val::Px(260.0),
-                            padding: UiRect::all(Val::Px(14.0)),
-                            flex_direction: FlexDirection::Column,
-                            row_gap: Val::Px(8.0),
-                            border: UiRect::all(Val::Px(3.0)),
-                            border_radius: BorderRadius::all(Val::Px(8.0)),
-                            ..default()
-                        },
-                        BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
-                        BorderColor::all(if unlocked { d.ground } else { Color::srgb(0.25, 0.25, 0.3) }),
-                    ))
-                    .with_children(|card| {
-                        if unlocked {
-                            card.spawn(txt(d.name, FONT_MED, d.ground_high));
-                            card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                            card.spawn((Node { column_gap: Val::Px(8.0), ..default() },)).with_children(|tiers| {
-                                for tier in 1..=PlanetKind::max_tier(p) {
-                                    // tier N unlocked when tier N-1 of this planet is cleared
-                                    let tier_ok = tier == 1 || save.counters.cleared.contains(&(p, tier - 1));
-                                    let mut b = tiers.spawn((
-                                        Node {
-                                            padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
-                                            border: UiRect::all(Val::Px(2.0)),
-                                            border_radius: BorderRadius::all(Val::Px(4.0)),
-                                            ..default()
-                                        },
-                                        BackgroundColor(if tier_ok { BTN_BG } else { Color::srgba(0.05, 0.05, 0.06, 1.0) }),
-                                        BorderColor::all(if tier_ok { Color::srgb(0.4, 1.0, 0.6) } else { Color::srgb(0.3, 0.3, 0.35) }),
-                                    ));
-                                    if tier_ok {
-                                        b.insert((Button, PlanetCard(p, tier)));
-                                    }
-                                    b.with_children(|bb| {
-                                        bb.spawn(txt(
-                                            format!("TIER {tier}"),
-                                            FONT_SMALL,
-                                            if tier_ok { Color::WHITE } else { Color::srgb(0.4, 0.4, 0.5) },
+        .with_children(|overlay| {
+            overlay.spawn(menu_column()).with_children(|root| {
+                root.spawn(txt("PICK A WORLD TO SAVE", FONT_BIG, Color::WHITE));
+                root.spawn((Node { column_gap: Val::Px(16.0), ..default() },)).with_children(|row| {
+                    for p in [PlanetKind::Moon, PlanetKind::Mars] {
+                        let d = p.def();
+                        let unlocked = save.unlocked_planets.contains(&p);
+                        row.spawn((
+                            Node {
+                                width: Val::Px(260.0),
+                                padding: UiRect::all(Val::Px(14.0)),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: Val::Px(8.0),
+                                border: UiRect::all(Val::Px(3.0)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                ..default()
+                            },
+                            BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
+                            BorderColor::all(if unlocked { d.ground } else { Color::srgb(0.25, 0.25, 0.3) }),
+                        ))
+                        .with_children(|card| {
+                            if unlocked {
+                                card.spawn(txt(d.name, FONT_MED, d.ground_high));
+                                card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                card.spawn((Node { column_gap: Val::Px(8.0), ..default() },)).with_children(|tiers| {
+                                    for tier in 1..=PlanetKind::max_tier(p) {
+                                        // tier N unlocked when tier N-1 of this planet is cleared
+                                        let tier_ok = tier == 1 || save.counters.cleared.contains(&(p, tier - 1));
+                                        let mut b = tiers.spawn((
+                                            Node {
+                                                padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
+                                                border: UiRect::all(Val::Px(2.0)),
+                                                border_radius: BorderRadius::all(Val::Px(4.0)),
+                                                ..default()
+                                            },
+                                            BackgroundColor(if tier_ok { BTN_BG } else { Color::srgba(0.05, 0.05, 0.06, 1.0) }),
+                                            BorderColor::all(if tier_ok { Color::srgb(0.4, 1.0, 0.6) } else { Color::srgb(0.3, 0.3, 0.35) }),
                                         ));
-                                    });
-                                }
-                            });
-                            let chain: Vec<&str> = PlanetKind::chain_from(p, PlanetKind::max_tier(p))
-                                .iter()
-                                .map(|x| x.def().name)
-                                .collect();
-                            card.spawn(txt(format!("T3 route: {}", chain.join(" > ")), FONT_SMALL, Color::srgb(0.55, 0.6, 0.75)));
-                        } else {
-                            card.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
-                            card.spawn(txt("Clear MOON Tier 2 to chart this world", FONT_SMALL, Color::srgb(0.55, 0.55, 0.65)));
-                        }
-                    });
-                }
-            });
-            root.spawn((BackBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
-                .with_children(|b| {
-                    b.spawn(txt("BACK", FONT_MED, Color::WHITE));
+                                        if tier_ok {
+                                            b.insert((Button, PlanetCard(p, tier)));
+                                        }
+                                        b.with_children(|bb| {
+                                            bb.spawn(txt(
+                                                format!("TIER {tier}"),
+                                                FONT_SMALL,
+                                                if tier_ok { Color::WHITE } else { Color::srgb(0.4, 0.4, 0.5) },
+                                            ));
+                                        });
+                                    }
+                                });
+                                let chain: Vec<&str> = PlanetKind::chain_from(p, PlanetKind::max_tier(p))
+                                    .iter()
+                                    .map(|x| x.def().name)
+                                    .collect();
+                                card.spawn(txt(format!("T3 route: {}", chain.join(" > ")), FONT_SMALL, Color::srgb(0.55, 0.6, 0.75)));
+                            } else {
+                                card.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
+                                card.spawn(txt("Clear MOON Tier 2 to chart this world", FONT_SMALL, Color::srgb(0.55, 0.55, 0.65)));
+                            }
+                        });
+                    }
                 });
+                root.spawn((BackBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
+                    .with_children(|b| {
+                        b.spawn(txt("BACK", FONT_MED, Color::WHITE));
+                    });
+            });
         });
 }
 
@@ -661,62 +709,69 @@ pub fn planet_select_input(
 pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
-        .with_children(|root| {
-            if data.victory {
-                root.spawn(txt("PLANET SAVED", 56.0, Color::srgb(0.4, 1.0, 0.6)));
-            } else {
-                root.spawn(txt("YOU GOT BONKED", 56.0, Color::srgb(1.0, 0.35, 0.3)));
-            }
-            let m = (data.time / 60.0) as u32;
-            let s = (data.time % 60.0) as u32;
-            root.spawn(txt(
-                format!(
-                    "BONKS {}   LEVEL {}   GOLD {}   TIME {m}:{s:02}",
-                    data.kills, data.level, data.gold
-                ),
-                FONT_MED,
-                Color::srgb(0.85, 0.87, 0.95),
-            ));
-            root.spawn(txt(format!("SILVER EARNED: +{}", data.silver_earned), FONT_BIG, Color::srgb(0.75, 0.85, 1.0)));
-            // The §10 formula, term by term.
-            if !data.silver_lines.is_empty() {
-                root.spawn((Node {
-                    flex_direction: FlexDirection::Column,
-                    width: Val::Px(440.0),
-                    row_gap: Val::Px(2.0),
-                    padding: UiRect::all(Val::Px(10.0)),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(6.0)),
-                    ..default()
-                }, BackgroundColor(CARD_BG), BorderColor::all(Color::srgb(0.35, 0.42, 0.6))))
-                    .with_children(|col| {
-                        for (label, amount) in &data.silver_lines {
-                            col.spawn((Node { width: Val::Percent(100.0), justify_content: JustifyContent::SpaceBetween, ..default() },))
-                                .with_children(|row| {
-                                    row.spawn(txt(label.clone(), FONT_SMALL, Color::srgb(0.7, 0.75, 0.88)));
-                                    let c = if amount.starts_with('x') { Color::srgb(1.0, 0.8, 0.4) } else { Color::srgb(0.75, 0.85, 1.0) };
-                                    row.spawn(txt(amount.clone(), FONT_SMALL, c));
-                                });
-                        }
-                    });
-            }
-            if let Some((name, best, new_best)) = &data.daily {
-                root.spawn(txt(
-                    format!("DAILY {name} — score {}   (best today: {best})", data.silver_earned),
-                    FONT_MED,
-                    Color::srgb(1.0, 0.6, 0.85),
-                ));
-                if *new_best {
-                    root.spawn(txt("NEW DAILY BEST!", FONT_MED, Color::srgb(1.0, 0.85, 0.3)));
+        .with_children(|overlay| {
+            overlay.spawn(menu_column()).with_children(|root| {
+                if data.victory {
+                    root.spawn(txt("PLANET SAVED", 56.0, Color::srgb(0.4, 1.0, 0.6)));
+                } else {
+                    root.spawn(txt("YOU GOT BONKED", 56.0, Color::srgb(1.0, 0.35, 0.3)));
                 }
-            }
-            for q in &data.quests_completed {
-                root.spawn(txt(format!("QUEST COMPLETE: {q}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.4)));
-            }
-            root.spawn((ContinueBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
-                .with_children(|b| {
-                    b.spawn(txt("[SPACE] CONTINUE", FONT_MED, Color::WHITE));
-                });
+                let m = (data.time / 60.0) as u32;
+                let s = (data.time % 60.0) as u32;
+                root.spawn(txt(
+                    format!(
+                        "BONKS {}   LEVEL {}   GOLD {}   TIME {m}:{s:02}",
+                        data.kills, data.level, data.gold
+                    ),
+                    FONT_MED,
+                    Color::srgb(0.85, 0.87, 0.95),
+                ));
+                root.spawn(txt(format!("SILVER EARNED: +{}", data.silver_earned), FONT_BIG, Color::srgb(0.75, 0.85, 1.0)));
+                // The §10 formula, term by term.
+                if !data.silver_lines.is_empty() {
+                    root.spawn((Node {
+                        flex_direction: FlexDirection::Column,
+                        width: Val::Px(440.0),
+                        row_gap: Val::Px(2.0),
+                        padding: UiRect::all(Val::Px(10.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(6.0)),
+                        ..default()
+                    }, BackgroundColor(CARD_BG), BorderColor::all(Color::srgb(0.35, 0.42, 0.6))))
+                        .with_children(|col| {
+                            for (label, amount) in &data.silver_lines {
+                                col.spawn((Node { width: Val::Percent(100.0), justify_content: JustifyContent::SpaceBetween, ..default() },))
+                                    .with_children(|row| {
+                                        row.spawn(txt(label.clone(), FONT_SMALL, Color::srgb(0.7, 0.75, 0.88)));
+                                        let c = if amount.starts_with('x') { Color::srgb(1.0, 0.8, 0.4) } else { Color::srgb(0.75, 0.85, 1.0) };
+                                        row.spawn(txt(amount.clone(), FONT_SMALL, c));
+                                    });
+                            }
+                        });
+                }
+                // §13: an assisted run still earns its Silver, but says so — and ranks apart.
+                if let Some(summary) = &data.assisted {
+                    root.spawn(txt(format!("ASSISTED RUN: {summary}"), FONT_MED, Color::srgb(0.55, 0.9, 1.0)));
+                }
+                if let Some((name, best, new_best)) = &data.daily {
+                    let board = if data.assisted.is_some() { "assisted best" } else { "best" };
+                    root.spawn(txt(
+                        format!("DAILY {name} — score {}   ({board} today: {best})", data.silver_earned),
+                        FONT_MED,
+                        Color::srgb(1.0, 0.6, 0.85),
+                    ));
+                    if *new_best {
+                        root.spawn(txt("NEW DAILY BEST!", FONT_MED, Color::srgb(1.0, 0.85, 0.3)));
+                    }
+                }
+                for q in &data.quests_completed {
+                    root.spawn(txt(format!("QUEST COMPLETE: {q}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.4)));
+                }
+                root.spawn((ContinueBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
+                    .with_children(|b| {
+                        b.spawn(txt("[SPACE] CONTINUE", FONT_MED, Color::WHITE));
+                    });
+            });
         });
 }
 
@@ -761,42 +816,46 @@ pub fn join_panel_sync(
                 JoinPanel,
                 overlay_root(),
                 BackgroundColor(Color::srgba(0.02, 0.02, 0.06, 0.94)),
+                // nothing on the menu underneath may take a click meant for this panel
+                bevy::ui::FocusPolicy::Block,
             ))
-            .with_children(|root| {
-                root.spawn(txt("JOIN CO-OP", FONT_BIG, Color::srgb(0.4, 0.9, 1.0)));
-                let hero = selected.character.def();
-                root.spawn(txt(format!("joining as {}", hero.name), FONT_MED, hero.visor));
-                root.spawn(txt(
-                    "type the host's IP address, then ENTER",
-                    FONT_MED,
-                    Color::srgb(0.6, 0.65, 0.8),
-                ));
-                root.spawn((JoinAddrText, txt(addr.0.clone(), FONT_BIG, Color::WHITE)));
-                root.spawn(txt(
-                    "same machine: 127.0.0.1   |   same house: the host's local IP   |   ESC to cancel",
-                    FONT_SMALL,
-                    Color::srgb(0.5, 0.55, 0.7),
-                ));
-                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
-                    row.spawn((
-                        MenuBtn::JoinConfirm,
-                        Button,
-                        button_node(),
-                        BackgroundColor(BTN_BG),
-                        BorderColor::all(Color::srgb(0.4, 1.0, 0.6)),
-                    ))
-                    .with_children(|b| {
-                        b.spawn(txt("CONNECT", FONT_MED, Color::WHITE));
-                    });
-                    row.spawn((
-                        MenuBtn::JoinCancel,
-                        Button,
-                        button_node(),
-                        BackgroundColor(BTN_BG),
-                        BorderColor::all(Color::srgb(1.0, 0.5, 0.5)),
-                    ))
-                    .with_children(|b| {
-                        b.spawn(txt("CANCEL", FONT_MED, Color::WHITE));
+            .with_children(|overlay| {
+                overlay.spawn(menu_column()).with_children(|root| {
+                    root.spawn(txt("JOIN CO-OP", FONT_BIG, Color::srgb(0.4, 0.9, 1.0)));
+                    let hero = selected.character.def();
+                    root.spawn(txt(format!("joining as {}", hero.name), FONT_MED, hero.visor));
+                    root.spawn(txt(
+                        "type the host's IP address, then ENTER",
+                        FONT_MED,
+                        Color::srgb(0.6, 0.65, 0.8),
+                    ));
+                    root.spawn((JoinAddrText, txt(addr.0.clone(), FONT_BIG, Color::WHITE)));
+                    root.spawn(txt(
+                        "same machine: 127.0.0.1   |   same house: the host's local IP   |   ESC to cancel",
+                        FONT_SMALL,
+                        Color::srgb(0.5, 0.55, 0.7),
+                    ));
+                    root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
+                        row.spawn((
+                            MenuBtn::JoinConfirm,
+                            Button,
+                            button_node(),
+                            BackgroundColor(BTN_BG),
+                            BorderColor::all(Color::srgb(0.4, 1.0, 0.6)),
+                        ))
+                        .with_children(|b| {
+                            b.spawn(txt("CONNECT", FONT_MED, Color::WHITE));
+                        });
+                        row.spawn((
+                            MenuBtn::JoinCancel,
+                            Button,
+                            button_node(),
+                            BackgroundColor(BTN_BG),
+                            BorderColor::all(Color::srgb(1.0, 0.5, 0.5)),
+                        ))
+                        .with_children(|b| {
+                            b.spawn(txt("CANCEL", FONT_MED, Color::WHITE));
+                        });
                     });
                 });
             });

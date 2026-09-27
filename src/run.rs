@@ -7,7 +7,7 @@ use crate::content::items::ItemKind;
 use crate::content::planets::PlanetKind;
 use crate::content::weapons::WeaponKind;
 use crate::content::Rarity;
-use crate::save::MetaSave;
+use crate::save::{AssistOptions, MetaSave};
 use crate::stats::{StatKind, Stats};
 use bevy::prelude::*;
 use rand::rngs::StdRng;
@@ -150,6 +150,13 @@ pub struct RunState {
     pub sun_shrink: f32,
     /// HOST: seconds a Shard has been carried since the sun last shrank.
     pub sun_shard_secs: f32,
+    /// The §13 "difficulty as options" in force right now — the HOST's, kept current from
+    /// its settings by `director::sync_assist_options` and streamed to joiners.
+    pub assist: AssistOptions,
+    /// This run has used an assist at any point (sticky: easing the first stage and
+    /// restoring canon for the boss still counts). Shown on results; keeps the daily score
+    /// off the unassisted board.
+    pub assisted: bool,
     /// Character of the local/primary player — kept so menus and results screens
     /// have something to show without querying the world.
     pub character: AstronautKind,
@@ -204,6 +211,10 @@ pub struct PlayerState {
     /// The weapon Second Astronaut's ghost is mirroring. Picked by the host, adopted by a
     /// client from the replicated `net::NetItemVis`, so its own cosmetic fire matches.
     pub ghost_weapon: Option<WeaponKind>,
+    /// "One more chance" revives spent this run (the token is one per astronaut per run).
+    /// A counter rather than a flag so a joiner's HUD, which sees it through
+    /// `PlayerVitals`, can tell a revive happened even if it missed the frame it did.
+    pub revives: u32,
 }
 
 /// Every copy of one item a player holds. Grades are kept per copy because each copy was
@@ -229,7 +240,7 @@ impl ItemStack {
 }
 
 impl RunState {
-    pub fn new(character: AstronautKind, start: PlanetKind, tier: u32, _save: &MetaSave) -> Self {
+    pub fn new(character: AstronautKind, start: PlanetKind, tier: u32, save: &MetaSave) -> Self {
         Self {
             tier,
             chain: PlanetKind::chain_from(start, tier),
@@ -263,6 +274,8 @@ impl RunState {
             static_radio: false,
             sun_shrink: 0.0,
             sun_shard_secs: 0.0,
+            assist: save.assist,
+            assisted: save.assist.is_assisted(),
             character,
         }
     }
@@ -305,6 +318,7 @@ impl PlayerState {
             encircle_dirs: 0,
             tether_used: false,
             ghost_weapon: None,
+            revives: 0,
         };
         s.recompute_stats(save, 0);
         s.hp = s.stats.max_hp;
@@ -537,6 +551,29 @@ impl PlayerState {
     /// hides them, the chase prefers them, and their share of each wave lands closer.
     pub fn revealed(&self) -> bool {
         self.has_item(ItemKind::SignalFlare)
+    }
+
+    /// Is the §13 "one more chance" token still in hand? It exists only while the run's
+    /// assist options grant it, and each astronaut spends it once.
+    pub fn revive_token_ready(&self, assist: &AssistOptions) -> bool {
+        assist.revive_token && self.revives == 0
+    }
+
+    /// Spend the token on a would-be-lethal hit: back up at REVIVE_TOKEN_HP_FRAC with a few
+    /// seconds of invulnerability. Returns false (and changes nothing) without a token.
+    ///
+    /// The LAST link of the death-save chain: item death-saves (P03's resolver — Dead Man's
+    /// Tether, Boomerang Insurance, Widow's Ring) get the hit first, so an accessibility
+    /// option never eats a save the build paid for.
+    pub fn try_revive_token(&mut self, assist: &AssistOptions) -> bool {
+        if !self.revive_token_ready(assist) {
+            return false;
+        }
+        self.revives += 1;
+        self.dead = false;
+        self.hp = (self.stats.max_hp * config::REVIVE_TOKEN_HP_FRAC).max(1.0);
+        self.iframes = self.iframes.max(config::REVIVE_TOKEN_IFRAMES);
+        true
     }
 
     /// Evolved weapons this astronaut already owns.
@@ -1138,6 +1175,22 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
     }
     if !UpgradeOption::ItemUp(pairs[1].1, Rarity::Common).body(&ps).contains("Evo catalyst") {
         return Err("a free evolution slot hid the catalyst hint".into());
+    }
+
+    // "One more chance" (§13): one per astronaut per run, only while the option is on.
+    let canon = AssistOptions::default();
+    let token = AssistOptions { revive_token: true, ..canon };
+    let mut ps = PlayerState::new(AstronautKind::Buzz, save);
+    ps.hp = 0.0;
+    if ps.try_revive_token(&canon) || ps.revives != 0 {
+        return Err("a revive token fired with the option off".into());
+    }
+    if !ps.try_revive_token(&token) || ps.dead || ps.hp <= 0.0 || ps.iframes < config::REVIVE_TOKEN_IFRAMES {
+        return Err("the revive token did not bring the astronaut back".into());
+    }
+    ps.hp = 0.0;
+    if ps.try_revive_token(&token) || ps.revives != 1 {
+        return Err("the revive token fired twice in one run".into());
     }
     Ok(())
 }

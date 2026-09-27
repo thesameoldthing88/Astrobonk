@@ -424,8 +424,7 @@ struct ItemProbe {
     /// PlayerIds that threw a yo-yo / opened a singularity / lit a trail (from ItemFxMsg).
     fx_owners: Vec<u8>,
     deathsave: bool,
-    /// `--deathsave` stage: 0 waiting, 1 first lethal hit (Tether), 2 second (Widow's
-    /// Ring), 3 third (co-op peer only: must die), 4 done.
+    /// `--deathsave` stage: 0 waiting, then 1.. through `deathsave_steps`, `DS_DONE` done.
     ds_stage: u8,
     ds_victim: Option<Entity>,
     ds_log: Vec<String>,
@@ -495,67 +494,227 @@ fn item_probe_fx(mut probe: ResMut<ItemProbe>, mut fx: MessageReader<crate::item
     }
 }
 
+/// What one `--deathsave` lethal hit must resolve to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DeathSaveStep {
+    /// Exactly this item save (`items::DeathSave::code`) fired, leaving 1 HP.
+    Item(usize),
+    /// No item save was left, so the §13 "one more chance" token (P04) caught it — the LAST
+    /// link of the chain, after every item save.
+    Token,
+    /// Nothing is left: the astronaut goes down.
+    Down,
+}
+
+/// The `--deathsave` script: Tether, then Widow's Ring, then — with `--assist` — the revive
+/// token, then (co-op peer only: a solo death would end the run) the unsaved death.
+fn deathsave_steps(coop2: bool, token: bool) -> Vec<DeathSaveStep> {
+    let mut steps = vec![
+        DeathSaveStep::Item(crate::items::DeathSave::Tether.code() as usize),
+        DeathSaveStep::Item(crate::items::DeathSave::WidowsRing.code() as usize),
+    ];
+    if coop2 && token {
+        steps.push(DeathSaveStep::Token);
+    }
+    if coop2 {
+        steps.push(DeathSaveStep::Down);
+    }
+    steps
+}
+
+/// `ItemProbe::ds_stage` once the `--deathsave` script has finished (or failed).
+const DS_DONE: u8 = u8::MAX;
+
 /// `--deathsave`: lethal hits on the victim, one stage at a time, re-sent every tick until
 /// one lands (i-frames and evasion can eat a hit) — then check exactly the right save fired.
 fn deathsave_probe(
     mut probe: ResMut<ItemProbe>,
     telemetry: Res<crate::items::ItemTelemetry>,
+    run: Res<RunState>,
     q: Query<&PlayerState>,
     mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
-    mut last: Local<[u32; 4]>,
+    mut last: Local<([u32; 4], u32)>,
     mut waited: Local<u32>,
 ) {
     let Some(victim) = probe.ds_victim else { return };
     let Ok(ps) = q.get(victim) else { return };
     let coop2 = std::env::args().any(|a| a == "--coop2");
+    let steps = deathsave_steps(coop2, run.assist.revive_token);
     let saves = telemetry.saves;
-    match probe.ds_stage {
-        0 => {
-            if probe.ticks >= 150 {
-                *last = saves;
-                probe.ds_stage = 1;
-            }
+    let stage = probe.ds_stage;
+    if stage == 0 {
+        if probe.ticks >= 150 {
+            *last = (saves, ps.revives);
+            probe.ds_stage = 1;
         }
-        1 | 2 | 3 => {
-            let stage = probe.ds_stage;
-            let new: Vec<usize> = (0..4).filter(|i| saves[*i] > last[*i]).collect();
-            if !new.is_empty() || ps.dead {
-                let want: Option<usize> = match stage {
-                    1 => Some(crate::items::DeathSave::Tether.code() as usize),
-                    2 => Some(crate::items::DeathSave::WidowsRing.code() as usize),
-                    _ => None,
-                };
-                let got_one = new.len() == 1 && saves[new[0]] == last[new[0]] + 1;
-                let ok = match want {
-                    Some(w) => got_one && new[0] == w && !ps.dead && (ps.hp - 1.0).abs() < 0.5,
-                    None => new.is_empty() && ps.dead,
-                };
-                probe.ds_log.push(format!("stage {stage}: saves {:?} -> {:?}, hp {:.1}, dead {}", *last, saves, ps.hp, ps.dead));
-                if !ok {
-                    probe.ds_fail = Some(format!("stage {stage} resolved wrong ({})", probe.ds_log.last().cloned().unwrap_or_default()));
-                    probe.ds_stage = 4;
-                    return;
-                }
-                if stage == 1 && telemetry.rewinds.last().is_none_or(|m| *m < 0.5) {
-                    probe.ds_fail = Some(format!("the Tether rewind did not move the astronaut ({:?})", telemetry.rewinds));
-                    probe.ds_stage = 4;
-                    return;
-                }
-                *last = saves;
-                *waited = 0;
-                // the third, unsaved hit only on a co-op peer: a solo death would end the run
-                probe.ds_stage = if stage == 2 && !coop2 { 4 } else { stage + 1 };
+        return;
+    }
+    let Some(&want) = steps.get(stage as usize - 1) else { return };
+    let (last_saves, last_revives) = *last;
+    let new: Vec<usize> = (0..4).filter(|i| saves[*i] > last_saves[*i]).collect();
+    let revived = ps.revives > last_revives;
+    if !new.is_empty() || ps.dead || revived {
+        let got_one = new.len() == 1 && saves[new[0]] == last_saves[new[0]] + 1;
+        let ok = match want {
+            DeathSaveStep::Item(w) => got_one && new[0] == w && !revived && !ps.dead && (ps.hp - 1.0).abs() < 0.5,
+            DeathSaveStep::Token => {
+                new.is_empty()
+                    && ps.revives == last_revives + 1
+                    && !ps.dead
+                    && (ps.hp - ps.stats.max_hp * REVIVE_TOKEN_HP_FRAC).abs() < 0.5
+            }
+            DeathSaveStep::Down => new.is_empty() && !revived && ps.dead,
+        };
+        probe.ds_log.push(format!(
+            "stage {stage} ({want:?}): saves {last_saves:?} -> {saves:?}, revives {last_revives} -> {}, hp {:.1}, dead {}",
+            ps.revives, ps.hp, ps.dead
+        ));
+        if !ok {
+            probe.ds_fail = Some(format!("stage {stage} resolved wrong ({})", probe.ds_log.last().cloned().unwrap_or_default()));
+            probe.ds_stage = DS_DONE;
+            return;
+        }
+        if stage == 1 && telemetry.rewinds.last().is_none_or(|m| *m < 0.5) {
+            probe.ds_fail = Some(format!("the Tether rewind did not move the astronaut ({:?})", telemetry.rewinds));
+            probe.ds_stage = DS_DONE;
+            return;
+        }
+        *last = (saves, ps.revives);
+        *waited = 0;
+        probe.ds_stage = if stage as usize >= steps.len() { DS_DONE } else { stage + 1 };
+        return;
+    }
+    // Past the i-frames of the previous save (the token's grace is the longest), keep swinging.
+    *waited += 1;
+    if *waited as f32 * 0.033 > REVIVE_TOKEN_IFRAMES.max(2.0) {
+        hits.write(crate::messages::PlayerHitMsg { victim, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+    }
+    if *waited > 600 {
+        probe.ds_fail = Some(format!("stage {stage}: no lethal hit landed in 20 s"));
+        probe.ds_stage = DS_DONE;
+    }
+}
+
+/// `--assist`: the §13 "difficulty as options" end to end on the real hit path. Assists are
+/// set before the run (density 50%, damage 50%, one more chance), then, on the local
+/// astronaut:
+///   1. a staged 20-damage hit must land as 20 × 0.5 × damage taken × (1 − armor);
+///   2. a staged lethal hit must be caught by the token — back at REVIVE_TOKEN_HP_FRAC with
+///      REVIVE_TOKEN_IFRAMES of grace, the nearby crowd shoved back;
+///   3. once the grace is over, a second lethal hit must down it (one token per run) — the
+///      probe stands it back up so the smoke keeps running.
+/// Each staged hit retries until it lands clean: a horde hit in the same frame can take the
+/// i-frames first.
+#[derive(Resource, Default)]
+struct AssistProbe {
+    ticks: u64,
+    stage: u8,
+    /// (hp before, expected loss) of the staged damage hit in flight
+    pending: Option<(f32, f32)>,
+    damage_ok: Option<(f32, f32)>,
+    revived: bool,
+    nova_pushed: usize,
+    /// enemies inside the nova radius when the lethal hit was staged
+    nova_near: Vec<Entity>,
+    second_downed: bool,
+}
+
+const ASSIST_PROBE_DAMAGE: f32 = 20.0;
+
+fn assist_probe_hit(
+    mut probe: ResMut<AssistProbe>,
+    planet: Res<CurrentPlanet>,
+    mut q: Query<(Entity, &Player, &mut PlayerState), With<crate::player::LocalPlayer>>,
+    q_enemies: Query<(Entity, &Enemy), (Without<crate::enemies::Boss>, Without<crate::interact::Pot>)>,
+    mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
+    run: Res<RunState>,
+) {
+    probe.ticks += 1;
+    let Ok((e, p, mut ps)) = q.single_mut() else { return };
+    if ps.dead || probe.ticks < 60 || probe.ticks % 5 != 0 {
+        return;
+    }
+    // The horde may have spent the token before the staged lethal hit: then only the
+    // one-per-run half is left to prove.
+    if probe.stage == 1 && ps.revives > 0 {
+        probe.stage = 2;
+    }
+    match probe.stage {
+        0 => {
+            ps.iframes = 0.0;
+            ps.shield = 0.0;
+            ps.hp = ps.stats.max_hp;
+            // the same product apply_player_hits takes (Cracked Helmet's ×2 taken included)
+            let expected = ASSIST_PROBE_DAMAGE
+                * run.assist.enemy_damage
+                * ps.stats.damage_taken.max(0.0)
+                * (1.0 - ps.effective_armor_fraction());
+            probe.pending = Some((ps.hp, expected));
+            hits.write(crate::messages::PlayerHitMsg { victim: e, amount: ASSIST_PROBE_DAMAGE, from: Vec3::ZERO, attacker: None });
+        }
+        1 => {
+            probe.nova_near = q_enemies
+                .iter()
+                .filter(|(_, en)| en.speed > 0.0 && sphere::arc_dist(en.dir, p.dir, planet.radius) < REVIVE_NOVA_RADIUS * 0.8)
+                .map(|(en, _)| en)
+                .collect();
+            // wait for company, so the nova has someone to push (give up after ~40 s)
+            if probe.nova_near.is_empty() && probe.ticks < 1200 {
                 return;
             }
-            // Past the i-frames of the previous save (60 ticks = 2 s), keep swinging.
-            *waited += 1;
-            if *waited > 60 {
-                hits.write(crate::messages::PlayerHitMsg { victim, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+            ps.iframes = 0.0;
+            ps.shield = 0.0;
+            hits.write(crate::messages::PlayerHitMsg { victim: e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+        }
+        2 if ps.iframes <= 0.0 => {
+            ps.shield = 0.0;
+            hits.write(crate::messages::PlayerHitMsg { victim: e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+        }
+        _ => {}
+    }
+}
+
+fn assist_probe_check(
+    mut probe: ResMut<AssistProbe>,
+    mut q: Query<&mut PlayerState, With<crate::player::LocalPlayer>>,
+    q_enemies: Query<&Enemy>,
+) {
+    let Ok(mut ps) = q.single_mut() else { return };
+    match probe.stage {
+        0 => {
+            let Some((before, expected)) = probe.pending.take() else { return };
+            let lost = before - ps.hp;
+            // anything else was a horde hit taking the i-frames first (or a dodge): retry
+            if (lost - expected).abs() < 0.05 {
+                probe.damage_ok = Some((ASSIST_PROBE_DAMAGE, lost));
+                probe.stage = 1;
             }
-            if *waited > 600 {
-                probe.ds_fail = Some(format!("stage {stage}: no lethal hit landed in 20 s"));
-                probe.ds_stage = 4;
+        }
+        1 if ps.revives > 0 => {
+            if ps.dead || ps.hp <= 0.0 || ps.iframes < REVIVE_TOKEN_IFRAMES - 0.1 {
+                panic!("SMOKE FAIL: revive token left hp={} dead={} iframes={}", ps.hp, ps.dead, ps.iframes);
             }
+            let want = ps.stats.max_hp * REVIVE_TOKEN_HP_FRAC;
+            if (ps.hp - want).abs() > 0.5 {
+                panic!("SMOKE FAIL: revive token restored {} hp, expected {want}", ps.hp);
+            }
+            probe.revived = true;
+            probe.nova_pushed = probe
+                .nova_near
+                .iter()
+                .filter(|e| q_enemies.get(**e).map(|en| en.knock.length() > 1.0).unwrap_or(false))
+                .count();
+            probe.stage = 2;
+        }
+        2 if ps.dead => {
+            if ps.revives != 1 {
+                panic!("SMOKE FAIL: the revive token fired {} times", ps.revives);
+            }
+            probe.second_downed = true;
+            probe.stage = 3;
+            // stand back up (before downed_watch sees it) so the smoke keeps running
+            ps.dead = false;
+            ps.hp = ps.stats.max_hp;
         }
         _ => {}
     }
@@ -717,9 +876,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     let rules = crate::run::scaling::self_check()
         .and_then(|_| crate::run::rules_self_check(&MetaSave::default()))
         .and_then(|_| silver_self_check())
-        .and_then(|_| crate::items::self_check(&MetaSave::default()));
+        .and_then(|_| crate::items::self_check(&MetaSave::default()))
+        .and_then(|_| crate::save::settings_self_check())
+        .and_then(|_| crate::fx::flash_gate_self_check())
+        .and_then(|_| crate::ui::settings::ui_scale_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -746,7 +908,17 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         save.tome_levels.insert(crate::content::tomes::TomeKind::Health, 20);
     }
     let args: Vec<String> = std::env::args().collect();
+    let assist = args.iter().any(|a| a == "--assist");
+    if assist {
+        save.assist = crate::save::AssistOptions { enemy_density: 0.5, enemy_damage: 0.5, revive_token: true };
+    }
     let coop2 = args.iter().any(|a| a == "--coop2");
+    if assist && !coop2 && args.iter().any(|a| a == "--deathsave") {
+        // Both probes stage lethal hits on the local astronaut and would eat each other's
+        // saves; with --coop2 the death-save victim is the peer and the two compose.
+        println!("SMOKE FAIL: --deathsave with --assist needs --coop2");
+        std::process::exit(2);
+    }
     let probe = CoopProbe {
         // all three stage a scene around the PEER, so they need `--coop2`'s second astronaut
         comet_peer: coop2 && args.iter().any(|a| a == "--comet-peer"),
@@ -799,6 +971,8 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             deathsave: args.iter().any(|a| a == "--deathsave"),
             ..default()
         })
+        .init_resource::<AssistProbe>()
+        .init_resource::<crate::fx::FlashGate>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
@@ -827,6 +1001,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::enemies::aim_line_visuals,
                 crate::enemies::lobber_attack,
                 crate::enemies::mortar_shells,
+                crate::enemies::crack_decals,
                 crate::enemies::enemy_projectiles,
                 crate::enemies::boss_attacks,
                 crate::enemies::telegraphs,
@@ -926,6 +1101,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                     .before(crate::director::downed_watch)
                     .run_if(|| std::env::args().any(|a| a == "--balance")),
                 tally_xp,
+                crate::director::sync_assist_options,
+                assist_probe_hit.before(crate::combat::apply_player_hits).run_if(move || assist),
+                assist_probe_check
+                    .after(crate::combat::apply_player_hits)
+                    .before(crate::director::downed_watch)
+                    .run_if(move || assist),
             ),
         )
         .add_systems(
@@ -1178,10 +1359,15 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             }
             match &item_probe.ds_fail {
                 Some(f) => need(false, &format!("death-save: {f}")),
-                None => need(item_probe.ds_stage == 4, &format!("death-save probe never finished (stage {})", item_probe.ds_stage)),
+                None => need(item_probe.ds_stage == DS_DONE, &format!("death-save probe never finished (stage {})", item_probe.ds_stage)),
             }
-            if item_probe.ds_fail.is_none() && item_probe.ds_stage == 4 {
-                println!("DEATHSAVE OK: Tether rewound {:.1} m, then Widow's Ring held at 1 HP{}", tel.rewinds.first().copied().unwrap_or(0.0), if coop2 { ", then the spent peer went down" } else { "" });
+            if item_probe.ds_fail.is_none() && item_probe.ds_stage == DS_DONE {
+                println!(
+                    "DEATHSAVE OK: Tether rewound {:.1} m, then Widow's Ring held at 1 HP{}{}",
+                    tel.rewinds.first().copied().unwrap_or(0.0),
+                    if coop2 && run.assist.revive_token { ", then the one-more-chance token (last link)" } else { "" },
+                    if coop2 { ", then the spent peer went down" } else { "" }
+                );
             }
         }
         if fails.is_empty() {
@@ -1191,6 +1377,38 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 println!("FAIL: {f}");
             }
             ok = false;
+        }
+    }
+    // §13: a run with every assist off must never be flagged; one with them must be.
+    if run.assisted != assist {
+        println!("FAIL: run.assisted={} with --assist {}", run.assisted, if assist { "on" } else { "off" });
+        ok = false;
+    }
+    if assist {
+        let probe = world.resource::<AssistProbe>();
+        let cap = crate::run::scaling::Scaling::for_run(&run, 1).live_cap;
+        println!(
+            "ASSIST damage={:?} revived={} nova_pushed={}/{} second_hit_downed={} live_cap={cap}",
+            probe.damage_ok, probe.revived, probe.nova_pushed, probe.nova_near.len(), probe.second_downed
+        );
+        if probe.damage_ok.is_none() {
+            println!("FAIL: the assisted damage hit never landed clean");
+            ok = false;
+        }
+        if !probe.second_downed {
+            println!("FAIL: the one-more-chance sequence did not complete (stage {})", probe.stage);
+            ok = false;
+        }
+        if !probe.nova_near.is_empty() && probe.revived && probe.nova_pushed == 0 {
+            println!("FAIL: the revive nova pushed none of {} nearby enemies", probe.nova_near.len());
+            ok = false;
+        }
+        if cap != ENEMY_CAP / 2 {
+            println!("FAIL: 50% density should halve the live cap, got {cap}");
+            ok = false;
+        }
+        if ok {
+            println!("ASSIST OK: density, damage, one more chance, run flagged");
         }
     }
     if enemies == 0 && !run.boss_dead {

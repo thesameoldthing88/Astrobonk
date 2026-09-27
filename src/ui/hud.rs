@@ -6,6 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
+use crate::config::{HURT_TINT_PEAK, HURT_TINT_PEAK_REDUCED, HURT_TINT_SECS};
 use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
@@ -45,12 +46,23 @@ pub struct PowerupText;
 /// encircled, the Widow's bonus, the tether, the eaten sun).
 #[derive(Component)]
 pub struct ItemStatusText;
+/// The HP bar, XP bar and weapon tray at the bottom of the screen (its height sets the
+/// in-run panels' bottom band, `keep_panels_clear_of_hud`).
+#[derive(Component)]
+pub struct HudBottomCluster;
+/// The bottom cluster's distance from the screen's bottom edge, and the clear gap the
+/// in-run panels keep above it, in UI units.
+const HUD_BOTTOM_CLUSTER_Y: f32 = 12.0;
+const HUD_BAND_GAP: f32 = 8.0;
 #[derive(Component)]
 pub struct Vignette;
 #[derive(Component)]
 pub struct CometText;
 #[derive(Component)]
 pub struct DustOverlay;
+/// §13 assists in force (and the "one more chance" token), under the counters.
+#[derive(Component)]
+pub struct AssistText;
 /// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
 #[derive(Component)]
 pub struct EdgeMarker;
@@ -199,12 +211,14 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((SilverText, txt("SILVER +0", FONT_MED, Color::srgb(0.75, 0.85, 1.0))));
                     c.spawn((PowerupText, txt("", FONT_SMALL, Color::srgb(0.85, 0.5, 1.0))));
                     c.spawn((ItemStatusText, txt("", FONT_SMALL, Color::srgb(1.0, 0.75, 0.45))));
+                    c.spawn((AssistText, txt("", FONT_SMALL, Color::srgb(0.55, 0.9, 1.0)), TextLayout::new_with_justify(Justify::Right)));
                 });
 
-            // banner center
+            // banner center, clear of the boss bar (80 px + a name line + the bar). In px, not
+            // a share of the screen height, so it keeps its distance at every UI scale
             root.spawn((Node {
                 position_type: PositionType::Absolute,
-                top: Val::Percent(22.0),
+                top: Val::Px(124.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -238,9 +252,9 @@ pub fn spawn_hud(mut commands: Commands) {
                 });
 
             // bottom cluster: hp bar, xp bar, weapon row
-            root.spawn((Node {
+            root.spawn((HudBottomCluster, Node {
                 position_type: PositionType::Absolute,
-                bottom: Val::Px(12.0),
+                bottom: Val::Px(HUD_BOTTOM_CLUSTER_Y),
                 left: Val::Percent(18.0),
                 width: Val::Percent(64.0),
                 flex_direction: FlexDirection::Column,
@@ -341,7 +355,10 @@ pub fn update_hud(
         Query<&mut Node, With<XpFill>>,
         Query<&mut Node, With<HpFill>>,
     )>,
-    mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
+    mut vignette: Query<(&mut BackgroundColor, Ref<Vignette>)>,
+    (save, time): (Res<crate::save::MetaSave>, Res<Time>),
+    // (HP + shield last frame, seconds of hurt tint left)
+    mut hurt: Local<(f32, f32)>,
 ) {
     let Ok(ps) = q_ps.single() else { return };
     if let Ok(mut t) = sets.p0().single_mut() {
@@ -387,29 +404,125 @@ pub fn update_hud(
     if let Ok(mut n) = fills.p1().single_mut() {
         n.width = Val::Percent((ps.hp / ps.stats.max_hp * 100.0).clamp(0.0, 100.0));
     }
-    if let Ok(mut bg) = vignette.single_mut() {
-        bg.0 = Color::srgba(1.0, 0.1, 0.1, (ps.iframes * 0.55).clamp(0.0, 0.4));
+    if let Ok((mut bg, vignette)) = vignette.single_mut() {
+        // The hurt tint marks what a hit TOOK — HP or shield — seen here, on the HUD's own
+        // machine: a joiner gets it from the vitals the host streams, and a revive's grace
+        // (HP going up) never tints. A fresh HUD (new run, other hero) starts from its own
+        // numbers, not the last run's. Flash reduction keeps it to a faint wash.
+        let pool = ps.hp.max(0.0) + ps.shield.max(0.0);
+        if vignette.is_added() {
+            *hurt = (pool, 0.0);
+        } else if pool < hurt.0 - 0.01 {
+            hurt.1 = HURT_TINT_SECS;
+        }
+        hurt.0 = pool;
+        hurt.1 = (hurt.1 - time.delta_secs()).max(0.0);
+        let peak = if save.accessibility.flash_reduction { HURT_TINT_PEAK_REDUCED } else { HURT_TINT_PEAK };
+        bg.0 = save.accessibility.palette.danger().with_alpha(peak * hurt.1 / HURT_TINT_SECS);
     }
+}
+
+/// The HUD's mid-screen lines (the Mission Control tutorial, the interact prompt) and the
+/// item status line (P03; long enough to reach under the rightmost card) sit where a choice
+/// panel or the pause menu draws its cards — at a large UI scale right across them. While
+/// one is open those lines step aside; they are back the moment play resumes.
+pub fn hide_mid_hud_under_panels(
+    phase: Res<crate::run::RunPhase>,
+    mut q: Query<&mut Visibility, Or<(With<crate::tutorial::TutorialText>, With<PromptText>, With<ItemStatusText>)>>,
+) {
+    use crate::run::RunPhase;
+    let want = if matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused) {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+/// Keep the in-run panels' bands clear of the HUD: the top band grows while a boss bar is
+/// showing, so a level-up or the pause menu never prints over a boss's name, and the bottom
+/// band grows with the weapon tray, whose item chips wrap onto more rows as a build fills
+/// out (P03) — so a card, a button or the panel's status line never lands on a chip.
+pub fn keep_panels_clear_of_hud(
+    boss_bar: Query<&Visibility, With<BossBarWrap>>,
+    cluster: Query<&ComputedNode, With<HudBottomCluster>>,
+    mut q: Query<&mut Node, With<super::RunOverlay>>,
+) {
+    let boss = boss_bar.iter().any(|v| *v != Visibility::Hidden);
+    let top = Val::Px(if boss { crate::config::HUD_TOP_BAND_BOSS } else { crate::config::HUD_TOP_BAND });
+    // ComputedNode sizes are physical pixels; × inverse_scale_factor gives the UI units
+    // Val::Px is written in (the same units at every UI scale). Whole units, so layout
+    // jitter of a fraction of a pixel never re-lays the panel.
+    let tray = cluster
+        .iter()
+        .next()
+        .map_or(0.0, |c| (c.size().y * c.inverse_scale_factor()).ceil() + HUD_BOTTOM_CLUSTER_Y + HUD_BAND_GAP);
+    let bottom = Val::Px(crate::config::HUD_BOTTOM_BAND.max(tray));
+    for mut n in &mut q {
+        if n.padding.top != top {
+            n.padding.top = top;
+        }
+        if n.padding.bottom != bottom {
+            n.padding.bottom = bottom;
+        }
+    }
+}
+
+/// The assists in force, so nobody mistakes an eased run for a canon one — including a
+/// joiner, whose run is the host's (`RunState::assist` arrives in RunSnapMsg) — and the
+/// "one more chance" token while it is still in hand.
+pub fn update_assist_hud(
+    run: Res<RunState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
+    mut q: Query<&mut Text, With<AssistText>>,
+) {
+    let Ok(mut t) = q.single_mut() else { return };
+    let token = match q_ps.single() {
+        Ok(ps) if run.assist.revive_token => {
+            if ps.revive_token_ready(&run.assist) { "\nONE MORE CHANCE: READY" } else { "\nONE MORE CHANCE: USED" }
+        }
+        _ => "",
+    };
+    let line = if run.assisted { format!("ASSISTED{token}") } else { String::new() };
+    if t.0 != line {
+        t.0 = line;
+    }
+}
+
+/// What the weapon row was last built from (it is rebuilt only when this changes).
+#[derive(PartialEq)]
+pub struct WeaponRowKey {
+    weapons: Vec<(WeaponKind, u32)>,
+    items: Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)>,
+    palette: crate::content::palettes::Palette,
 }
 
 /// Rebuild the weapon tray when loadout changes.
 pub fn update_weapon_row(
     mut commands: Commands,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
-    mut cache: Local<Vec<(WeaponKind, u32)>>,
-    mut item_cache: Local<Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)>>,
+    save: Res<crate::save::MetaSave>,
+    mut cache: Local<Option<WeaponRowKey>>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {
     let Ok(run) = q_ps.single() else { return };
     let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
-    // rebuilt on any change to the loadout — a new copy of an item, or a better grade of it
-    let items: Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)> =
-        run.items.iter().map(|s| (s.kind, s.count(), s.best())).collect();
-    if *cache == current && *item_cache == items {
+    let palette = save.accessibility.palette;
+    // rebuilt on any change to the loadout — a new copy of an item, or a better grade of it —
+    // or to the palette its grade colors are drawn in
+    let key = WeaponRowKey {
+        weapons: current.clone(),
+        items: run.items.iter().map(|s| (s.kind, s.count(), s.best())).collect(),
+        palette,
+    };
+    if cache.as_ref() == Some(&key) {
         return;
     }
-    *cache = current.clone();
-    *item_cache = items;
+    *cache = Some(key);
     let Ok(row) = q_row.single() else { return };
     commands.entity(row).despawn_related::<Children>();
     commands.entity(row).with_children(|c| {
@@ -436,7 +549,7 @@ pub fn update_weapon_row(
         // item chips, coloured by the best grade held of each
         for stack in run.items.iter() {
             let d = stack.kind.def();
-            let color = stack.best().color();
+            let color = stack.best().color(palette);
             c.spawn((
                 Node {
                     padding: UiRect::axes(Val::Px(5.0), Val::Px(2.0)),
@@ -507,6 +620,8 @@ pub fn update_item_status(
 /// this is how you navigate to them.
 #[allow(clippy::type_complexity)]
 pub fn update_edge_markers(
+    ui_scale: Res<UiScale>,
+    save: Res<crate::save::MetaSave>,
     camera: Query<(&Camera, &GlobalTransform), With<crate::player::PlayerRig>>,
     q_boss: Query<&Transform, With<crate::enemies::Boss>>,
     q_inter: Query<(&Transform, &crate::interact::Interactable)>,
@@ -522,7 +637,7 @@ pub fn update_edge_markers(
     // collect targets: (world pos, color, marker px size), priority order
     let mut targets: Vec<(Vec3, Color, f32)> = Vec::new();
     for tf in &q_boss {
-        targets.push((tf.translation, Color::srgb(1.0, 0.25, 0.2), 16.0));
+        targets.push((tf.translation, save.accessibility.palette.danger(), 16.0));
     }
     for (tf, inter) in &q_inter {
         if inter.used {
@@ -575,7 +690,8 @@ pub fn update_edge_markers(
         let half = center - Vec2::splat(margin);
         let scale_x = if d.x.abs() > 1e-4 { half.x / d.x.abs() } else { f32::MAX };
         let scale_y = if d.y.abs() > 1e-4 { half.y / d.y.abs() } else { f32::MAX };
-        let pos = center + d * scale_x.min(scale_y);
+        // Logical pixels -> UI units: UiScale multiplies every Val::Px.
+        let pos = (center + d * scale_x.min(scale_y)) / ui_scale.0.max(0.01);
 
         node.left = Val::Px(pos.x - px / 2.0);
         node.top = Val::Px(pos.y - px / 2.0);
@@ -632,11 +748,13 @@ pub fn update_comet_hud(
 }
 
 pub fn update_boss_bar(
+    save: Res<crate::save::MetaSave>,
     q_boss: Query<(&Enemy, &Boss)>,
     mut wrap: Query<&mut Visibility, With<BossBarWrap>>,
-    mut fill: Query<&mut Node, With<BossBarFill>>,
-    mut name: Query<&mut Text, With<BossBarName>>,
+    mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossBarFill>>,
+    mut name: Query<(&mut Text, &mut TextColor), With<BossBarName>>,
 ) {
+    let danger = save.accessibility.palette.danger();
     let Ok(mut vis) = wrap.single_mut() else { return };
     // show the beefiest live boss
     let mut best: Option<(f32, f32, &'static str)> = None;
@@ -649,11 +767,13 @@ pub fn update_boss_bar(
     match best {
         Some((hp, max, n)) => {
             *vis = Visibility::Visible;
-            if let Ok(mut f) = fill.single_mut() {
+            if let Ok((mut f, mut bg)) = fill.single_mut() {
                 f.width = Val::Percent((hp / max * 100.0).clamp(0.0, 100.0));
+                bg.0 = danger;
             }
-            if let Ok(mut t) = name.single_mut() {
+            if let Ok((mut t, mut c)) = name.single_mut() {
                 t.0 = n.to_string();
+                c.0 = danger.mix(&Color::WHITE, 0.35);
             }
         }
         None => {

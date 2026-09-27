@@ -1,6 +1,7 @@
 pub mod characters;
 pub mod enemies;
 pub mod items;
+pub mod palettes;
 pub mod planets;
 pub mod quests;
 pub mod tomes;
@@ -26,17 +27,10 @@ impl Rarity {
     /// The rolled rungs, in order. Cursed is deliberately absent.
     pub const LADDER: [Rarity; 4] = [Rarity::Common, Rarity::Rare, Rarity::Epic, Rarity::Legendary];
 
-    pub fn color(&self) -> bevy::prelude::Color {
-        use bevy::prelude::Color;
-        match self {
-            Rarity::Common => Color::srgb(0.75, 0.78, 0.80),
-            Rarity::Rare => Color::srgb(0.30, 0.65, 1.00),
-            Rarity::Epic => Color::srgb(0.75, 0.35, 1.00),
-            Rarity::Legendary => Color::srgb(1.00, 0.72, 0.15),
-            // Static-magenta: reads "wrong" next to the grey/blue/purple/gold ladder, and
-            // stays clear of red, which §12 reserves for danger telegraphs.
-            Rarity::Cursed => Color::srgb(1.00, 0.30, 0.70),
-        }
+    /// The grade's signal color in the viewer's palette (colorblind palettes remap it,
+    /// Cursed included — see `palettes::Palette::rarity`).
+    pub fn color(&self, palette: palettes::Palette) -> bevy::prelude::Color {
+        palette.rarity(*self)
     }
     pub fn name(&self) -> &'static str {
         match self {

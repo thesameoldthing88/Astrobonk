@@ -45,6 +45,9 @@ pub struct PauseSettingsBtn;
 #[derive(Component)]
 pub struct LeaveSessionBtn;
 
+/// Gap between choice cards, UI px.
+const CARD_GAP: f32 = 14.0;
+
 /// (Re)build the choice panel whenever its contents change.
 pub fn sync_choice_panel(
     mut commands: Commands,
@@ -52,7 +55,10 @@ pub fn sync_choice_panel(
     panel: Res<ChoicePanel>,
     q_run: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     q_root: Query<Entity, With<ChoiceRoot>>,
+    save: Res<MetaSave>,
+    (windows, ui_scale): (Query<&Window, With<bevy::window::PrimaryWindow>>, Res<UiScale>),
 ) {
+    let palette = save.accessibility.palette;
     let should_show = matches!(*phase, RunPhase::LevelUp) || (matches!(*phase, RunPhase::Modal) && !panel.options.is_empty());
     if !should_show {
         for e in &q_root {
@@ -67,93 +73,101 @@ pub fn sync_choice_panel(
     for e in &q_root {
         commands.entity(e).despawn();
     }
+    // At a large UI scale the cards narrow to share the screen's width (their text wraps
+    // longer) rather than run off its edges. Worked out here, not left to flex shrinking:
+    // text only wraps to a width it is given up front.
+    let n = panel.options.len().max(1) as f32;
+    let room = windows.iter().next().map_or(f32::MAX, |w| w.width() / ui_scale.0.max(0.01) - 16.0);
+    let card_w = ((room - CARD_GAP * (n - 1.0)) / n).clamp(120.0, 220.0);
 
     commands
-        .spawn((ChoiceRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
-        .with_children(|root| {
-            let title_color = if panel.banishing { Color::srgb(1.0, 0.4, 0.4) } else { Color::srgb(0.6, 1.0, 0.8) };
-            let title = if panel.banishing {
-                format!("{}: PICK ONE TO BANISH", panel.title)
-            } else {
-                panel.title.clone()
-            };
-            root.spawn(txt(title, FONT_BIG, title_color));
-
-            root.spawn((Node {
-                column_gap: Val::Px(14.0),
-                align_items: AlignItems::Stretch,
-                ..default()
-            },))
-                .with_children(|row| {
-                    for (i, opt) in panel.options.iter().enumerate() {
-                        let rarity = opt.rarity();
-                        row.spawn((
-                            ChoiceCard(i),
-                            Button,
-                            Node {
-                                width: Val::Px(220.0),
-                                min_height: Val::Px(180.0),
-                                padding: UiRect::all(Val::Px(12.0)),
-                                flex_direction: FlexDirection::Column,
-                                row_gap: Val::Px(8.0),
-                                border: UiRect::all(Val::Px(3.0)),
-                                border_radius: BorderRadius::all(Val::Px(8.0)),
-                                ..default()
-                            },
-                            BackgroundColor(CARD_BG),
-                            BorderColor::all(rarity.color()),
-                        ))
-                        .with_children(|card| {
-                            card.spawn(txt(rarity.name(), FONT_SMALL, rarity.color()));
-                            card.spawn(txt(opt.title(), FONT_MED, Color::WHITE));
-                            card.spawn(txt(opt.body(&run), FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                            card.spawn(txt(format!("[{}]", i + 1), FONT_SMALL, Color::srgb(0.5, 0.55, 0.7)));
-                        });
-                    }
-                });
-
-            if panel.is_levelup {
-                // Labels state the §3 economy outright: what a Refresh costs RIGHT NOW,
-                // charges left, and exactly what a Skip pays.
-                let dim = Color::srgb(0.45, 0.47, 0.55);
-                let (rlabel, rcolor) = match run.refresh_price() {
-                    RefreshPrice::Free if run.character == crate::content::characters::AstronautKind::Fortuna => {
-                        ("[R]EFRESH (FREE)".to_string(), Color::WHITE)
-                    }
-                    RefreshPrice::Free => (format!("[R]EFRESH ({} FREE)", run.refreshes), Color::WHITE),
-                    RefreshPrice::Gold(c) => (
-                        format!("[R]EFRESH ({c}g)"),
-                        if run.gold >= c { Color::srgb(1.0, 0.85, 0.3) } else { dim },
-                    ),
-                };
-                let blabel = if panel.banishing {
-                    "[B] CANCEL BANISH".to_string()
+        .spawn((ChoiceRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
+        .with_children(|overlay| {
+            overlay.spawn(fit_column()).with_children(|root| {
+                let title_color = if panel.banishing { Color::srgb(1.0, 0.4, 0.4) } else { Color::srgb(0.6, 1.0, 0.8) };
+                let title = if panel.banishing {
+                    format!("{}: PICK ONE TO BANISH", panel.title)
                 } else {
-                    format!("[B]ANISH ({})", run.banishes)
+                    panel.title.clone()
                 };
-                let bcolor = if run.banishes > 0 || panel.banishing { Color::WHITE } else { dim };
-                let (skip_gold, _) = run.skip_reward();
-                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },))
+                root.spawn(txt(title, FONT_BIG, title_color));
+
+                root.spawn((Node {
+                    column_gap: Val::Px(CARD_GAP),
+                    align_items: AlignItems::Stretch,
+                    ..default()
+                },))
                     .with_children(|row| {
-                        row.spawn((RefreshBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 0.7, 1.0))))
-                            .with_children(|b| {
-                                b.spawn(txt(rlabel, FONT_SMALL, rcolor));
+                        for (i, opt) in panel.options.iter().enumerate() {
+                            let rarity = opt.rarity();
+                            row.spawn((
+                                ChoiceCard(i),
+                                Button,
+                                Node {
+                                    width: Val::Px(card_w),
+                                    min_height: Val::Px(180.0),
+                                    padding: UiRect::all(Val::Px(12.0)),
+                                    flex_direction: FlexDirection::Column,
+                                    row_gap: Val::Px(8.0),
+                                    border: UiRect::all(Val::Px(3.0)),
+                                    border_radius: BorderRadius::all(Val::Px(8.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(CARD_BG),
+                                BorderColor::all(rarity.color(palette)),
+                            ))
+                            .with_children(|card| {
+                                card.spawn(txt(rarity.name(), FONT_SMALL, rarity.color(palette)));
+                                card.spawn(txt(opt.title(), FONT_MED, Color::WHITE));
+                                card.spawn(txt(opt.body(&run), FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                card.spawn(txt(format!("[{}]", i + 1), FONT_SMALL, Color::srgb(0.5, 0.55, 0.7)));
                             });
-                        row.spawn((BanishBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
-                            .with_children(|b| {
-                                b.spawn(txt(blabel, FONT_SMALL, bcolor));
-                            });
-                        row.spawn((SkipBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
-                            .with_children(|b| {
-                                b.spawn(txt(format!("[S]KIP +{skip_gold}g +XP"), FONT_SMALL, Color::WHITE));
-                            });
+                        }
                     });
-                root.spawn(txt(
-                    format!("gold {}      evolutions {}/{}", run.gold, run.evolutions_used(), run.evo_cap()),
-                    FONT_SMALL,
-                    Color::srgb(0.6, 0.65, 0.8),
-                ));
-            }
+
+                if panel.is_levelup {
+                    // Labels state the §3 economy outright: what a Refresh costs RIGHT NOW,
+                    // charges left, and exactly what a Skip pays.
+                    let dim = Color::srgb(0.45, 0.47, 0.55);
+                    let (rlabel, rcolor) = match run.refresh_price() {
+                        RefreshPrice::Free if run.character == crate::content::characters::AstronautKind::Fortuna => {
+                            ("[R]EFRESH (FREE)".to_string(), Color::WHITE)
+                        }
+                        RefreshPrice::Free => (format!("[R]EFRESH ({} FREE)", run.refreshes), Color::WHITE),
+                        RefreshPrice::Gold(c) => (
+                            format!("[R]EFRESH ({c}g)"),
+                            if run.gold >= c { Color::srgb(1.0, 0.85, 0.3) } else { dim },
+                        ),
+                    };
+                    let blabel = if panel.banishing {
+                        "[B] CANCEL BANISH".to_string()
+                    } else {
+                        format!("[B]ANISH ({})", run.banishes)
+                    };
+                    let bcolor = if run.banishes > 0 || panel.banishing { Color::WHITE } else { dim };
+                    let (skip_gold, _) = run.skip_reward();
+                    root.spawn((Node { column_gap: Val::Px(10.0), ..default() },))
+                        .with_children(|row| {
+                            row.spawn((RefreshBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 0.7, 1.0))))
+                                .with_children(|b| {
+                                    b.spawn(txt(rlabel, FONT_SMALL, rcolor));
+                                });
+                            row.spawn((BanishBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
+                                .with_children(|b| {
+                                    b.spawn(txt(blabel, FONT_SMALL, bcolor));
+                                });
+                            row.spawn((SkipBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
+                                .with_children(|b| {
+                                    b.spawn(txt(format!("[S]KIP +{skip_gold}g +XP"), FONT_SMALL, Color::WHITE));
+                                });
+                        });
+                    root.spawn(txt(
+                        format!("gold {}      evolutions {}/{}", run.gold, run.evolutions_used(), run.evo_cap()),
+                        FONT_SMALL,
+                        Color::srgb(0.6, 0.65, 0.8),
+                    ));
+                }
+            });
         });
 }
 
@@ -172,7 +186,7 @@ pub fn choice_input(
     mut phase: ResMut<RunPhase>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
-    mut hitstop: ResMut<crate::fx::Hitstop>,
+    (mut hitstop, mut screen_flash): (ResMut<crate::fx::Hitstop>, ResMut<crate::fx::ScreenFlash>),
 ) {
     if !matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) || panel.options.is_empty() {
         return;
@@ -269,6 +283,8 @@ pub fn choice_input(
         banners.write(BannerMsg("WEAPON EVOLVED".into()));
         sfx.write(SfxMsg(Sfx::Evolve));
         hitstop.timer = 0.18;
+        // the evolution white-flash (§13: flash reduction removes it)
+        screen_flash.fire(Color::WHITE, &save);
     } else {
         sfx.write(SfxMsg(Sfx::Click));
     }
@@ -321,42 +337,44 @@ pub fn chest_panel(
         let cost = chest.cost;
         let cat = crate::run::catalyst_line(item, &run);
         commands
-            .spawn((ChestRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
-            .with_children(|root| {
-                root.spawn(txt("CHEST", FONT_BIG, Color::srgb(1.0, 0.8, 0.3)));
-                root.spawn((
-                    Node {
-                        width: Val::Px(260.0),
-                        padding: UiRect::all(Val::Px(14.0)),
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(8.0),
-                        border: UiRect::all(Val::Px(3.0)),
-                        border_radius: BorderRadius::all(Val::Px(8.0)),
-                        ..default()
-                    },
-                    BackgroundColor(CARD_BG),
-                    BorderColor::all(grade.color()),
-                ))
-                .with_children(|card| {
-                    card.spawn(txt(grade.name(), FONT_SMALL, grade.color()));
-                    card.spawn(txt(d.name, FONT_MED, Color::WHITE));
-                    card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                    card.spawn(txt(crate::run::item_lines(item, grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
-                    if !cat.is_empty() {
-                        card.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
-                    }
-                });
-                root.spawn((Node { column_gap: Val::Px(10.0), ..default() },))
-                    .with_children(|row| {
-                        row.spawn((ChestTake, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
-                            .with_children(|b| {
-                                b.spawn(txt(format!("[1] TAKE (-{cost}g)"), FONT_SMALL, Color::WHITE));
-                            });
-                        row.spawn((ChestLeave, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
-                            .with_children(|b| {
-                                b.spawn(txt("[2] LEAVE", FONT_SMALL, Color::WHITE));
-                            });
+            .spawn((ChestRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
+            .with_children(|overlay| {
+                overlay.spawn(fit_column()).with_children(|root| {
+                    root.spawn(txt("CHEST", FONT_BIG, Color::srgb(1.0, 0.8, 0.3)));
+                    root.spawn((
+                        Node {
+                            width: Val::Px(260.0),
+                            padding: UiRect::all(Val::Px(14.0)),
+                            flex_direction: FlexDirection::Column,
+                            row_gap: Val::Px(8.0),
+                            border: UiRect::all(Val::Px(3.0)),
+                            border_radius: BorderRadius::all(Val::Px(8.0)),
+                            ..default()
+                        },
+                        BackgroundColor(CARD_BG),
+                        BorderColor::all(grade.color(save.accessibility.palette)),
+                    ))
+                    .with_children(|card| {
+                        card.spawn(txt(grade.name(), FONT_SMALL, grade.color(save.accessibility.palette)));
+                        card.spawn(txt(d.name, FONT_MED, Color::WHITE));
+                        card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                        card.spawn(txt(crate::run::item_lines(item, grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
+                        if !cat.is_empty() {
+                            card.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
+                        }
                     });
+                    root.spawn((Node { column_gap: Val::Px(10.0), ..default() },))
+                        .with_children(|row| {
+                            row.spawn((ChestTake, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
+                                .with_children(|b| {
+                                    b.spawn(txt(format!("[1] TAKE (-{cost}g)"), FONT_SMALL, Color::WHITE));
+                                });
+                            row.spawn((ChestLeave, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
+                                .with_children(|b| {
+                                    b.spawn(txt("[2] LEAVE", FONT_SMALL, Color::WHITE));
+                                });
+                        });
+                });
             });
         return;
     }
@@ -436,51 +454,53 @@ pub fn shop_panel(
         let cats: Vec<String> =
             offers.iter().map(|(item, _, _, _)| crate::run::catalyst_line(*item, &run)).collect();
         commands
-            .spawn((ShopRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
-            .with_children(|root| {
-                root.spawn(txt("SHADY GUY", FONT_BIG, Color::srgb(0.8, 0.7, 1.0)));
-                root.spawn(txt(format!("your gold: {gold}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
-                root.spawn((Node { column_gap: Val::Px(12.0), ..default() },))
-                    .with_children(|row| {
-                        for (i, (item, grade, price, sold)) in offers.iter().enumerate() {
-                            let d = item.def();
-                            let mut card = row.spawn((
-                                Node {
-                                    width: Val::Px(200.0),
-                                    padding: UiRect::all(Val::Px(12.0)),
-                                    flex_direction: FlexDirection::Column,
-                                    row_gap: Val::Px(6.0),
-                                    border: UiRect::all(Val::Px(3.0)),
-                                    border_radius: BorderRadius::all(Val::Px(8.0)),
-                                    ..default()
-                                },
-                                BackgroundColor(if *sold { Color::srgba(0.05, 0.05, 0.06, 0.9) } else { CARD_BG }),
-                                BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { grade.color() }),
-                            ));
-                            card.with_children(|c| {
-                                c.spawn(txt(grade.name(), FONT_SMALL, grade.color()));
-                                c.spawn(txt(d.name, FONT_MED, Color::WHITE));
-                                c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                                c.spawn(txt(crate::run::item_lines(*item, *grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
-                                let cat = &cats[i];
-                                if !cat.is_empty() {
-                                    c.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
-                                }
-                                if *sold {
-                                    c.spawn(txt("SOLD", FONT_MED, Color::srgb(0.6, 0.4, 0.4)));
-                                }
-                            });
-                            if !*sold {
-                                card.insert(Button).insert(ShopBuy(i)).with_children(|c| {
-                                    c.spawn(txt(format!("[{}] BUY {price}g", i + 1), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
+            .spawn((ShopRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
+            .with_children(|overlay| {
+                overlay.spawn(fit_column()).with_children(|root| {
+                    root.spawn(txt("SHADY GUY", FONT_BIG, Color::srgb(0.8, 0.7, 1.0)));
+                    root.spawn(txt(format!("your gold: {gold}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
+                    root.spawn((Node { column_gap: Val::Px(12.0), max_width: Val::Percent(100.0), ..default() },))
+                        .with_children(|row| {
+                            for (i, (item, grade, price, sold)) in offers.iter().enumerate() {
+                                let d = item.def();
+                                let mut card = row.spawn((
+                                    Node {
+                                        width: Val::Px(200.0),
+                                        padding: UiRect::all(Val::Px(12.0)),
+                                        flex_direction: FlexDirection::Column,
+                                        row_gap: Val::Px(6.0),
+                                        border: UiRect::all(Val::Px(3.0)),
+                                        border_radius: BorderRadius::all(Val::Px(8.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(if *sold { Color::srgba(0.05, 0.05, 0.06, 0.9) } else { CARD_BG }),
+                                    BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { grade.color(save.accessibility.palette) }),
+                                ));
+                                card.with_children(|c| {
+                                    c.spawn(txt(grade.name(), FONT_SMALL, grade.color(save.accessibility.palette)));
+                                    c.spawn(txt(d.name, FONT_MED, Color::WHITE));
+                                    c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                    c.spawn(txt(crate::run::item_lines(*item, *grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
+                                    let cat = &cats[i];
+                                    if !cat.is_empty() {
+                                        c.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
+                                    }
+                                    if *sold {
+                                        c.spawn(txt("SOLD", FONT_MED, Color::srgb(0.6, 0.4, 0.4)));
+                                    }
                                 });
+                                if !*sold {
+                                    card.insert(Button).insert(ShopBuy(i)).with_children(|c| {
+                                        c.spawn(txt(format!("[{}] BUY {price}g", i + 1), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
+                                    });
+                                }
                             }
-                        }
-                    });
-                root.spawn((ShopClose, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
-                    .with_children(|b| {
-                        b.spawn(txt("[E] WALK AWAY", FONT_SMALL, Color::WHITE));
-                    });
+                        });
+                    root.spawn((ShopClose, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.7, 0.7, 0.7))))
+                        .with_children(|b| {
+                            b.spawn(txt("[E] WALK AWAY", FONT_SMALL, Color::WHITE));
+                        });
+                });
             });
         return;
     }
@@ -561,9 +581,20 @@ pub fn pause_panel(
     leave: Query<&Interaction, (Changed<Interaction>, With<LeaveSessionBtn>)>,
     role: Res<crate::net::NetRole>,
     mut leave_out: MessageWriter<crate::net::LeaveSession>,
+    mut settings_were_open: Local<bool>,
 ) {
     // While the settings overlay is up, it owns input (incl. ESC) — don't also resume.
     if settings_open.0 {
+        *settings_were_open = true;
+        return;
+    }
+    // Back from settings: the panel's text is a snapshot, and an assist changed in there
+    // moves the ASSISTED line and the scaling readout — rebuild it (next frame, once the
+    // despawn lands).
+    if std::mem::take(&mut *settings_were_open) {
+        for e in &q_root {
+            commands.entity(e).despawn();
+        }
         return;
     }
     for i in &psettings {
@@ -604,74 +635,97 @@ pub fn pause_panel(
                     refresh,
                     ps.banishes
                 );
+                // §13 assists sit on top of the numbers above; say which are in force
+                let rules = if run.assisted {
+                    let now = run.assist.summary();
+                    format!("{rules}\nASSISTED: {}", if now.is_empty() { "earlier in this run" } else { now.as_str() })
+                } else {
+                    rules
+                };
                 commands
-                    .spawn((PauseRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(20)))
-                    .with_children(|root| {
-                        root.spawn(txt("PAUSED", FONT_BIG, Color::WHITE));
-                        root.spawn(txt(
-                            format!(
-                                "DMG x{:.2}  AS x{:.2}  CRIT {:.0}%  SPD x{:.2}\nARMOR {:.0}  EVA {:.0}  LUCK +{:.0}%  DIFF +{:.0}%{}",
-                                stats.damage,
-                                stats.attack_speed,
-                                stats.crit_chance * 100.0,
-                                stats.move_speed,
-                                stats.armor,
-                                stats.evasion,
-                                stats.luck * 100.0,
-                                stats.difficulty * 100.0,
-                                // Cracked Helmet's price, where the player checks their numbers
-                                if (stats.damage_taken - 1.0).abs() > 1e-3 {
-                                    format!("  TAKEN x{:.1}", stats.damage_taken)
-                                } else {
-                                    String::new()
-                                }
-                            ),
-                            FONT_SMALL,
-                            Color::srgb(0.8, 0.85, 0.95),
-                        ));
-                        root.spawn(txt(rules, FONT_SMALL, Color::srgb(1.0, 0.7, 0.55)));
-                        root.spawn((ResumeBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
-                            .with_children(|b| {
-                                b.spawn(txt("[ESC] RESUME", FONT_MED, Color::WHITE));
-                            });
-                        root.spawn((PauseSettingsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
-                            .with_children(|b| {
-                                b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
-                            });
-                        // A joiner's run is the HOST'S run: it cannot abandon it (nothing on a
-                        // client ends a run), only leave it — and the host plays on.
-                        if *role != crate::net::NetRole::Client {
-                            root.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
-                                .with_children(|b| {
-                                    b.spawn(txt(
-                                        // It ends the run for everyone; the session itself
-                                        // stays open, and the squad follows us into the next.
-                                        if role.is_networked() { "ABANDON RUN (WHOLE SQUAD)" } else { "ABANDON RUN" },
-                                        FONT_MED,
-                                        Color::WHITE,
-                                    ));
-                                });
-                        }
-                        if role.is_networked() {
-                            let label = if *role == crate::net::NetRole::Host {
-                                "END SESSION (PLAY ON SOLO)"
-                            } else {
-                                "LEAVE SESSION"
-                            };
-                            root.spawn((LeaveSessionBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.7, 0.3))))
-                                .with_children(|b| {
-                                    b.spawn(txt(label, FONT_MED, Color::WHITE));
-                                });
+                    .spawn((PauseRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(20)))
+                    .with_children(|overlay| {
+                        overlay.spawn(fit_column()).with_children(|root| {
+                            root.spawn(txt("PAUSED", FONT_BIG, Color::WHITE));
                             root.spawn(txt(
-                                if *role == crate::net::NetRole::Host {
-                                    "you host this run: pausing freezes it for your whole squad"
-                                } else {
-                                    "the host's world keeps running while this menu is open"
-                                },
+                                format!(
+                                    "DMG x{:.2}  AS x{:.2}  CRIT {:.0}%  SPD x{:.2}\nARMOR {:.0}  EVA {:.0}  LUCK +{:.0}%  DIFF +{:.0}%{}",
+                                    stats.damage,
+                                    stats.attack_speed,
+                                    stats.crit_chance * 100.0,
+                                    stats.move_speed,
+                                    stats.armor,
+                                    stats.evasion,
+                                    stats.luck * 100.0,
+                                    stats.difficulty * 100.0,
+                                    // Cracked Helmet's price, where the player checks their numbers
+                                    if (stats.damage_taken - 1.0).abs() > 1e-3 {
+                                        format!("  TAKEN x{:.1}", stats.damage_taken)
+                                    } else {
+                                        String::new()
+                                    }
+                                ),
                                 FONT_SMALL,
-                                Color::srgb(0.6, 0.65, 0.8),
+                                Color::srgb(0.8, 0.85, 0.95),
                             ));
-                        }
+                            root.spawn(txt(rules, FONT_SMALL, Color::srgb(1.0, 0.7, 0.55)));
+                            // One row of buttons (wrapping when a large UI scale runs out of
+                            // width) keeps the menu short enough to sit between the HUD bands.
+                            root.spawn((Node {
+                                width: Val::Percent(100.0),
+                                column_gap: Val::Px(10.0),
+                                row_gap: Val::Px(10.0),
+                                flex_wrap: FlexWrap::Wrap,
+                                justify_content: JustifyContent::Center,
+                                ..default()
+                            },))
+                                .with_children(|row| {
+                                    row.spawn((ResumeBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
+                                        .with_children(|b| {
+                                            b.spawn(txt("[ESC] RESUME", FONT_MED, Color::WHITE));
+                                        });
+                                    row.spawn((PauseSettingsBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.5, 0.8, 1.0))))
+                                        .with_children(|b| {
+                                            b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
+                                        });
+                                    // A joiner's run is the HOST'S run: it cannot abandon it (nothing on a
+                                    // client ends a run), only leave it — and the host plays on.
+                                    if *role != crate::net::NetRole::Client {
+                                        row.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
+                                            .with_children(|b| {
+                                                b.spawn(txt(
+                                                    // It ends the run for everyone; the session itself
+                                                    // stays open, and the squad follows us into the next.
+                                                    if role.is_networked() { "ABANDON RUN (WHOLE SQUAD)" } else { "ABANDON RUN" },
+                                                    FONT_MED,
+                                                    Color::WHITE,
+                                                ));
+                                            });
+                                    }
+                                    if role.is_networked() {
+                                        let label = if *role == crate::net::NetRole::Host {
+                                            "END SESSION (PLAY ON SOLO)"
+                                        } else {
+                                            "LEAVE SESSION"
+                                        };
+                                        row.spawn((LeaveSessionBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.7, 0.3))))
+                                            .with_children(|b| {
+                                                b.spawn(txt(label, FONT_MED, Color::WHITE));
+                                            });
+                                    }
+                                });
+                            if role.is_networked() {
+                                root.spawn(txt(
+                                    if *role == crate::net::NetRole::Host {
+                                        "you host this run: pausing freezes it for your whole squad"
+                                    } else {
+                                        "the host's world keeps running while this menu is open"
+                                    },
+                                    FONT_SMALL,
+                                    Color::srgb(0.6, 0.65, 0.8),
+                                ));
+                            }
+                        });
                     });
             }
             let mut do_resume = keys.just_pressed(KeyCode::Escape);

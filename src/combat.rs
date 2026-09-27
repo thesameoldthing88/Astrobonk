@@ -160,10 +160,14 @@ pub struct Beam {
     pub ghost: bool,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Fader {
     pub life: f32,
     pub max: f32,
+    /// A soft fade (photosensitivity mode's chain zaps): the cross-section swells from
+    /// nothing to this width and back over the life, so the light ramps instead of popping.
+    /// `None` is the canon quick shrink.
+    pub swell: Option<f32>,
 }
 
 #[derive(Component)]
@@ -234,6 +238,14 @@ fn ring_headings(up: Vec3, aim: Vec3, n: u32) -> impl Iterator<Item = Vec3> {
     (0..n).map(move |i| Quat::from_axis_angle(up, i as f32 / n as f32 * std::f32::consts::TAU) * aim)
 }
 
+/// How this machine may draw chain-lightning zaps (§13 photosensitivity, P04): the setting
+/// plus the one screen-wide flash budget every astronaut's zaps (and the ghost's) share.
+struct ZapLook<'a> {
+    photo: bool,
+    gate: &'a mut fx::FlashGate,
+    now: f32,
+}
+
 /// Fire one volley (every behavior except the always-on Orbit and Aura).
 #[allow(clippy::too_many_arguments)]
 fn fire_volley(
@@ -245,6 +257,7 @@ fn fire_volley(
     commands: &mut Commands,
     hits: &mut MessageWriter<HitMsg>,
     sfx: &mut MessageWriter<SfxMsg>,
+    zaps: &mut ZapLook,
     rng: &mut impl Rng,
 ) {
     let def = v.kind.def();
@@ -284,7 +297,7 @@ fn fire_volley(
                     } else {
                         Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)
                     }),
-                Fader { life: 0.14, max: 0.14 },
+                Fader { life: 0.14, max: 0.14, swell: None },
                 StageScoped,
             ));
             sfx.write(SfxMsg(Sfx::Hit));
@@ -426,24 +439,38 @@ fn fire_volley(
                 from = pos;
                 max_d = link_range;
             }
+            // Photosensitivity: no strobe. A zap swells in and out over PHOTO_ZAP_SECS in
+            // the dimmed material, and the whole screen shows at most one zap per
+            // PHOTO_MIN_FLASH_INTERVAL — one budget however many astronauts (the host draws
+            // everyone's) and ghosts carry chain weapons. Damage is unaffected.
+            let fader = if zaps.photo {
+                Fader { life: PHOTO_ZAP_SECS, max: PHOTO_ZAP_SECS, swell: Some(0.12) }
+            } else {
+                Fader { life: 0.12, max: 0.12, swell: None }
+            };
+            let zap_w = if zaps.photo { 0.0 } else { 0.12 };
+            let show_zaps = !chain.is_empty() && (!zaps.photo || zaps.gate.allow(zaps.now));
             let mut prev = origin;
             for (e, pos) in &chain {
                 let (cm, crit) = roll_crit(v.crit_ch, stats.crit_damage, rng);
                 let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
                 hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
                 // zap segment visual
-                let mid = (prev + *pos) / 2.0;
-                let len = prev.distance(*pos);
-                let dirv = (*pos - prev).normalize_or_zero();
-                commands.spawn((
-                    Mesh3d(assets.beam_mesh.clone()),
-                    MeshMaterial3d(assets.mats[&v.kind].clone()),
-                    Transform::from_translation(mid)
-                        .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
-                        .with_scale(Vec3::new(0.12, 0.12, len)),
-                    Fader { life: 0.12, max: 0.12 },
-                    StageScoped,
-                ));
+                if show_zaps {
+                    let mid = (prev + *pos) / 2.0;
+                    let len = prev.distance(*pos);
+                    let dirv = (*pos - prev).normalize_or_zero();
+                    commands.spawn((
+                        Mesh3d(assets.beam_mesh.clone()),
+                        MeshMaterial3d(assets.mats[&v.kind].clone()),
+                        Transform::from_translation(mid)
+                            .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
+                            // a soft zap starts as a hairline and swells in
+                            .with_scale(Vec3::new(zap_w, zap_w, len)),
+                        fader,
+                        StageScoped,
+                    ));
+                }
                 prev = *pos;
             }
             if !chain.is_empty() {
@@ -500,6 +527,34 @@ fn aim_from(
     if aim == Vec3::ZERO { facing } else { aim }
 }
 
+/// The weapons whose visuals strobe: chain lightning re-zaps at the fire rate, and the
+/// DEATH RAY is the brightest bloom source in the game (§13: "disables Storm Core strobe,
+/// softens Death Ray bloom").
+const STROBING_WEAPONS: [WeaponKind; 3] = [WeaponKind::Tesla, WeaponKind::StormCore, WeaponKind::DeathRay];
+
+/// PRESENTATION: photosensitivity mode turns the strobing weapons' shared materials into a
+/// dim, see-through version of themselves. Base color and alpha, not emissive: the weapon
+/// materials are unlit, and an unlit material draws its base color and nothing else.
+pub fn apply_weapon_photosensitivity(
+    save: Res<crate::save::MetaSave>,
+    assets: Option<Res<WeaponAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut applied: Local<Option<bool>>,
+) {
+    let photo = save.accessibility.photosensitive;
+    if *applied == Some(photo) {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    for kind in STROBING_WEAPONS {
+        if let Some(m) = assets.mats.get(&kind).and_then(|h| materials.get_mut(h)) {
+            let c = kind.def().color;
+            m.base_color = if photo { c.with_alpha(PHOTO_WEAPON_ALPHA) } else { c };
+        }
+    }
+    *applied = Some(photo);
+}
+
 /// Tick weapon cooldowns and fire.
 ///
 /// Runs on every machine for every astronaut it has a sheet for — authoritative on the
@@ -513,6 +568,7 @@ pub fn weapon_fire(
     assets: Res<WeaponAssets>,
     particles: Option<Res<ParticleAssets>>,
     mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    (save, mut flash_gate): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>),
     mut q_player: Query<(Entity, &Player, &mut PlayerState, &mut crate::items::ItemProcs, &Transform)>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
     q_pots: Query<(), With<Pot>>,
@@ -530,6 +586,7 @@ pub fn weapon_fire(
     let mut rng = rand::thread_rng();
     let t_now = time.elapsed_secs();
     let simulating = role.simulates();
+    let mut zaps = ZapLook { photo: save.accessibility.photosensitive, gate: &mut *flash_gate, now: t_now };
 
     // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
     let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32)> = HashMap::new();
@@ -619,7 +676,7 @@ pub fn weapon_fire(
             ghost: false,
             crit_ch,
         };
-        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut rng);
+        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut rng);
         if ring {
             telemetry.ring_volleys += 1;
         }
@@ -665,7 +722,7 @@ pub fn weapon_fire(
                 ghost: true,
                 crit_ch,
             };
-            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut rng);
+            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut rng);
             telemetry.ghost_volleys += 1;
         }
     }
@@ -1037,6 +1094,10 @@ pub fn fader_update(
         f.life -= dt;
         if f.life <= 0.0 {
             commands.entity(e).despawn();
+        } else if let Some(w) = f.swell {
+            let k = (std::f32::consts::PI * f.life / f.max).sin() * w;
+            tf.scale.x = k;
+            tf.scale.y = k;
         } else {
             let t = (f.life / f.max).max(0.0);
             tf.scale *= 0.9 + t * 0.1;
@@ -1148,12 +1209,18 @@ pub fn apply_hits(
 }
 
 /// Resolve hits on the player: evasion -> shield -> armor -> hp, thorns reflect — and, when
-/// a hit would kill, the ONE death-save resolver (`items::resolve_death_save`, §7 stacking
-/// rule). HOST-only: a peer's saves resolve here too and reach its screen as an item event.
+/// a hit would kill, the death-save chain: first the ONE item resolver
+/// (`items::resolve_death_save`, §7 stacking rule), then, only if no item caught it, the
+/// §13 "one more chance" token (an accessibility option never eats a save the build paid
+/// for). The §13 enemy-damage assist scales every hit here, where it lands, so shots and
+/// telegraphs already in flight when the slider moved honour it too. HOST-only: a peer's
+/// saves resolve here too and reach its screen as an item event / its streamed vitals.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_player_hits(
     mut reader: MessageReader<PlayerHitMsg>,
+    run: Res<RunState>,
     planet: Res<CurrentPlanet>,
+    hash: Res<SpatialHash>,
     mut q_ps: Query<(
         &mut PlayerState,
         &mut Player,
@@ -1162,12 +1229,14 @@ pub fn apply_player_hits(
         &Transform,
         Has<crate::player::LocalPlayer>,
     )>,
+    mut q_crowd: Query<&mut Enemy, (Without<Boss>, Without<Pot>)>,
     mut shake: ResMut<Shake>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
     mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
@@ -1183,8 +1252,12 @@ pub fn apply_player_hits(
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        // Cracked Helmet's price is paid before mitigation, like any other damage taken.
-        let mut amount = msg.amount * run_ps.stats.damage_taken.max(0.0) * (1.0 - run_ps.effective_armor_fraction());
+        // Cracked Helmet's price is paid before mitigation, like any other damage taken; the
+        // §13 enemy-damage assist eases the hit itself.
+        let mut amount = msg.amount
+            * run.assist.enemy_damage
+            * run_ps.stats.damage_taken.max(0.0)
+            * (1.0 - run_ps.effective_armor_fraction());
         // shield first
         if run_ps.shield > 0.0 {
             let absorbed = run_ps.shield.min(amount);
@@ -1222,7 +1295,16 @@ pub fn apply_player_hits(
                 }
                 None => {
                     run_ps.hp = 0.0;
-                    run_ps.dead = true;
+                    if run_ps.try_revive_token(&run.assist) {
+                        revive_nova(&hash, &mut q_crowd, ptf.translation, here, planet.radius);
+                        if is_local {
+                            banners.write(BannerMsg("ONE MORE CHANCE!".into()));
+                        }
+                        sfx.write(SfxMsg(Sfx::Shrine));
+                        info!("revive token spent (hp -> {:.0})", run_ps.hp);
+                    } else {
+                        run_ps.dead = true;
+                    }
                 }
             }
         } else if let Some(landing) = crate::items::boomerang_insurance(&run_ps, &mut procs, here) {
@@ -1236,6 +1318,27 @@ pub fn apply_player_hits(
                 from_wire: false,
             });
         }
+    }
+}
+
+/// "One more chance" clears a breathing ring so the second chance does not open inside the
+/// same crowd that closed the first. Crowd only — bosses and pots hold their ground.
+fn revive_nova(
+    hash: &SpatialHash,
+    q_crowd: &mut Query<&mut Enemy, (Without<Boss>, Without<Pot>)>,
+    at: Vec3,
+    dir: Vec3,
+    planet_radius: f32,
+) {
+    for (e, _) in hash.near(at, REVIVE_NOVA_RADIUS) {
+        let Ok(mut en) = q_crowd.get_mut(e) else { continue };
+        let arc = sphere::arc_dist(en.dir, dir, planet_radius);
+        if arc >= REVIVE_NOVA_RADIUS {
+            continue;
+        }
+        let away = en.dir - dir * en.dir.dot(dir);
+        let away = away.try_normalize().unwrap_or_else(|| sphere::tangent_frame(dir).0);
+        en.knock += away * REVIVE_NOVA_KNOCK * (1.0 - arc / REVIVE_NOVA_RADIUS).max(0.3);
     }
 }
 

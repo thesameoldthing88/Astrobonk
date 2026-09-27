@@ -43,6 +43,17 @@ pub const CONTACT_TICK: f32 = 0.5; // seconds between contact hits from one enem
 /// from these, so they are the one copy of the numbers.
 pub const BEAMER_CHARGE_SECS: f32 = 1.1;
 pub const BEAMER_LOCK_SECS: f32 = 0.25;
+/// A Burrower's ambush: seconds underground (its crack decal spreads for exactly this long,
+/// on every machine), and the eruption's reach.
+pub const BURROW_SECS: f32 = 1.3;
+pub const BURROW_ERUPT_RADIUS: f32 = 2.6;
+/// A boss slam's ring only hurts OUTSIDE this share of its radius — inside is the dodge.
+pub const SLAM_SAFE_FRACTION: f32 = 0.35;
+/// How far above the ground telegraph rings float: enough to stay above small bumps in the
+/// terrain, low enough to read as painted on it.
+pub const TELEGRAPH_LIFT: f32 = 0.3;
+/// A Beamer's aim line length, metres.
+pub const AIM_LINE_LEN: f32 = 24.0;
 
 pub const GEM_CAP: usize = 550;
 pub const PICKUP_BASE_RANGE: f32 = 3.2;
@@ -342,3 +353,81 @@ pub const NET_RECONCILE_WINDOW_SECS: f32 = 1.0;
 /// How fast the excess beyond the deadzone is closed, per second (exponential, so a big
 /// error eases home in about a second instead of snapping the camera).
 pub const NET_RECONCILE_RATE: f32 = 2.5;
+
+// ── Accessibility (GDD §13 "Accessibility — humane by default") ─────────────
+/// UI scale range, §13 "UI scale 75–150%".
+pub const UI_SCALE_MIN: f32 = 0.75;
+pub const UI_SCALE_MAX: f32 = 1.5;
+/// The smallest canvas, in UI units, every screen is laid out to hold: 1280x720 at the 150%
+/// maximum. A window too small for the chosen scale gets the largest scale that still gives
+/// the UI this much room (1280x720 and the Steam Deck's 1280x800 both allow the full 150%).
+pub const UI_FIT_CANVAS: (f32, f32) = (1280.0 / 1.5, 720.0 / 1.5);
+/// In-run choice panels (level-up, chest, shop) keep clear of the HUD's top band (timer) and
+/// bottom band (weapon tray, HP, XP, level), in UI units — the HUD scales with the UI too.
+pub const HUD_TOP_BAND: f32 = 64.0;
+/// The top band while a boss bar is up under the timer (80 px + its name line + the bar).
+pub const HUD_TOP_BAND_BOSS: f32 = 120.0;
+pub const HUD_BOTTOM_BAND: f32 = 118.0;
+/// Damage-number size multiplier range.
+pub const NUMBER_SIZE_MIN: f32 = 0.6;
+pub const NUMBER_SIZE_MAX: f32 = 2.0;
+/// Full mode's merge rule, §13: hits within 0.3 m / 0.1 s coalesce into a running sum...
+pub const NUMBER_MERGE_RADIUS_FULL: f32 = 0.3;
+pub const NUMBER_MERGE_SECS_FULL: f32 = 0.1;
+/// ...and "at high counts" — once this share of the pool is on screen — every hit folds
+/// into the nearest live number within NUMBER_MERGE_RADIUS, which is Merged mode's rule.
+pub const NUMBER_CROWDED_FRACTION: f32 = 0.75;
+pub const NUMBER_MERGE_RADIUS: f32 = 1.6;
+/// Photosensitivity mode: nothing that strobes may repeat faster than this. WCAG 2.3.1
+/// allows three flashes in any one second; 0.36 s keeps every source under 2.8 a second.
+pub const PHOTO_MIN_FLASH_INTERVAL: f32 = 0.36;
+/// Telegraph rings pulse faster as impact nears (Hz at spawn → at impact). Photosensitivity
+/// caps the rate below three a second.
+pub const TELEGRAPH_PULSE_HZ: (f32, f32) = (1.5, 5.0);
+pub const TELEGRAPH_PULSE_HZ_PHOTO: f32 = 2.5;
+pub const TELEGRAPH_PULSE_AMP: f32 = 0.07;
+/// Beamer aim lines: dashes per line, and how fast they march toward the target while the
+/// line is still tracking. A locked line stops marching — the "dodge now" tell.
+pub const AIM_DASHES: usize = 12;
+pub const AIM_DASH_SPEED: f32 = 9.0;
+/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
+pub const BLOOM_INTENSITY: f32 = 0.15;
+pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
+/// Every glow below lives on UNLIT materials, which draw their base color and ignore
+/// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
+/// the camera bloom then has less to spread, too.
+/// The enemy hit-flash under flash reduction: a pale grey instead of pure white. Still a flat
+/// read (it is the single most important readability tool, §12), minus the glare that turns
+/// a swarm under an aura into a strobing white cloud.
+pub const HIT_FLASH_GREY_REDUCED: f32 = 0.62;
+/// Particle brightness under flash reduction (share of the canon color).
+pub const PARTICLE_BRIGHTNESS_REDUCED: f32 = 0.55;
+/// The full-screen hurt tint: peak alpha when a hit takes HP (or shield), and under flash
+/// reduction, fading out over HURT_TINT_SECS.
+pub const HURT_TINT_PEAK: f32 = 0.22;
+pub const HURT_TINT_PEAK_REDUCED: f32 = 0.12;
+pub const HURT_TINT_SECS: f32 = 0.4;
+/// The evolution white-flash (flash reduction removes it outright).
+pub const EVOLVE_FLASH_ALPHA: f32 = 0.75;
+pub const EVOLVE_FLASH_SECS: f32 = 0.4;
+/// Photosensitivity mode (§13 "disables Storm Core strobe, softens Death Ray bloom"): the
+/// DEATH RAY / STORM CORE / Tesla materials drop to this opacity — a dim, see-through beam
+/// instead of a saturated slab of light...
+pub const PHOTO_WEAPON_ALPHA: f32 = 0.3;
+/// ...and a chain zap, instead of popping on for 0.12 s at the fire rate, fades in and out
+/// over this long, at most once per PHOTO_MIN_FLASH_INTERVAL on the whole screen.
+pub const PHOTO_ZAP_SECS: f32 = 0.45;
+
+// ── Difficulty as options (GDD §13) ───────────────────────────────────────────
+/// Enemy density slider: scales the spawn rate AND the live-enemy cap. Only ever eases.
+pub const ASSIST_DENSITY_MIN: f32 = 0.25;
+/// Enemy damage slider: scales every hit an astronaut takes. Only ever eases.
+pub const ASSIST_DAMAGE_MIN: f32 = 0.1;
+/// "One more chance": the would-be-lethal hit instead leaves the astronaut at this share of
+/// max HP, with these seconds of invulnerability...
+pub const REVIVE_TOKEN_HP_FRAC: f32 = 0.5;
+pub const REVIVE_TOKEN_IFRAMES: f32 = 3.0;
+/// ...and shoves the crowd back this far (knock impulse, m/s, decaying at 7/s ≈ 6 m), so
+/// the second chance does not open inside the same ring that closed the first.
+pub const REVIVE_NOVA_RADIUS: f32 = 7.0;
+pub const REVIVE_NOVA_KNOCK: f32 = 42.0;

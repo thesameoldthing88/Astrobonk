@@ -303,9 +303,9 @@ pub fn kill_drops(
     assets: Res<PickupAssets>,
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
-    q_ps: Query<&PlayerState>,
     particles: Option<Res<ParticleAssets>>,
     mut sfx: MessageWriter<SfxMsg>,
+    (save, mut flash_gate, time): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>, Res<Time>),
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
@@ -367,7 +367,19 @@ pub fn kill_drops(
             }
         }
 
-        if let Some(pa) = &particles {
+        // Photosensitivity: death bursts draw on the screen's one under-3/s flash budget —
+        // The Static dying in waves is otherwise a strobe. A boss always gets its burst (one
+        // a stage, and the kill needs its confirmation), and it spends the budget too.
+        let now = time.elapsed_secs();
+        let show_burst = if !save.accessibility.photosensitive {
+            true
+        } else if msg.is_boss {
+            flash_gate.mark(now);
+            true
+        } else {
+            flash_gate.allow(now)
+        };
+        if let (Some(pa), true) = (&particles, show_burst) {
             let color = if msg.elite { Pcolor::Gold } else { Pcolor::Green };
             let n = if msg.is_boss { 40 } else if msg.elite { 16 } else { 6 };
             fx::burst(&mut commands, pa, msg.pos, msg.dir, color, n, if msg.is_boss { 12.0 } else { 6.0 });
