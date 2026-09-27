@@ -3039,6 +3039,17 @@ fn duos_probe(
         hits.write(HitMsg { source: Some(src), target, amount, crit: false, knock: Vec3::ZERO, by });
     };
     let t = probe.secs_in_stage();
+    // Deep Freeze's victim and the foe beside it are held 1.2 m apart until the kill: the
+    // crowd's separation would otherwise drift a parked pair apart, out of the shatter
+    if (1..=3).contains(&probe.stage) {
+        let e0 = probe.staged[0];
+        if let Some(d0) = crowd.get(e0).ok().map(|(_, en, _)| en.dir) {
+            if let Ok((_, mut en, mut tf)) = crowd.get_mut(probe.staged[1]) {
+                en.dir = offset(d0, 0.0, 1.2, planet.radius);
+                tf.translation = planet.surface_point(en.dir);
+            }
+        }
+    }
     match probe.stage {
         // six foes, parked at the far side where no weapon reaches them
         0 if probe.ticks >= 60 => {
@@ -3051,7 +3062,7 @@ fn duos_probe(
             for (k, e) in picked.iter().enumerate() {
                 if let Ok((_, mut en, mut tf)) = crowd.get_mut(*e) {
                     // E0 is Deep Freeze's victim; E1 stands beside it to be shattered
-                    let d = if k == 1 { offset(spots[0], 0.0, 1.5, planet.radius) } else { spots[k] };
+                    let d = if k == 1 { offset(spots[0], 0.0, 1.2, planet.radius) } else { spots[k] };
                     en.dir = d;
                     en.speed = 0.0;
                     en.hp = if k == 1 { 1000.0 } else { 100.0 };
@@ -3101,7 +3112,7 @@ fn duos_probe(
             probe.next();
         }
         5 if t >= 0.3 => {
-            let shattered = crowd.get(probe.staged[1]).map(|(_, en, _)| 1000.0 - en.hp).unwrap_or(0.0);
+            let shattered = crowd.get(probe.staged[1]).map(|(_, en, _)| 1000.0 - en.hp).unwrap_or(-1.0);
             let got = |f: CoopFeat| telemetry.feats[f.code() as usize];
             let pair_ok = |f: CoopFeat| run.feats.iter().any(|x| x.feat == f && x.a.0 == 0 && x.b.0 == 1 && x.count == 1);
             let want_shatter = 100.0 * DUO_SHATTER_FRAC;
