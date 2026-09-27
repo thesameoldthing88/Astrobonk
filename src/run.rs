@@ -150,6 +150,9 @@ pub struct RunState {
     pub static_active: bool,
     pub static_timer: f32,
     pub teleporter_open: bool,
+    /// Where the exit teleporter stands once open. The host picks it; a client adopts it from
+    /// `RunSnapMsg` and both raise it from this (`interact::sync_teleporter`, M3).
+    pub teleporter_dir: Option<Vec3>,
     pub run_seed: u64,       // deterministic seed for world gen + spawns
     pub is_daily: bool,      // this run is the daily seeded challenge
     pub microwave_used: bool,
@@ -349,6 +352,7 @@ impl RunState {
             static_active: false,
             static_timer: 0.0,
             teleporter_open: false,
+            teleporter_dir: None,
             run_seed: fresh_seed(),
             is_daily: false,
             microwave_used: false,

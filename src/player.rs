@@ -608,11 +608,20 @@ fn backpack_mesh() -> Mesh {
 pub fn gather_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     rig: Res<CamRig>,
+    phase: Res<RunPhase>,
     mut light: ResMut<FlashlightSwitch>,
     mut sfx: MessageWriter<crate::messages::SfxMsg>,
     mut q: Query<(&Player, &mut InputIntent), With<LocalPlayer>>,
 ) {
     let Ok((p, mut intent)) = q.single_mut() else { return };
+    // Behind a panel or the pause menu (only reached in co-op, where the world runs on:
+    // `crate::world_live`) the keys belong to the panel — S skips a card, not a step back —
+    // so the body gets a neutral intent, never the last one held. The autopilot steers it
+    // from there (`coop::autopilot_local`).
+    if *phase != RunPhase::Playing {
+        *intent = InputIntent { forward: intent.forward, light: intent.light, ..default() };
+        return;
+    }
     let up = p.dir;
     let mut fwd = rig.forward - up * rig.forward.dot(up);
     if fwd.length_squared() < 1e-6 {
@@ -1394,7 +1403,30 @@ pub fn sync_flashlights(
     }
 }
 
-/// HP regen, shield recharge, iframe + powerup decay.
+/// Powerup and i-frame clocks, on EVERY machine (M6). A joiner is granted its powerups over
+/// the wire (`net::apply_loot_grant`) and must run them down itself: host-only, a Speed
+/// boost never ended in its prediction (drift) and a Magnet flew every gem at it for the
+/// rest of the stage. Its i-frames are only its HUD's (the host's copy takes the hits).
+pub fn tick_player_timers(time: Res<Time>, mut q: Query<&mut PlayerState>) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for mut ps in &mut q {
+        if ps.iframes > 0.0 {
+            ps.iframes = (ps.iframes - dt).max(0.0);
+        }
+        if ps.powerups.is_empty() {
+            continue;
+        }
+        for pu in ps.powerups.iter_mut() {
+            pu.1 -= dt;
+        }
+        ps.powerups.retain(|(_, t)| *t > 0.0);
+    }
+}
+
+/// HP regen and shield recharge (the clocks every machine runs are `tick_player_timers`).
 pub fn player_upkeep(
     time: Res<Time>,
     mut run: ResMut<RunState>,
@@ -1412,20 +1444,9 @@ pub fn player_upkeep(
         let regen = run.stats.regen / 60.0;
         run.hp = (run.hp + regen * dt).min(run.stats.max_hp);
     }
-    run.iframes = (run.iframes - dt).max(0.0);
     run.shield_cd = (run.shield_cd - dt).max(0.0);
     if run.shield_cd <= 0.0 && run.shield < run.stats.shield {
         run.shield = (run.shield + run.stats.shield * 0.35 * dt).min(run.stats.shield);
-    }
-    let mut expired = false;
-    for pu in run.powerups.iter_mut() {
-        pu.1 -= dt;
-        if pu.1 <= 0.0 {
-            expired = true;
-        }
-    }
-    if expired {
-        run.powerups.retain(|(_, t)| *t > 0.0);
     }
     }
 }

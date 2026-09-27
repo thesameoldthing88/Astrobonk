@@ -356,17 +356,28 @@ pub fn apply_fx_settings(
 }
 
 /// Pause/unpause virtual time when the phase changes.
-pub fn phase_time_control(phase: Res<crate::run::RunPhase>, mut virt: ResMut<Time<Virtual>>) {
+pub fn phase_time_control(
+    phase: Res<crate::run::RunPhase>,
+    role: Res<crate::net::NetRole>,
+    mut virt: ResMut<Time<Virtual>>,
+) {
     use crate::run::RunPhase;
-    if !phase.is_changed() {
+    if !phase.is_changed() && !role.is_changed() {
         return;
     }
-    match *phase {
-        RunPhase::Playing => {
-            virt.unpause();
-            virt.set_relative_speed(1.0);
-        }
-        _ => virt.pause(),
+    // A networked machine never stops its clock for one player's panel (`crate::world_live`,
+    // KNOWN_ISSUES M4): on the host it is the squad's world, on a joiner the streamed horde
+    // and teammates it draws. Solo pauses for any panel, as ever.
+    let hold = match *phase {
+        RunPhase::Playing => false,
+        RunPhase::Dead => true,
+        _ => !role.is_networked(),
+    };
+    if hold {
+        virt.pause();
+    } else {
+        virt.unpause();
+        virt.set_relative_speed(1.0);
     }
 }
 

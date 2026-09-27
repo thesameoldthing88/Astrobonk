@@ -283,6 +283,9 @@ fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, keep: &Keepout, avoid: 
 }
 
 /// Scatter all interactables for the current stage.
+/// Separates the vendor-stock stream from the layout stream of the same stage seed (M1).
+const SHOP_STOCK_SEED_SALT: u64 = 0x5709_C4A5_E5EE_D001;
+
 pub fn spawn_interactables(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -297,8 +300,15 @@ pub fn spawn_interactables(
 ) {
     let def = planet.kind.def();
     let keep = Keepout { rails, props };
-    // deterministic interactable layout + vendor stock from the run seed
-    let mut rng = StdRng::seed_from_u64(run.run_seed.wrapping_add(run.stage as u64).wrapping_mul(0x9e37));
+    // deterministic interactable layout from the run seed — every draw of it the same on
+    // every machine (CLAUDE.md rule 5)
+    let layout_seed = run.run_seed.wrapping_add(run.stage as u64).wrapping_mul(0x9e37);
+    let mut rng = StdRng::seed_from_u64(layout_seed);
+    // Vendor stock gets its OWN stream (M1). It is rolled from a sheet (luck, items owned at
+    // max, bans) that differs per machine and per carried build, and `roll_item` consumes a
+    // sheet-dependent number of draws — on the layout stream that shifted every shrine, the
+    // Moai, the microwave, the cage slot and all five charge rings between host and joiner.
+    let mut stock_rng = StdRng::seed_from_u64(layout_seed ^ SHOP_STOCK_SEED_SALT);
 
     // Pots
     let pot_mesh = meshes.add(Mesh::from(Cylinder::new(0.32, 0.55)));
@@ -403,7 +413,7 @@ pub fn spawn_interactables(
     for _ in 0..2 {
         let mut stock = Vec::new();
         for _ in 0..3 {
-            let (item, grade) = roll_item(ps, ps.stats.luck, &mut rng);
+            let (item, grade) = roll_item(ps, ps.stats.luck, &mut stock_rng);
             stock.push((item, grade, price(grade, ps.stats.chest_discount), false));
         }
         let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
@@ -460,18 +470,57 @@ pub fn spawn_interactables(
     }
 }
 
-/// Spawn the exit teleporter (after the boss falls).
-pub fn spawn_teleporter(
+/// Marks the exit teleporter, so `sync_teleporter` can tell whether it stands.
+#[derive(Component)]
+pub struct Teleporter;
+
+/// Where the exit teleporter opens once the boss falls: 18 m from the squad's centroid, at a
+/// random bearing. HOST-rolled — the spot then rides `RunState::teleporter_dir`.
+pub fn teleporter_spot(planet: &CurrentPlanet, anchor: Vec3, rng: &mut impl Rng) -> Vec3 {
+    let (t, b) = sphere::tangent_frame(anchor);
+    let a = rng.gen_range(0.0..std::f32::consts::TAU);
+    sphere::offset_dir(anchor, t * a.cos() + b * a.sin(), 18.0, planet.radius)
+}
+
+/// Keep the exit teleporter in step with `RunState::teleporter_dir`, on host AND client —
+/// the `sync_reward_cache` pattern. It used to be spawned only inside the host's clock at a
+/// `thread_rng` bearing, so a joiner never had one: no ring, no edge marker, no way home (M3).
+#[allow(clippy::too_many_arguments)]
+pub fn sync_teleporter(
+    mut commands: Commands,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    q: Query<Entity, With<Teleporter>>,
+    role: Option<Res<crate::net::NetRole>>,
+    mut banners: MessageWriter<BannerMsg>,
+) {
+    match (run.teleporter_dir, q.iter().next()) {
+        (Some(dir), None) => {
+            spawn_teleporter(&mut commands, &mut meshes, &mut materials, &planet, dir);
+            // the host's clock announced it; a joiner hears it here
+            if role.is_some_and(|r| matches!(*r, crate::net::NetRole::Client)) {
+                banners.write(BannerMsg(crate::director::TELEPORTER_BANNER.into()));
+            }
+        }
+        // a client learns of a stage change in the snapshot that clears the field; the
+        // stage sweep may take it this same frame
+        (None, Some(e)) => {
+            commands.entity(e).try_despawn();
+        }
+        _ => {}
+    }
+}
+
+/// The exit teleporter at `dir`: a ring on a pedestal under a planet-high column.
+fn spawn_teleporter(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
-    player_dir: Vec3,
+    dir: Vec3,
 ) {
-    let mut rng = rand::thread_rng();
-    let (t, b) = sphere::tangent_frame(player_dir);
-    let a = rng.gen_range(0.0..std::f32::consts::TAU);
-    let dir = sphere::offset_dir(player_dir, t * a.cos() + b * a.sin(), 18.0, planet.radius);
     let c = InteractDefs::color(InteractKind::Teleporter);
     let mat = materials.add(StandardMaterial {
         base_color: c,
@@ -485,6 +534,7 @@ pub fn spawn_teleporter(
     commands
         .spawn((
             Interactable { kind: InteractKind::Teleporter, used: false, chest_item: None, stock: Vec::new() },
+            Teleporter,
             Mesh3d(meshes.add(Mesh::from(Torus::new(1.4, 1.7)))),
             MeshMaterial3d(mat.clone()),
             Transform::from_translation(pos + dir * 2.0).with_rotation(rot),
@@ -513,7 +563,7 @@ pub fn charge_shrines(
     mut banners: MessageWriter<BannerMsg>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 || *phase != RunPhase::Playing {
+    if dt <= 0.0 {
         return;
     }
     // only astronauts standing charge a ring: not a Beacon rolling through it (L19)
@@ -533,6 +583,13 @@ pub fn charge_shrines(
         }
         let pulse = 1.0 + s.progress * 0.35;
         tf.scale = Vec3::splat(pulse);
+        // In co-op the rings keep charging behind the host's panel (`crate::world_live`);
+        // a full one waits there for its blessing panel until the host's current one closes.
+        // (Whose blessing it is — the chargers', not the host's — is P14's peer loot.)
+        if s.progress >= 1.0 && *phase != RunPhase::Playing {
+            s.progress = 1.0;
+            continue;
+        }
         if s.progress >= 1.0 {
             s.done = true;
             run.shrines_charged += 1;

@@ -109,6 +109,8 @@ pub struct CoopTelemetry {
     pub dropins: u32,
     pub dropin_landings: u32,
     pub autopilot_secs: f32,
+    /// Seconds this machine's own astronaut fought on autopilot behind a panel (D6).
+    pub panel_autopilot_secs: f32,
     pub cascades: u32,
     pub cascade_hits: u32,
     /// Per `CoopFeat::code`.
@@ -788,26 +790,47 @@ pub fn autopilot_peers(
     }
 }
 
-/// CLIENT: our own half of the autopilot — while the grace lasts and we are idle, the
-/// autopilot's wish is our input (so our prediction runs it, and the host gets it as the
-/// input it already knows how to apply). Behind a card panel our input goes up neutral,
-/// and the host's `autopilot_peers` keeps our body fighting.
+/// EVERY networked machine: this machine's own astronaut on autopilot.
+///   * a drop-in's grace (§11, 30 s) while its player is idle — the autopilot's wish is our
+///     input, so our prediction runs it and the host gets it as the input it already knows
+///     how to apply;
+///   * behind a panel or the pause menu (KNOWN_ISSUES D6/M4): in co-op the squad's world
+///     runs on while one player picks cards (`crate::world_live`), and a body left standing
+///     in the horde would be eaten for reading a card. It kites and regroups instead — its
+///     guns fire on as always — and it can still be downed. The host's own astronaut takes
+///     this path too; a joiner's wish reaches the host like any other input.
+/// Solo never gets here: its world stops behind a panel.
 #[allow(clippy::type_complexity)]
 pub fn autopilot_local(
     time: Res<Time>,
     hash: Res<SpatialHash>,
     planet: Res<CurrentPlanet>,
+    phase: Res<crate::run::RunPhase>,
     enemies: Query<&Enemy>,
-    mates: Query<&Transform, (With<RemoteAstronaut>, Without<LocalPlayer>)>,
+    mates: Query<
+        (&Transform, Option<&PlayerState>, Option<&PlayerVitals>),
+        (Or<(With<RemoteAstronaut>, With<Player>)>, Without<LocalPlayer>),
+    >,
     mut q: Query<(&Player, &PlayerState, &mut InputIntent, &Transform), With<LocalPlayer>>,
+    mut telemetry: ResMut<CoopTelemetry>,
 ) {
+    use crate::run::RunPhase;
     let Ok((p, ps, mut intent, tf)) = q.single_mut() else { return };
+    let behind = matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused);
     let idle = intent.wish == Vec3::ZERO && !intent.jump && !intent.slide && !intent.blink;
-    if ps.grace <= 0.0 || ps.dead || !idle {
+    if ps.dead || !(behind || (ps.grace > 0.0 && idle)) {
         return;
     }
-    let others: Vec<Vec3> = mates.iter().map(|m| m.translation.normalize_or_zero()).collect();
+    // regroup toward teammates who are standing (a Beacon is not a rally point)
+    let others: Vec<Vec3> = mates
+        .iter()
+        .filter(|(_, s, v)| !s.is_some_and(|s| s.dead) && !v.is_some_and(|v| v.down))
+        .map(|(m, ..)| m.translation.normalize_or_zero())
+        .collect();
     intent.wish = autopilot_wish(p.dir, tf.translation, &threats_near(tf.translation, &hash, &enemies), &others, time.elapsed_secs(), planet.radius);
+    if behind {
+        telemetry.panel_autopilot_secs += time.delta_secs();
+    }
 }
 
 // ─── presentation of the one-shots ────────────────────────────────────────────

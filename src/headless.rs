@@ -3081,7 +3081,14 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 .run_if(crate::playing)
                 .run_if(|p: Res<CoopProbe18>| p.dropin),
         )
-        .add_systems(Update, crate::director::snapshot_local_sheet)
+        .add_systems(
+            Update,
+            (
+                crate::director::snapshot_local_sheet,
+                crate::player::tick_player_timers,
+                crate::interact::sync_teleporter.before(crate::director::stage_transition),
+            ),
+        )
         .init_resource::<OverflowProbe>()
         .add_systems(
             Update,

@@ -55,9 +55,26 @@ pub enum AppState {
     Results,
 }
 
-/// Convenience run-condition: gameplay is live.
+/// Convenience run-condition: this machine's player is in play — no panel, pause menu or
+/// wipe in front of them. Gates what the LOCAL player does (keys, the E prompt, the tutorial).
 pub fn playing(phase: Res<run::RunPhase>) -> bool {
     *phase == run::RunPhase::Playing
+}
+
+/// Run-condition: the world simulates (and is drawn moving) this frame.
+///
+/// Solo: only while playing — a level-up, a chest or the pause menu stops the game (§13,
+/// "level-up pauses"). Networked (KNOWN_ISSUES D6/M4): a panel is ONE player's, so the world
+/// the squad shares runs on behind it — §11 rejects any model where "the squad stalls on one
+/// player's hitch", and a host's cards used to freeze every teammate (and, past 2 s, blank
+/// their horde). The astronaut of a player behind a panel fights on autopilot
+/// (`coop::autopilot_local`). Only the wipe/abandon beat (`Dead`) holds everyone.
+pub fn world_live(phase: Res<run::RunPhase>, role: Res<net::NetRole>) -> bool {
+    match *phase {
+        run::RunPhase::Playing => true,
+        run::RunPhase::Dead => false,
+        _ => role.is_networked(),
+    }
 }
 
 /// A test-harness flag that bends a run (winds the clock, hands out loot) counts only when
@@ -250,7 +267,7 @@ fn main() {
         .add_systems(
             Update,
             dev_evolve_now
-                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(in_state(AppState::InRun).and(world_live))
                 .run_if(|| dev_flag("--evolvenow")),
         )
         .add_systems(
@@ -263,7 +280,7 @@ fn main() {
             Update,
             director::dev_miniboss_now
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(in_state(AppState::InRun).and(world_live))
                 .run_if(|| dev_flag("--minibossnow")),
         )
         .add_systems(
@@ -290,7 +307,7 @@ fn main() {
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
         .add_systems(Update, ui::menus::results_input.run_if(in_state(AppState::Results)))
-        // ------------- live simulation (only while actually playing)
+        // ------------- live simulation (while the world is live: see `world_live`)
         .add_systems(
             Update,
             (
@@ -327,7 +344,7 @@ fn main() {
                 enemies::animate_hazard_decor,
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // ------------- §9 new enemies (P08, bestiary.rs): the host moves, fires and resolves
         // the new kinds for every astronaut; every machine poses and dresses them from their
@@ -347,14 +364,14 @@ fn main() {
                 .after(enemies::enemy_move)
                 .before(bestiary::bestiary_pose)
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         .add_systems(
             Update,
             bestiary::mimic_spring
                 .after(interact::interact_system)
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         .add_systems(
             Update,
@@ -374,7 +391,7 @@ fn main() {
                 bestiary::tracker_beacons,
                 bestiary::reap_owned_telegraphs,
             )
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // one-shots are presented behind a card panel too (a joiner's launch must land)
         .add_systems(Update, bestiary::bestiary_fx_presentation.run_if(in_state(AppState::InRun)))
@@ -382,7 +399,7 @@ fn main() {
             Update,
             bestiary::dev_spawn_enemies
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(in_state(AppState::InRun).and(world_live))
                 .run_if(|| dev_flag("--enemies")),
         )
         .add_systems(
@@ -408,7 +425,7 @@ fn main() {
                 combat::aura_follow,
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // ------------- §6 the Tier-1 weapons' own behaviours: they fly, swing and hit on
         // every machine (a joiner's hits are dropped — `apply_hits` is the host's); the host
@@ -432,7 +449,7 @@ fn main() {
             )
                 .chain()
                 .after(combat::aura_follow)
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // §12 the evolution fanfare (and THE ANGELUS's wisps): an evolution is picked behind
         // the level-up card, so these run behind panels too — the fanfare's clock is the
@@ -449,7 +466,8 @@ fn main() {
                 interact::charge_shrines.run_if(net::is_simulating),
                 // Interactables are host-resolved. A joiner pressing E is a no-op today —
                 // the same documented gap as a peer on the host.
-                interact::interact_system.run_if(net::is_simulating),
+                // the local player's E: never from behind their own panel
+                interact::interact_system.run_if(net::is_simulating).run_if(playing),
                 // Collection and the XP grant are the host's; a client animates its
                 // streamed loot with netenemy::animate_net_pickups instead. Left ungated
                 // this would collect locally and DOUBLE the XP a joiner receives.
@@ -459,10 +477,10 @@ fn main() {
                 director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
                 // M14: a dev key, not a shipped one (B is also the level-up Banish key)
-                enemies::debug_spawn_boss.run_if(net::is_simulating).run_if(dev_mode),
+                enemies::debug_spawn_boss.run_if(net::is_simulating).run_if(dev_mode).run_if(playing),
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         .add_systems(
             Update,
@@ -475,7 +493,7 @@ fn main() {
                 events_world::dust_storm_visuals,
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // ------------- §7 items: the host simulates what they DO for every astronaut; every
         // machine draws them (from NetItemVis and the hazard lane's item events)
@@ -495,7 +513,7 @@ fn main() {
                 items::item_visuals,
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // ------------- §4 day/night + §8 world gimmicks: the host turns and eats the sun,
         // places The Crawl and primes/bites with the spore caps; a client turns its copy of
@@ -512,7 +530,7 @@ fn main() {
                 gimmicks::spore_sim.run_if(net::is_simulating).after(enemies::rebuild_hash),
             )
                 .chain()
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // ...and what they look like, on every machine, from the run's sun and the streamed
         // state (behind a card panel too: the world is still lit)
@@ -567,13 +585,13 @@ fn main() {
                 duos::static_cascade.run_if(net::is_simulating),
                 duos::duo_payoffs.run_if(net::is_simulating).after(combat::apply_hits),
                 coop::autopilot_local
-                    .run_if(net::is_client)
+                    .run_if(net::is_networked)
                     .after(player::gather_local_input)
                     .after(net::bot_input)
                     .before(net::send_local_input)
                     .before(player::player_input),
             )
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         .add_systems(
             Update,
@@ -582,7 +600,7 @@ fn main() {
                 coop::dev_split_squad.run_if(|| dev_flag("--splitsquad")),
             )
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         .add_systems(
             Update,
@@ -607,7 +625,7 @@ fn main() {
             Update,
             dev_warp
                 .run_if(net::is_simulating)
-                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(in_state(AppState::InRun).and(world_live))
                 .run_if(|| dev_flag("--warp")),
         )
         // ------------- §4 movement techs: the moves themselves are player_input/physics on
@@ -619,7 +637,7 @@ fn main() {
             (techs::antipode_blink.run_if(net::is_simulating), techs::blink_denied_feedback)
                 .chain()
                 .after(player::player_input)
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // After the last reader of the edge intents: every edge lives one frame. Behind a
         // panel too — a joiner's press that lands while the host's run is held is dropped,
@@ -643,7 +661,7 @@ fn main() {
                 techs::animate_tech_fx,
                 player::sync_flashlights,
             )
-                .run_if(in_state(AppState::InRun).and(playing)),
+                .run_if(in_state(AppState::InRun).and(world_live)),
         )
         // Presented behind a card panel too, like the item one-shots: a joiner's blink the
         // host resolves meanwhile must still turn its predicted body.
@@ -668,7 +686,7 @@ fn main() {
             Update,
             pickups::gem_merge.run_if(net::is_simulating).run_if(
                 in_state(AppState::InRun)
-                    .and(playing)
+                    .and(world_live)
                     .and(on_timer(Duration::from_secs(1))),
             ),
         )
@@ -691,11 +709,15 @@ fn main() {
                 // per-player state. A client adopts its own hp from the replicated
                 // PlayerVitals (net::adopt_my_vitals) instead of regenerating locally.
                 player::player_upkeep.run_if(net::is_simulating),
+                // ...but every machine runs its sheets' powerup and i-frame clocks (M6)
+                player::tick_player_timers,
                 fx::update_particles,
                 director::stage_transition,
                 // Host AND client: spawns/pops the miniboss cache from RunState, which a
                 // client adopts from RunSnapMsg.
                 interact::sync_reward_cache.before(director::stage_transition),
+                // ...and the exit teleporter, from RunState too (M3)
+                interact::sync_teleporter.before(director::stage_transition),
                 // Run-end is the host's call. On a client `all(dead)` is a one-element
                 // check over its own sheet and fires while the host plays on.
                 director::downed_watch.run_if(net::is_simulating),

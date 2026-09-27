@@ -56,6 +56,25 @@ pub fn sync_assist_options(save: Res<MetaSave>, mut run: ResMut<RunState>) {
     }
 }
 
+/// The run clock's announcements — one text per beat, written by the host's clock and, from
+/// the replicated run, by a joiner's `announce_run_beats` (M23).
+pub const TELEPORTER_BANNER: &str = "TELEPORTER ONLINE: OR STAY AND FARM";
+
+/// A boss or miniboss arriving: a stage boss RISES, a miniboss APPROACHES.
+pub fn boss_banner(kind: BossKind) -> String {
+    let def = kind.def();
+    format!("{} {}", def.name, if def.is_stage_boss { "RISES" } else { "APPROACHES" })
+}
+
+/// The clock ran out (or, with The Static Radio in the party, was called in early).
+pub fn static_banner(radio: bool) -> &'static str {
+    if radio {
+        "THE RADIO CALLED IT IN. THE STATIC RISES EARLY."
+    } else {
+        "THE STATIC RISES. RUN OR FARM SILVER."
+    }
+}
+
 /// Countdown, boss marks, The Static.
 #[allow(clippy::too_many_arguments)]
 pub fn run_clock(
@@ -63,7 +82,6 @@ pub fn run_clock(
     time: Res<Time>,
     mut run: ResMut<RunState>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     enemy_assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(&Player, &PlayerState)>,
@@ -113,7 +131,7 @@ pub fn run_clock(
                 // Tag WHICH mark this is: the §3 guaranteed chest follows miniboss #1, whatever
                 // kind a world's miniboss table (P20) puts there.
                 commands.entity(e).insert(MinibossSlot(i as u8));
-                banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
+                banners.write(BannerMsg(boss_banner(kind)));
                 sfx.write(SfxMsg(Sfx::BossRoar));
             }
         }
@@ -126,7 +144,7 @@ pub fn run_clock(
                 _ => BossKind::Anubot,
             };
             enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, &scaling);
-            banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
+            banners.write(BannerMsg(boss_banner(kind)));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
     }
@@ -134,10 +152,11 @@ pub fn run_clock(
     // boss died -> teleporter (once). Checked in The Static too: a boss the squad finally
     // drops in overtime still opens the way out — and with The Static Radio (§7) the boss
     // and The Static arrive together, so otherwise the stage could never be left.
-    if run.boss_dead && !run.teleporter_open && anchor.is_some() {
+    if let (true, false, Some(anchor)) = (run.boss_dead, run.teleporter_open, anchor) {
         run.teleporter_open = true;
-        interact::spawn_teleporter(&mut commands, &mut meshes, &mut materials, &planet, anchor.unwrap_or(Vec3::Y));
-        banners.write(BannerMsg("TELEPORTER ONLINE — OR STAY AND FARM".into()));
+        // raised by `interact::sync_teleporter`, here and (from RunSnapMsg) on every joiner
+        run.teleporter_dir = Some(interact::teleporter_spot(&planet, anchor, &mut rand::thread_rng()));
+        banners.write(BannerMsg(TELEPORTER_BANNER.into()));
     }
 
     // clock ran out — STATIC_RADIO_LEAD_SECS early if someone carries The Static Radio
@@ -147,10 +166,8 @@ pub fn run_clock(
         run.static_active = true;
         if lead > 0.0 {
             telemetry.radio_static_at.get_or_insert(run.timer);
-            banners.write(BannerMsg("THE RADIO CALLED IT IN. THE STATIC RISES EARLY.".into()));
-        } else {
-            banners.write(BannerMsg("THE STATIC RISES. RUN OR FARM SILVER.".into()));
         }
+        banners.write(BannerMsg(static_banner(run.static_radio).into()));
         sfx.write(SfxMsg(Sfx::BossRoar));
         // the boss (if alive) stays; if it was never beaten the teleporter never opens
     }
@@ -254,6 +271,7 @@ pub fn stage_transition(
     run.static_active = false;
     run.static_timer = 0.0;
     run.teleporter_open = false;
+    run.teleporter_dir = None;
     run.microwave_used = false;
     run.reward_chest = None;
     // a new world, a new morning (the eaten sun stays eaten: the world keeps dying)

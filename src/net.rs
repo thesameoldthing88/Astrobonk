@@ -58,7 +58,9 @@ use std::time::{Duration, SystemTime};
 // P18 (merged after P08): the down/revive/drop-in fields in PlayerVitals, the squad tally
 // and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots appended to the hazard
 // lane (Revived, Shove, Cascade, Duo, DropIn) -> _C.
-pub const PROTOCOL_ID: u64 = 0xA570B0_C;
+// P31 (the co-op known-issues sweep): the teleporter spot and Greed stacks in RunSnapMsg,
+// the joiner's feedback lane and its enemy resend requests -> _D.
+pub const PROTOCOL_ID: u64 = 0xA570B0_D;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -295,6 +297,13 @@ pub struct RunSnapMsg {
     /// The squad's §11 feats so far (`RunState::feats`): a joiner's lobby line names them
     /// when the run ends. A handful of records at most.
     pub feats: Vec<FeatRec>,
+    // ---- appended (P31) ----
+    /// Where the exit teleporter stands once the boss falls (M3): a joiner raises its own
+    /// from this (`interact::sync_teleporter`) — the spot is host-rolled, not seeded.
+    pub teleporter_dir: Option<[f32; 3]>,
+    /// Greed Shrines taken this run (L23): each one raises EVERY sheet's luck and difficulty,
+    /// so a joiner folds them into its own stats (and so into the build it sends up).
+    pub greed_stacks: u32,
 }
 
 /// One `duos::SquadFeat` on the wire: explicit codes (`CoopFeat::code`, `hero_code`).
@@ -1014,6 +1023,10 @@ impl Plugin for NetPlugin {
 pub fn is_simulating(role: Res<NetRole>) -> bool {
     role.simulates()
 }
+/// Host or client: a squad shares this world (`crate::world_live`).
+pub fn is_networked(role: Res<NetRole>) -> bool {
+    role.is_networked()
+}
 pub fn is_client(role: Res<NetRole>) -> bool {
     matches!(*role, NetRole::Client)
 }
@@ -1097,6 +1110,8 @@ fn push_run_snapshot(
                     count: f.count.min(u16::MAX as u32) as u16,
                 })
                 .collect(),
+            teleporter_dir: run.teleporter_dir.map(|d| d.to_array()),
+            greed_stacks: run.greed_stacks,
         },
     });
 }
@@ -1109,6 +1124,10 @@ fn apply_run_snapshot(
     mut sync: ResMut<RunSync>,
     mut storm: ResMut<crate::events_world::DustStorm>,
     mut crawl: ResMut<crate::gimmicks::Crawl>,
+    save: Res<crate::save::MetaSave>,
+    mut me: Query<(Entity, &mut crate::run::PlayerState), With<LocalPlayer>>,
+    // (our astronaut, the Greed stacks its stats were last derived with)
+    mut greed_applied: Local<Option<(Entity, u32)>>,
 ) {
     for m in msgs.read() {
         // A straggler from a run that has already ended (or been superseded).
@@ -1167,9 +1186,20 @@ fn apply_run_snapshot(
                 })
             })
             .collect();
+        run.teleporter_dir = m.teleporter_dir.map(Vec3::from_array);
+        run.greed_stacks = m.greed_stacks;
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
+        }
+    }
+    // The squad's Greed Shrines (L23) raise every sheet's luck and difficulty: fold them into
+    // ours whenever they change — or we are a fresh astronaut, whose sheet was derived without
+    // them — so our stats match the host's picture and our next build heartbeat carries them.
+    if let Ok((e, mut ps)) = me.single_mut() {
+        if *greed_applied != Some((e, run.greed_stacks)) {
+            ps.recompute_stats(&save, run.greed_stacks);
+            *greed_applied = Some((e, run.greed_stacks));
         }
     }
 }
@@ -1591,11 +1621,12 @@ pub(crate) fn send_local_input(
     mut presses: Local<EdgePresses>,
 ) {
     let Ok(intent) = q.single() else { return };
-    // While a panel is up, `gather_local_input` stops running but this does not — so we
-    // would re-send the last intent forever, and the host ASSIGNS wish. A joiner who was
-    // holding W when their level-up opened kept sprinting on the host. Send a neutral
-    // intent instead of the stale one; no press is counted behind a panel.
-    if *phase != crate::run::RunPhase::Playing {
+    // Behind a panel `gather_local_input` writes a neutral intent (never the stale one — a
+    // joiner holding W when its level-up opened used to sprint on for the whole pick) and
+    // `coop::autopilot_local` steers it: that wish is what the host's copy of us should run.
+    // No press is counted behind a panel; the gather never writes one there. Only the wipe
+    // beat, when every world holds, sends a still body.
+    if *phase == crate::run::RunPhase::Dead {
         out.write(PlayerInputMsg {
             wish: Vec3::ZERO,
             forward: intent.forward,
@@ -1673,7 +1704,7 @@ fn log_astronauts(
     n_states: Query<(), With<crate::run::PlayerState>>,
     props: Option<Res<crate::planet::PropColliders>>,
     run: Res<crate::run::RunState>,
-    q_inter: Query<&Transform, Or<(With<crate::interact::Interactable>, With<crate::interact::ChargeShrine>)>>,
+    q_inter: Query<(&Transform, Option<&crate::interact::Interactable>), Or<(With<crate::interact::Interactable>, With<crate::interact::ChargeShrine>)>>,
 ) {
     let now = time.elapsed_secs();
     if now < *next {
@@ -1699,7 +1730,14 @@ fn log_astronauts(
     // DIFFERENT code path, so they can desync independently (the cage's conditional draw did
     // exactly that). Checksumming them separately is what makes "we are standing in the same
     // ring" checkable instead of assumed.
-    let inter_sum: i64 = q_inter
+    // The Cage is a per-machine unlock (only a save that never freed Chimp-O has one), so
+    // it is left out: every other interactable, the teleporter included (M3), must match.
+    let shared: Vec<&Transform> = q_inter
+        .iter()
+        .filter(|(_, i)| !i.is_some_and(|i| i.kind == crate::interact::InteractKind::Cage))
+        .map(|(t, _)| t)
+        .collect();
+    let inter_sum: i64 = shared
         .iter()
         .map(|t| (t.translation.x as f64 * 1e3) as i64 + (t.translation.z as f64 * 1e3) as i64)
         .sum();
@@ -1710,7 +1748,7 @@ fn log_astronauts(
         run.stage,
         n_props,
         layout,
-        q_inter.iter().count(),
+        shared.len(),
         inter_sum,
         run.timer,
         run.kills

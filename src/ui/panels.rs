@@ -654,7 +654,8 @@ pub fn pause_panel(
                     .spawn((PauseRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(20)))
                     .with_children(|overlay| {
                         overlay.spawn(fit_column()).with_children(|root| {
-                            root.spawn(txt("PAUSED", FONT_BIG, Color::WHITE));
+                            // a squad's world never waits on one player's menu (D6)
+                            root.spawn(txt(if role.is_networked() { "MENU" } else { "PAUSED" }, FONT_BIG, Color::WHITE));
                             root.spawn(txt(
                                 format!(
                                     "DMG x{:.2}  AS x{:.2}  CRIT {:.0}%  SPD x{:.2}\nARMOR {:.0}  EVA {:.0}  LUCK +{:.0}%  DIFF +{:.0}%{}",
@@ -733,12 +734,12 @@ pub fn pause_panel(
                                 root.spawn(txt(
                                     if *role == crate::net::NetRole::Host {
                                         format!(
-                                            "you host this run: pausing freezes it for your whole squad\nteammates join at {}  (port {})",
+                                            "the squad plays on: your astronaut fights on autopilot while this menu is open\nteammates join at {}  (port {})",
                                             crate::net::local_ip(),
                                             crate::net::DEFAULT_PORT
                                         )
                                     } else {
-                                        "the host's world keeps running while this menu is open".to_string()
+                                        "the squad plays on: your astronaut fights on autopilot while this menu is open".to_string()
                                     },
                                     FONT_SMALL,
                                     Color::srgb(0.6, 0.65, 0.8),
