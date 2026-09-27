@@ -117,11 +117,13 @@ pub fn setup_weapon_assets(
                 ..default()
             }),
         );
-        // A faint, see-through version for the aura bubble that surrounds the player.
+        // A faint, see-through version for the aura bubble that surrounds the player. A hug
+        // field is fainter still: it sits right round you, and its zaps already say "biting".
+        let alpha = if matches!(kind.def().behavior, Behavior::Hug { .. }) { 0.06 } else { 0.12 };
         aura_mats.insert(
             kind,
             materials.add(StandardMaterial {
-                base_color: c.with_alpha(0.12),
+                base_color: c.with_alpha(alpha),
                 emissive: c.to_linear() * 0.6,
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
@@ -149,7 +151,7 @@ pub fn setup_weapon_assets(
         bell_mesh: meshes.add(Mesh::from(ConicalFrustum { radius_top: 0.12, radius_bottom: 0.4, height: 0.55 })),
         yoyo_mesh: meshes.add(Mesh::from(Cylinder::new(0.34, 0.26))),
         fanfare_mat: materials.add(StandardMaterial {
-            base_color: gold,
+            base_color: fanfare_gold(false),
             emissive: gold.to_linear() * 4.0,
             unlit: true,
             alpha_mode: AlphaMode::Blend,
@@ -665,26 +667,41 @@ fn aim_from(
 const STROBING_WEAPONS: [WeaponKind; 3] = [WeaponKind::Tesla, WeaponKind::StormCore, WeaponKind::DeathRay];
 
 /// PRESENTATION: photosensitivity mode turns the strobing weapons' shared materials into a
-/// dim, see-through version of themselves. Base color and alpha, not emissive: the weapon
-/// materials are unlit, and an unlit material draws its base color and nothing else.
+/// dim, see-through version of themselves; flash reduction takes the evolution fanfare's
+/// gold down from HDR (where it blooms, and keeps its colour through the fanfare's
+/// desaturation) to a plain gold. Base color and alpha, not emissive: the weapon materials
+/// are unlit, and an unlit material draws its base color and nothing else.
 pub fn apply_weapon_photosensitivity(
     save: Res<crate::save::MetaSave>,
     assets: Option<Res<WeaponAssets>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut applied: Local<Option<bool>>,
+    mut applied: Local<Option<(bool, bool)>>,
 ) {
-    let photo = save.accessibility.photosensitive;
-    if *applied == Some(photo) {
+    let want = (save.accessibility.photosensitive, save.accessibility.flash_reduction);
+    if *applied == Some(want) {
         return;
     }
     let Some(assets) = assets else { return };
+    let (photo, reduced) = want;
     for kind in STROBING_WEAPONS {
         if let Some(m) = assets.mats.get(&kind).and_then(|h| materials.get_mut(h)) {
             let c = kind.def().color;
             m.base_color = if photo { c.with_alpha(PHOTO_WEAPON_ALPHA) } else { c };
         }
     }
-    *applied = Some(photo);
+    if let Some(m) = materials.get_mut(&assets.fanfare_mat) {
+        m.base_color = fanfare_gold(reduced);
+    }
+    *applied = Some(want);
+}
+
+/// The fanfare's gold: HDR at rest, plain under flash reduction.
+fn fanfare_gold(reduced: bool) -> Color {
+    if reduced {
+        Color::linear_rgb(0.85, 0.55, 0.08)
+    } else {
+        Color::linear_rgb(3.2, 2.0, 0.35)
+    }
 }
 
 /// Tick weapon cooldowns and fire.

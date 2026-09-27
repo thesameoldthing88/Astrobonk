@@ -4,7 +4,7 @@ The known-issues tracker for the current build of ASTROBONK. It is written for a
 
 - **Build covered:** branch `main` at HEAD `99d012f` (committed 2026-07-26). Nothing has been committed since.
 - **Tracker date:** 2026-09-26.
-- **Status:** every item below is **Open**. Nothing listed here has been fixed yet.
+- **Status:** items are **Open** unless their own Status line says otherwise (packages mark what they fix: `Fixed (<commit or package>)`).
 - **Ground truth:** the code in `src/`. Every item in sections 2 to 4 was confirmed by reading `src/` at `99d012f`. Items tagged LIVE were also seen in a real play session: the user's solo run of 2026-09-26, its session log and its `save.json`.
 
 Related documents:
@@ -259,7 +259,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### H3. Weapon evolutions are never counted (EvolveWeapon impossible)
 
-- **Severity:** High · **Area:** economy, solo · **Evidence:** CODE · **Status:** Open
+- **Severity:** High · **Area:** economy, solo · **Evidence:** CODE · **Status:** Fixed (67bf6ca, P01 — confirmed by P12)
 - **Where:**
   - `src/run.rs:608-617`: the `Evolve` arm of `apply_upgrade` only sets `evolved = true`.
   - `src/ui/panels.rs:233-238`: the caller writes only the banner, SFX and hitstop.
@@ -274,7 +274,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   2. Pick the EVOLVE card. The "WEAPON EVOLVED" banner shows.
   3. After Results, `counters.evolves` is still 0.
 - **Suggested fix:** In `choice_input`, when `apply_upgrade` returns `evolved == true` (`src/ui/panels.rs:233`), increment `RunState.evolves`. This needs `global` to become a `ResMut<RunState>`.
-- **Status:** Open.
+- **Status:** Fixed in 67bf6ca (P01): `choice_input` counts `global.evolves` on an evolution pick. Confirmed by P12, whose fanfare moved the rest of that branch into `arsenal`.
 
 ### H4. Host latches a joiner's jump, slide and interact bits
 
@@ -551,7 +551,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   - Run the host's net lanes on `Time<Real>`.
   - Disable hitstop while networked.
   - At minimum, give a ring's blessing to the astronaut or astronauts who charged it.
-- **Status:** Open.
+- **Status:** Open. **Partly fixed (P12):** hitstop no longer slows a networked world — every hitstop (the §13 kill stops, the comet cash-out, the evolution fanfare) goes through `fx::freezes`, which is true only for a SOLO game. Host panels and pause still freeze everyone (P31).
 
 ### M5. A joiner cannot pick a hero
 
@@ -894,7 +894,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ## 4. Low
 
-Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
+Low items are **Open** unless their own Status line says otherwise. Evidence is CODE unless stated otherwise.
 
 ### 4.1 Movement and simulation
 
@@ -1037,7 +1037,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L14. Owning a cryo weapon adds a flat slow to all of that player's hits
 
-- **Severity:** Low · **Area:** solo · **Status:** Open
+- **Severity:** Low · **Area:** solo · **Status:** Fixed (P12)
 - **Where:**
   - `src/combat.rs:277`: `let _ = slow; // applied in apply_hits via kind check`.
   - `src/combat.rs:894-902`: `has_cryo` is true if the shooter owns CryoVent or AbsoluteZero.
@@ -1045,15 +1045,17 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
   - `src/content/weapons.rs:327`, `:339`: the per-weapon slows, 0.45 and 0.75, which are unused.
 - **Symptom:** Every weapon of a cryo owner slows enemies by a flat 0.25. The two cryo weapons do not differ in slow.
 - **Suggested fix:** Carry the slow on the `HitMsg` from the aura that produced it, and apply only that value.
+- **Fixed (P12):** `HitMsg` now carries the `weapon` that dealt it; `apply_hits` slows only on a hit from an `Aura` weapon with a slow, to that weapon's own value (Cryo Vent 0.45, ABSOLUTE ZERO 0.75, `e.slow = max(e.slow, slow)`).
 
 #### L15. The aura bubble is drawn smaller than its damage radius
 
-- **Severity:** Low · **Area:** solo, UI · **Status:** Open
+- **Severity:** Low · **Area:** solo, UI · **Status:** Fixed (P12)
 - **Where:**
   - `src/combat.rs:252-265`: the damage radius is `radius × aura_scale × size`, where `size = (1 + 0.06 × (lvl − 1)) × stats.size`.
   - `src/combat.rs:571`, `:851`: the visual scale is `radius × aura_scale` only.
 - **Symptom:** As the weapon levels up or the Size stat grows, the bubble understates the real area. At weapon level 7 the damage area is 36% wider than drawn.
 - **Suggested fix:** Scale the visual by the same `size` factor.
+- **Fixed (P12):** `aura_follow` scales every field bubble (the auras and Static Cling's hug field) by the weapon's level size × the Size stat, the same factor its damage radius uses.
 
 #### L16. Pots and bosses count toward the enemy cap and the `enemies=` figure
 
