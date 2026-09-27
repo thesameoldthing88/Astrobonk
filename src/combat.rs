@@ -881,7 +881,7 @@ pub fn apply_hits(
     mut q_ps: Query<&mut PlayerState>,
     mut shake: ResMut<Shake>,
     mut hitstop: ResMut<Hitstop>,
-    mut enemies: Query<(&mut Enemy, &Transform, Option<&Boss>), Without<Pot>>,
+    mut enemies: Query<(&mut Enemy, &Transform, Option<&Boss>, Option<&crate::enemies::MinibossSlot>), Without<Pot>>,
     mut pots: Query<(&mut Pot, &Transform)>,
     mut kills: MessageWriter<KillMsg>,
     mut numbers: MessageWriter<NumberMsg>,
@@ -919,7 +919,7 @@ pub fn apply_hits(
             commands.entity(msg.target).despawn();
             continue;
         }
-        if let Ok((mut e, tf, boss)) = enemies.get_mut(msg.target) {
+        if let Ok((mut e, tf, boss, slot)) = enemies.get_mut(msg.target) {
             if e.hp <= 0.0 {
                 continue;
             }
@@ -956,8 +956,13 @@ pub fn apply_hits(
                     is_boss,
                     is_pot: false,
                 });
+                // §3: the 7:00 spike pays out a guaranteed chest where the miniboss fell.
+                if slot.map(|s| s.0) == Some(0) {
+                    run.reward_chest = Some(e.dir);
+                }
                 if is_boss {
                     run.boss_dead = true;
+                    run.boss_kills += 1;
                     shake.add(0.8);
                     hitstop.timer = 0.25;
                 } else if msg.crit {

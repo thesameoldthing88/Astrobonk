@@ -8,7 +8,7 @@ use crate::content::planets::PlanetKind;
 use crate::enemies::Enemy;
 use crate::planet::CurrentPlanet;
 use crate::player::Player;
-use crate::run::{ChoicePanel, PlayerState, RunPhase, RunState};
+use crate::run::{ChoicePanel, PlayerState, RefreshPrice, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
 use bevy::app::ScheduleRunnerPlugin;
@@ -17,8 +17,108 @@ use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
 use std::time::Duration;
 
+/// `--choices`: what the bot's scripted level-up economy has exercised so far.
+#[derive(Default)]
+struct ChoiceScript {
+    levelups: u32,
+    free_refreshes: u32,
+    paid_refreshes: u32,
+    refused_refreshes: u32,
+    banishes: u32,
+    skips: u32,
+    banned: Vec<UpgradeOption>,
+}
+
+/// `--choices`: drive one level-up panel through Refresh / Banish / Skip the way a player
+/// would (the same `PlayerState` calls `ui::panels::choice_input` makes) and fail the smoke
+/// the moment a §3 rule breaks. Returns true when the panel was consumed by a Skip.
+fn scripted_choice(
+    ps: &mut PlayerState,
+    panel: &mut ChoicePanel,
+    save: &MetaSave,
+    script: &mut ChoiceScript,
+) -> bool {
+    let mut rng = rand::thread_rng();
+    let dealt_banned = |panel: &ChoicePanel, banned: &[UpgradeOption]| {
+        panel.options.iter().any(|o| banned.iter().any(|b| same_pool_entry(o, b)))
+    };
+    if dealt_banned(panel, &script.banned) {
+        panic!("SMOKE FAIL: a banished card was dealt again ({:?})", panel.options);
+    }
+    script.levelups += 1;
+    // Refresh until the free ones are gone, then once more at a price.
+    loop {
+        let (gold, price) = (ps.gold, ps.refresh_price());
+        let ok = ps.spend_refresh();
+        match (price, ok) {
+            (RefreshPrice::Free, true) => script.free_refreshes += 1,
+            (RefreshPrice::Gold(c), true) => {
+                if ps.gold != gold - c {
+                    panic!("SMOKE FAIL: paid refresh charged {} not {c}", gold - ps.gold);
+                }
+                script.paid_refreshes += 1;
+            }
+            (RefreshPrice::Gold(c), false) => {
+                if gold >= c || ps.gold != gold {
+                    panic!("SMOKE FAIL: refresh refused with {gold}g for a {c}g price");
+                }
+                script.refused_refreshes += 1;
+            }
+            (RefreshPrice::Free, false) => panic!("SMOKE FAIL: a free refresh was refused"),
+        }
+        if !ok {
+            break;
+        }
+        panel.options = crate::run::roll_upgrades(ps, save, &mut rng);
+        if dealt_banned(panel, &script.banned) {
+            panic!("SMOKE FAIL: a banished card came back on refresh");
+        }
+        if !matches!(price, RefreshPrice::Free) {
+            break;
+        }
+    }
+    // Banish the first poolable card while charges last.
+    if let Some(idx) = panel.options.iter().position(|o| !matches!(o, UpgradeOption::GoldPile(_))) {
+        let charges = ps.banishes;
+        let opt = panel.options[idx].clone();
+        let ok = ps.banish(&opt);
+        if ok != (charges > 0) || ps.banishes != charges.saturating_sub(1) {
+            panic!("SMOKE FAIL: banish with {charges} charges returned {ok}");
+        }
+        if ok {
+            panel.options.remove(idx);
+            script.banned.push(opt);
+            script.banishes += 1;
+        }
+    }
+    // Skip every other level-up; pick otherwise.
+    if script.levelups % 2 == 1 {
+        let (gold, xp) = ps.skip_reward();
+        let before = ps.gold;
+        ps.take_skip();
+        if ps.gold != before + gold || xp <= 0.0 {
+            panic!("SMOKE FAIL: skip paid {}g (expected {gold}g) / {xp} xp", ps.gold - before);
+        }
+        script.skips += 1;
+        return true;
+    }
+    false
+}
+
+/// Do two cards strike the same entry from the pool?
+fn same_pool_entry(a: &UpgradeOption, b: &UpgradeOption) -> bool {
+    use UpgradeOption::*;
+    match (a, b) {
+        (NewItem(x) | ItemUp(x), NewItem(y) | ItemUp(y)) => x == y,
+        (NewWeapon(x) | WeaponUp(x), NewWeapon(y) | WeaponUp(y)) => x == y,
+        (Evolve(x), Evolve(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Simple bot: run in a slowly-rotating direction, hop sometimes, take option 1
-/// of every choice panel, and E every prompt it happens to stand on.
+/// of every choice panel, and walk to + open the miniboss cache when one drops.
+#[allow(clippy::too_many_arguments)]
 fn bot_drive(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
@@ -31,16 +131,36 @@ fn bot_drive(
     mut q: Query<(&mut Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>)>,
     q_pickups: Query<(&crate::pickups::Pickup, &Transform), Without<Player>>,
     q_enemies: Query<(&Enemy, &Transform), (Without<Player>, Without<crate::pickups::Pickup>)>,
+    q_cache: Query<&Transform, (With<crate::interact::RewardCache>, Without<Player>)>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut script: Local<ChoiceScript>,
     mut heading_angle: Local<f32>,
 ) {
     let dt = time.delta_secs();
+    // E is "tapped" fresh each frame the bot wants it, so interact_system sees just_pressed.
+    keys.release(KeyCode::KeyE);
+    keys.clear();
 
     // Panels are per-MACHINE, so only the local astronaut resolves them — mirroring the
     // real game, where a peer levelling up must not spend the host human's cards.
     if matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) {
+        let scripted = std::env::args().any(|a| a == "--choices");
         for (_, mut run, _, is_local) in &mut q {
             if !is_local {
                 continue;
+            }
+            if scripted && panel.is_levelup && !panel.options.is_empty() {
+                if scripted_choice(&mut run, &mut panel, &save, &mut script) {
+                    run.pending_levelups = run.pending_levelups.saturating_sub(1);
+                    panel.options.clear();
+                }
+                if script.levelups % 5 == 0 {
+                    println!(
+                        "  CHOICES levelups={} refresh free={} paid={} refused={} banish={} skip={} gold={}",
+                        script.levelups, script.free_refreshes, script.paid_refreshes,
+                        script.refused_refreshes, script.banishes, script.skips, run.gold
+                    );
+                }
             }
             if !panel.options.is_empty() {
                 let opt = panel.options[0].clone();
@@ -60,11 +180,22 @@ fn bot_drive(
         return;
     }
 
-    for (mut p, mut run, ptf, _is_local) in &mut q {
+    for (mut p, mut run, ptf, is_local) in &mut q {
 
+    // miniboss cache first (it is the thing under test when one exists); then
     // hurt -> kite away from the nearest threat; healthy -> chase gems; else wander
     let mut heading = None;
-    if run.hp < run.stats.max_hp * 0.45 {
+    let cache = if is_local { q_cache.iter().next().map(|t| t.translation) } else { None };
+    if let Some(cpos) = cache {
+        if cpos.distance(ptf.translation) < INTERACT_RANGE {
+            keys.press(KeyCode::KeyE);
+        }
+        let v = cpos - ptf.translation;
+        let vt = (v - p.dir * v.dot(p.dir)).normalize_or_zero();
+        if vt != Vec3::ZERO {
+            heading = Some(vt);
+        }
+    } else if run.hp < run.stats.max_hp * 0.45 {
         let mut best = f32::MAX;
         for (en, tf) in q_enemies.iter() {
             if en.speed == 0.0 {
@@ -172,9 +303,11 @@ fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player
         panic!("SMOKE FAIL: non-finite run state");
     }
     if *ticks % 300 == 0 {
+        let sc = crate::run::scaling::Scaling::for_run(&run, 1);
         println!(
-            "  t={:>4.0}s timer={:>5.1} lvl={} kills={} hp={:.0} enemies={} gold={} static={}",
-            run.total_elapsed, run.timer, q_ps.single().map(|p| p.level).unwrap_or(1), run.kills, hp, alive, q_ps.single().map(|p| p.gold).unwrap_or(0), run.static_active
+            "  t={:>4.0}s timer={:>5.1} lvl={} kills={} hp={:.0} enemies={} gold={} static={} scale[hp x{:.2} dmg x{:.2} spawn x{:.2} elite {:.0}%]",
+            run.total_elapsed, run.timer, q_ps.single().map(|p| p.level).unwrap_or(1), run.kills, hp, alive, q_ps.single().map(|p| p.gold).unwrap_or(0), run.static_active,
+            sc.hp, sc.dmg, sc.spawn, sc.elite_chance * 100.0
         );
     }
 }
@@ -187,6 +320,18 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         planet_kind,
         seed
     );
+    // The rules are pure data: pin them before simulating anything.
+    let rules = crate::run::scaling::self_check()
+        .and_then(|_| crate::run::rules_self_check(&MetaSave::default()))
+        .and_then(|_| silver_self_check());
+    match rules {
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver)"),
+        Err(e) => {
+            println!("SMOKE FAIL: rules self-check: {e}");
+            std::process::exit(1);
+        }
+    }
+
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins.set(ScheduleRunnerPlugin::run_once()),
@@ -213,6 +358,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
         run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
+        run.total_elapsed = 570.0; // and the §3 run-time scaling that goes with it
     }
 
     app.init_state::<crate::AppState>()
@@ -273,6 +419,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::combat::drone_update,
                 crate::combat::beam_update,
                 crate::interact::charge_shrines,
+                crate::interact::interact_system,
                 crate::pickups::pickup_update,
                 crate::director::run_clock,
                 crate::director::levelup_trigger,
@@ -296,8 +443,15 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::player::player_upkeep,
                 crate::fx::update_particles,
                 crate::director::stage_transition,
+                crate::interact::sync_reward_cache.before(crate::director::stage_transition),
                 bot_watchdog,
             ),
+        )
+        .add_systems(
+            Update,
+            crate::director::dev_miniboss_now
+                .run_if(crate::playing)
+                .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
         );
 
     // enter InRun immediately
@@ -316,11 +470,25 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     let run = world.resource::<RunState>().clone();
     let ps = world.query::<&PlayerState>().iter(world).next().cloned();
     let (p_level, p_gold, p_hp, p_maxhp) = ps
+        .as_ref()
         .map(|p| (p.level, p.gold, p.hp, p.stats.max_hp))
         .unwrap_or((1, 0, 0.0, 100.0));
     let enemies = world.query_filtered::<(), With<Enemy>>().iter(world).count();
     let phase = *world.resource::<RunPhase>();
     let comet_fires = world.resource::<crate::comet::Comet>().fires;
+    let silver = {
+        let save = world.resource::<MetaSave>();
+        let golden = if save.tome_loadout.contains(&crate::content::tomes::TomeKind::Golden) {
+            save.tome_level(crate::content::tomes::TomeKind::Golden)
+        } else {
+            0
+        };
+        let (rocks, gain) = ps
+            .as_ref()
+            .map(|p| (p.item_count(crate::content::items::ItemKind::CursedMoonRock), p.stats.silver_gain))
+            .unwrap_or((0, 1.0));
+        crate::director::silver_payout(&run, false, golden, rocks, gain)
+    };
     let storm = world.resource::<crate::events_world::DustStorm>();
     let storm_state = format!("spawned={} active={}", storm.spawned_vis, storm.active);
 
@@ -330,7 +498,18 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         p_level, run.kills, p_gold, p_hp, p_maxhp, run.timer, enemies, run.boss_spawned, run.boss_dead
     );
 
+    let lines: Vec<String> = silver.lines.iter().map(|(l, a)| format!("{l} {a}")).collect();
+    println!("silver={} [{}] chests_opened={} boss_kills={}", silver.total, lines.join(", "), run.chests_opened, run.boss_kills);
+
     let mut ok = true;
+    if silver.total == 0 && run.total_elapsed > SILVER_SURVIVAL_SECS_PER {
+        println!("FAIL: the run banked zero Silver (§10: no run ever pays out zero)");
+        ok = false;
+    }
+    if std::env::args().any(|a| a == "--minibossnow") && run.chests_opened == 0 {
+        println!("FAIL: miniboss #1 cache never dropped/opened (reward_chest={:?})", run.reward_chest);
+        ok = false;
+    }
     if matches!(phase, RunPhase::LevelUp | RunPhase::Modal) {
         println!("FAIL: run ended stuck in a panel phase");
         ok = false;
@@ -379,4 +558,25 @@ fn headless_enter(
     }
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
     commands.insert_resource(planet);
+}
+
+/// The §10 formula on a known run: 10:00 survived, 1,000 kills, one boss, a Tier-2 clear,
+/// 30 s of Static, 7 Silver picked up, Golden Tome 2 and two Cursed Moon Rocks.
+fn silver_self_check() -> Result<(), String> {
+    let mut run = RunState::new(AstronautKind::Buzz, PlanetKind::Moon, 2, &MetaSave::default());
+    run.total_elapsed = 600.0;
+    run.kills = 1000;
+    run.boss_kills = 1;
+    run.static_secs_total = 30.0;
+    run.silver_run = 7;
+    let p = crate::director::silver_payout(&run, true, 2, 2, 1.0);
+    // (100 + 250 + 150 + 100 + 30) × 1.10 × 1.30 = 900.9 → 901, + 7 found
+    if p.total != 908 {
+        return Err(format!("silver formula gave {} for the reference run, want 908", p.total));
+    }
+    let dead = crate::director::silver_payout(&run, false, 0, 0, 1.0);
+    if dead.total != 100 + 250 + 150 + 30 + 7 {
+        return Err(format!("a death should bank everything but the tier bonus, got {}", dead.total));
+    }
+    Ok(())
 }

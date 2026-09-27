@@ -41,15 +41,100 @@ pub const STAGE_SECONDS: [f32; 3] = [600.0, 540.0, 480.0];
 pub const MINIBOSS_MARKS: [f32; 2] = [420.0, 120.0]; // timer values (counting down)
 pub const BOSS_MARK: f32 = 90.0;
 
+// ── Difficulty scaling (GDD §3 "Difficulty scaling model") ────────────────────
+// t = run minutes (whole chain), d = chain depth (stage index), T = planet threat,
+// Δ = Difficulty points. See `run::scaling` for the formulas these feed.
+pub const SCALE_HP_T: f32 = 0.11;
+pub const SCALE_HP_EXP: f32 = 1.35;
+pub const SCALE_HP_D: f32 = 0.20;
+pub const SCALE_HP_DELTA: f32 = 0.06;
+pub const SCALE_DMG_T: f32 = 0.08;
+pub const SCALE_DMG_D: f32 = 0.15;
+pub const SCALE_DMG_DELTA: f32 = 0.05;
+pub const SCALE_RATE_T: f32 = 0.14;
+pub const SCALE_RATE_D: f32 = 0.10;
+pub const SCALE_RATE_DELTA: f32 = 0.04;
+pub const ELITE_CHANCE_T: f32 = 0.02;
+pub const ELITE_CHANCE_D: f32 = 0.05;
+pub const ELITE_CHANCE_DELTA: f32 = 0.03;
+pub const ELITE_CHANCE_CAP: f32 = 0.35;
+/// The sheet's Difficulty stat is a fraction ("+15% Difficulty"); Δ counts it in points of
+/// +10%, so one Cursed Moon Rock (+15%) is Δ 1.5 and a maxed Cursed Tome (+40%) is Δ 4.
+pub const DIFFICULTY_POINTS_PER_UNIT: f32 = 10.0;
+/// Δ added per Tier above 1 — a longer chain is a harder run from its first stage.
+pub const TIER_DIFFICULTY_POINTS: f32 = 1.0;
+/// Elites are rolled on a cadence, not per crowd enemy: at the formula's 10-35% a per-body
+/// roll would make a tenth of a 1,200 horde loot-guaranteed 8× HP giants. One roll every
+/// 6 s puts a mid-stage elite at ~60 s — the §3 "chest/elite ping" rhythm.
+pub const ELITE_ROLL_SECS: f32 = 6.0;
+/// Past the cold open, never go longer than this without an elite (early t rolls ~0%).
+pub const ELITE_PITY_SECS: f32 = 75.0;
+/// Rate_base: the §3 run-arc beats as (stage timer left, spawns/s) keypoints, linearly
+/// interpolated. Cold open trickle → first escalation → miniboss → density ramp → hazards
+/// live → endgame. Keyed on the countdown so shorter chained stages join the arc mid-way.
+pub const SPAWN_RATE_BEATS: [(f32, f32); 7] = [
+    (600.0, 1.0),
+    (540.0, 1.8),
+    (450.0, 4.0),
+    (420.0, 4.4),
+    (270.0, 7.2),
+    (150.0, 9.0),
+    (0.0, 10.0),
+];
+/// "Hold/miniboss": while a miniboss is up the horde stops escalating around it.
+pub const SPAWN_HOLD_MULT: f32 = 0.7;
+/// "Exhale/loot": after any boss falls, the horde thins for a breath so the reward lands.
+pub const SPAWN_EXHALE_MULT: f32 = 0.35;
+pub const SPAWN_EXHALE_SECS: f32 = 15.0;
+/// The Static's own base rate (then scaled like everything else) — it never stops growing.
+pub const STATIC_RATE_BASE: f32 = 4.2;
+pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
+/// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
+pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
+
+// ── Silver payout (GDD §10) ──────────────────────────────────────────────────
+pub const SILVER_SURVIVAL_SECS_PER: f32 = 6.0; // 1 Silver per 6 s survived
+pub const SILVER_KILLS_PER: f32 = 4.0; // 1 Silver per 4 kills
+pub const SILVER_PER_BOSS: u64 = 150;
+pub const SILVER_PER_TIER: u64 = 50;
+pub const SILVER_PER_STATIC_SEC: f32 = 1.0;
+pub const SILVER_GOLDEN_TOME_PER_LEVEL: f32 = 0.05;
+pub const SILVER_CURSED_ROCK_EACH: f32 = 0.15;
+
 pub const XP_BASE: f32 = 6.0;
 pub const XP_PER_LEVEL: f32 = 3.4;
 pub const XP_QUAD: f32 = 0.18;
 
 pub const CHEST_BASE_COST: u64 = 25;
 pub const CHEST_COST_GROWTH: f32 = 1.75;
+/// Luck added to the guaranteed miniboss-#1 cache roll: the first build fork should feel
+/// like a reward, not another Common.
+pub const REWARD_CACHE_LUCK: f32 = 0.35;
+/// Items offered by the miniboss cache (pick one).
+pub const REWARD_CACHE_CHOICES: usize = 3;
 
 pub const WEAPON_SLOTS: usize = 4;
 pub const MAX_WEAPON_LEVEL: u32 = 7;
+/// Evolved weapons one astronaut may own per run (GDD §15 ledger). Tome of Ascension adds
+/// one more through `PlayerState::evo_cap`.
+pub const EVOLUTION_CAP: u32 = 1;
+
+// ── Level-up choice economy (GDD §3 table, §15 ledger) ───────────────────────
+/// Cards dealt per level-up. The §15 ledger sets no count, so the shipped four stay.
+pub const LEVELUP_CARDS: usize = 4;
+/// Free Refreshes per run; after that each Refresh costs Gold.
+pub const FREE_REFRESHES: u32 = 2;
+/// Gold price of the first PAID refresh, growing by REFRESH_COST_GROWTH per paid use —
+/// chasing a card is allowed, but it competes with chests for the same Gold.
+pub const REFRESH_BASE_COST: u64 = 15;
+pub const REFRESH_COST_GROWTH: f32 = 1.5;
+/// Banish charges per run.
+pub const BANISH_CHARGES: u32 = 3;
+/// Skip pays a small XP boost (this fraction of the current level's bar) plus a Gold tip
+/// that grows with level so it stays worth a thought late in the run.
+pub const SKIP_XP_FRACTION: f32 = 0.2;
+pub const SKIP_GOLD_BASE: f32 = 8.0;
+pub const SKIP_GOLD_PER_LEVEL: f32 = 1.0;
 
 pub const DAMAGE_NUMBER_POOL: usize = 64;
 

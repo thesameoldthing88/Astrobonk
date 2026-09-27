@@ -3,11 +3,12 @@
 //! minibosses, stage bosses, and THE STATIC.
 
 use crate::config::*;
-use crate::content::enemies::{time_scaling, BossKind, EliteMods, EnemyKind};
+use crate::content::enemies::{BossKind, EliteMods, EnemyKind};
 use crate::fx::{self, Pcolor, ParticleAssets, Shake};
 use crate::messages::*;
 use crate::planet::{random_dir, CurrentPlanet, StageScoped};
 use crate::player::Player;
+use crate::run::scaling::{self, Scaling};
 use crate::run::RunState;
 use crate::sphere;
 use bevy::prelude::*;
@@ -43,6 +44,11 @@ pub struct Boss {
     pub burst_timer: f32,
     pub phase: u8, // 0 = P1 (>66% HP), 1 = P2 (33-66%), 2 = P3 (<33%)
 }
+
+/// Which stage mark a miniboss was summoned for (0 = the 7:00 spike, 1 = the 2:00 one).
+/// Host-only: it decides the guaranteed chest (§3), which reaches clients via RunSnapMsg.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MinibossSlot(pub u8);
 
 /// The Craterpillar's head records the ground it has crossed so its body can
 /// follow — a worm that literally laps the tiny planet.
@@ -207,13 +213,30 @@ impl SpatialHash {
 #[derive(Resource)]
 pub struct Director {
     pub spawn_bank: f32,
+    /// Seconds to the next elite roll (`ELITE_ROLL_SECS` cadence).
     pub elite_timer: f32,
+    /// Seconds since the last elite — the pity guarantee's clock.
+    pub since_elite: f32,
+    /// A roll succeeded: the next crowd spawn comes out elite.
+    pub elite_pending: bool,
+    /// Seconds of post-kill "exhale" left (§3 run arc).
+    pub exhale: f32,
+    /// Bosses alive last tick; a drop means one just fell and the horde exhales.
+    pub bosses_alive: usize,
     pub tick: f32,
 }
 
 impl Default for Director {
     fn default() -> Self {
-        Self { spawn_bank: 0.0, elite_timer: 45.0, tick: 0.0 }
+        Self {
+            spawn_bank: 0.0,
+            elite_timer: ELITE_ROLL_SECS,
+            since_elite: 0.0,
+            elite_pending: false,
+            exhale: 0.0,
+            bosses_alive: 0,
+            tick: 0.0,
+        }
     }
 }
 
@@ -536,6 +559,10 @@ fn spawn_enemy(
 }
 
 /// Timer-driven wave spawner. Runs while playing.
+///
+/// Budget per second = `Rate_base` (the §3 arc beats) × the breathing modifier (hold while a
+/// miniboss is up, exhale after a boss falls) × `Scaling::spawn` (run time, depth, Δ, party).
+#[allow(clippy::too_many_arguments)]
 pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
@@ -546,6 +573,7 @@ pub fn director_spawn(
     run: Res<RunState>,
     q_player: Query<&Player>,
     q_enemies: Query<(), With<Enemy>>,
+    q_boss: Query<&Boss>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -560,23 +588,42 @@ pub fn director_spawn(
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_enemies.iter().count();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
+    // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
+    // sub-linearly — a full budget per player doubles density and blows the cap, while no
+    // bump at all gives each player half a horde.
+    let sc = Scaling::for_run(&run, anchors.len());
 
-    // Party scaling (GDD): more players means more horde, but sub-linearly — a full
-    // budget per player doubles density and blows the cap, while no bump at all gives
-    // each player half a horde.
-    let player_scale = [1.0, 1.75, 2.4, 3.0][anchors.len().clamp(1, 4) - 1];
+    // Breathing: a boss count that dropped since last tick means one just fell.
+    let bosses_now = q_boss.iter().count();
+    if bosses_now < director.bosses_alive {
+        director.exhale = SPAWN_EXHALE_SECS;
+    }
+    director.bosses_alive = bosses_now;
+    director.exhale = (director.exhale - dt).max(0.0);
+    let miniboss_alive = q_boss.iter().any(|b| !b.kind.def().is_stage_boss);
 
-    let rate = if run.static_active {
-        10.0 + run.static_timer * 0.15
-    } else {
-        // gentler opening so a level-1 player can learn; ramp still bites by mid-game.
-        let t = run.elapsed / 60.0;
-        (1.0 + t * 2.1) * (1.0 + run.difficulty)
-    } * player_scale;
+    let rate = scaling::spawn_rate_base(run.timer, run.static_active, run.static_timer)
+        * if run.static_active { 1.0 } else { scaling::beat_modifier(miniboss_alive, director.exhale) }
+        * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
-    director.elite_timer -= dt;
+
+    // Elite rolls (see config::ELITE_ROLL_SECS). The Static has no elites.
+    if !run.static_active {
+        director.elite_timer -= dt;
+        director.since_elite += dt;
+        if director.elite_timer <= 0.0 {
+            director.elite_timer += ELITE_ROLL_SECS;
+            if rng.gen_bool(sc.elite_chance as f64) {
+                director.elite_pending = true;
+            }
+        }
+        // the pity guarantee waits out the cold open ("I have room")
+        let cold_open = run.timer > SPAWN_RATE_BEATS[1].0;
+        if director.since_elite >= ELITE_PITY_SECS && !cold_open {
+            director.elite_pending = true;
+        }
+    }
 
     if director.tick < 0.25 {
         return;
@@ -589,7 +636,7 @@ pub fn director_spawn(
     }
     director.spawn_bank -= budget as f32;
 
-    let cap = ((ENEMY_CAP as f32) * player_scale) as usize;
+    let cap = ((ENEMY_CAP as f32) * sc.party_spawn) as usize;
     let room = cap.saturating_sub(alive);
     let n = budget.min(room);
     for i in 0..n {
@@ -603,16 +650,15 @@ pub fn director_spawn(
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp_mult, dmg_mult, rng);
+            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, sc.hp, sc.dmg, rng);
             continue;
         }
 
         let mix = EnemyKind::mix(run.elapsed);
         let kind = mix[rng.gen_range(0..mix.len())];
-        let mut elite = run.elapsed > 150.0 && rng.gen_bool(0.012);
-        if director.elite_timer <= 0.0 {
-            elite = true;
-            director.elite_timer = 40.0;
+        let elite = std::mem::take(&mut director.elite_pending);
+        if elite {
+            director.since_elite = 0.0;
         }
         // Burrowers ambush: spawn close.
         let dir = if kind == EnemyKind::Burrower {
@@ -621,10 +667,11 @@ pub fn director_spawn(
         } else {
             dir
         };
-        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, rng);
+        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, rng);
     }
 }
 
+/// Spawn a boss or miniboss 30 m from `player_dir`; returns the head entity.
 pub fn spawn_boss(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -632,8 +679,8 @@ pub fn spawn_boss(
     planet: &CurrentPlanet,
     player_dir: Vec3,
     kind: BossKind,
-    difficulty: f32,
-) {
+    sc: &Scaling,
+) -> Entity {
     let def = kind.def();
     let mut rng = rand::thread_rng();
     let heading = {
@@ -642,7 +689,7 @@ pub fn spawn_boss(
         t * a.cos() + b * a.sin()
     };
     let dir = sphere::offset_dir(player_dir, heading, 30.0, planet.radius);
-    let hp = def.hp * (1.0 + difficulty);
+    let hp = def.hp * sc.boss_hp;
     let pos = planet.surface_point(dir) + dir * def.scale * 0.8;
     let is_worm = kind == BossKind::Craterpillar;
     let is_anubot = kind == BossKind::Anubot;
@@ -653,7 +700,7 @@ pub fn spawn_boss(
     } else {
         (meshes.add(boss_mesh()), assets.boss_mat.clone())
     };
-    let contact_dmg = def.damage * (1.0 + difficulty * 0.5);
+    let contact_dmg = def.damage * sc.boss_dmg;
     let head = commands
         .spawn((
             Enemy {
@@ -711,6 +758,7 @@ pub fn spawn_boss(
             StageScoped,
         ));
     }
+    head
 }
 
 /// Bosses escalate as their HP drops: at 66% and 33% they ENRAGE (faster, hit harder,
@@ -734,7 +782,7 @@ pub fn boss_phase_system(
         .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     let mut rng = rand::thread_rng();
-    let (hp_mult, dmg_mult) = time_scaling(run.elapsed, run.difficulty);
+    let sc = Scaling::for_run(&run, q_player.iter().count());
 
     for (mut enemy, mut boss) in &mut q_boss {
         if enemy.hp <= 0.0 || enemy.max_hp <= 0.0 {
@@ -787,7 +835,7 @@ pub fn boss_phase_system(
             let mix = EnemyKind::mix(run.elapsed.max(300.0));
             let kind = mix[rng.gen_range(0..mix.len())];
             let elite = want == 2 && rng.gen_bool(0.25);
-            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, hp_mult, dmg_mult, &mut rng);
+            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, &mut rng);
         }
     }
 }
@@ -920,6 +968,7 @@ pub fn debug_spawn_boss(
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
     q_player: Query<&Player, With<crate::player::LocalPlayer>>,
+    q_party: Query<(), With<Player>>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     if !keys.just_pressed(KeyCode::KeyB) {
@@ -930,7 +979,8 @@ pub fn debug_spawn_boss(
         crate::content::planets::PlanetKind::Moon => BossKind::Craterpillar,
         _ => BossKind::Anubot,
     };
-    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, run.difficulty);
+    let sc = Scaling::for_run(&run, q_party.iter().count());
+    spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, &sc);
     run.boss_spawned = true;
     banners.write(crate::messages::BannerMsg(format!("[DEV] {} SUMMONED", kind.def().name)));
 }

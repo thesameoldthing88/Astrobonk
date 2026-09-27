@@ -32,6 +32,8 @@ pub enum InteractKind {
     Microwave,
     Cage,
     Teleporter,
+    /// The guaranteed cache miniboss #1 drops (§3 run arc): free, pick one of three.
+    RewardChest,
 }
 
 #[derive(Component)]
@@ -85,6 +87,7 @@ impl InteractDefs {
             InteractKind::Microwave => Color::srgb(0.9, 0.9, 0.95),
             InteractKind::Cage => Color::srgb(0.5, 0.4, 0.3),
             InteractKind::Teleporter => Color::srgb(0.3, 1.0, 0.8),
+            InteractKind::RewardChest => Color::srgb(1.0, 0.78, 0.2),
         }
     }
 }
@@ -101,13 +104,140 @@ fn roll_item(run: &PlayerState, luck: f32, rng: &mut impl Rng) -> ItemKind {
     if let Some(i) = candidates.choose(rng) {
         return *i;
     }
-    // fall back to anything available
+    // fall back to anything available (a banish is permanent, so it holds here too)
     let any: Vec<ItemKind> = ItemKind::ALL
         .iter()
         .copied()
+        .filter(|i| !run.banned_items.contains(i))
         .filter(|i| run.item_count(*i) < i.def().max_stacks)
         .collect();
     *any.choose(rng).unwrap_or(&ItemKind::SpaceBorgar)
+}
+
+/// The miniboss cache's hand: `REWARD_CACHE_CHOICES` DISTINCT items rolled at bonus luck.
+/// A fork offering the same item twice is not a fork.
+pub fn reward_cache_options(ps: &PlayerState, rng: &mut impl Rng) -> Vec<UpgradeOption> {
+    let mut picked: Vec<ItemKind> = Vec::new();
+    for _ in 0..REWARD_CACHE_CHOICES * 8 {
+        if picked.len() >= REWARD_CACHE_CHOICES {
+            break;
+        }
+        let item = roll_item(ps, ps.stats.luck + REWARD_CACHE_LUCK, rng);
+        if !picked.contains(&item) {
+            picked.push(item);
+        }
+    }
+    picked
+        .into_iter()
+        .map(|i| if ps.item_count(i) == 0 { UpgradeOption::NewItem(i) } else { UpgradeOption::ItemUp(i) })
+        .collect()
+}
+
+/// Marks the one miniboss cache entity so `sync_reward_cache` can find it; remembers the
+/// stage it dropped on.
+#[derive(Component)]
+pub struct RewardCache {
+    pub stage: usize,
+}
+
+/// Keep the miniboss cache entity in step with `RunState::reward_chest`, on host AND client:
+/// the host sets/clears the field (miniboss #1 dies / cache opened) and a client adopts it
+/// from `RunSnapMsg`, so this one reconcile both spawns the chest where the corpse fell and
+/// pops it when anyone opens it — no separate wire event to lose.
+#[allow(clippy::too_many_arguments)]
+pub fn sync_reward_cache(
+    mut commands: Commands,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    q: Query<(Entity, &Transform, &RewardCache)>,
+    particles: Option<Res<ParticleAssets>>,
+    mut banners: MessageWriter<BannerMsg>,
+) {
+    let existing = q.iter().next();
+    match (run.reward_chest, existing) {
+        (Some(dir), None) => {
+            spawn_reward_cache(&mut commands, &mut meshes, &mut materials, &planet, dir, run.stage);
+            info!("REWARD miniboss cache up at {:.2?}", dir);
+            banners.write(BannerMsg("MINIBOSS CACHE DROPPED: FREE PICK".into()));
+        }
+        (None, Some((e, tf, cache))) => {
+            // A client learns of a stage change in the same snapshot that clears the field;
+            // then the stage sweep takes the chest, and a gold burst would celebrate nothing.
+            let opened = cache.stage == run.stage;
+            if let (true, Some(pa)) = (opened, &particles) {
+                fx::burst(&mut commands, pa, tf.translation, tf.translation.normalize_or_zero(), Pcolor::Gold, 28, 9.0);
+            }
+            // try_: the stage sweep (StageScoped) can take it in the same frame
+            commands.entity(e).try_despawn();
+            if opened {
+                info!("REWARD miniboss cache opened");
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A gold chest on a pedestal under a tall light column — the column is what makes it
+/// readable from over the horizon, where it usually lands after a running miniboss fight.
+fn spawn_reward_cache(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    planet: &CurrentPlanet,
+    dir: Vec3,
+    stage: usize,
+) {
+    let c = InteractDefs::color(InteractKind::RewardChest);
+    let gold = materials.add(StandardMaterial {
+        base_color: c,
+        emissive: c.to_linear() * 2.2,
+        metallic: 0.6,
+        perceptual_roughness: 0.35,
+        ..default()
+    });
+    let base_mat = materials.add(StandardMaterial {
+        base_color: c.darker(0.35),
+        perceptual_roughness: 0.9,
+        ..default()
+    });
+    let beam = materials.add(StandardMaterial {
+        base_color: c.with_alpha(0.35),
+        emissive: c.to_linear() * 2.5,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    let pos = planet.surface_point(dir);
+    let rot = sphere::frame_quat(dir, sphere::tangent_frame(dir).0);
+    commands
+        .spawn((
+            Interactable { kind: InteractKind::RewardChest, used: false, chest_item: None, stock: Vec::new() },
+            RewardCache { stage },
+            Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.95, 0.5)))),
+            MeshMaterial3d(base_mat),
+            Transform::from_translation(pos + dir * 0.25).with_rotation(rot),
+            StageScoped,
+        ))
+        .with_children(|p| {
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cuboid::new(1.3, 0.8, 0.85)))),
+                MeshMaterial3d(gold.clone()),
+                Transform::from_xyz(0.0, 0.8, 0.0),
+            ));
+            // domed lid, slightly proud of the box so the silhouette reads "chest"
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.43, 1.34)))),
+                MeshMaterial3d(gold),
+                Transform::from_xyz(0.0, 1.2, 0.0).with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)),
+            ));
+            p.spawn((
+                Mesh3d(meshes.add(Mesh::from(Cylinder::new(0.35, 40.0)))),
+                MeshMaterial3d(beam),
+                Transform::from_xyz(0.0, 20.0, 0.0),
+            ));
+        });
 }
 
 fn price(rarity: Rarity, discount: f32) -> u64 {
@@ -456,6 +586,7 @@ pub fn interact_system(
         }
         InteractKind::Cage => "[E] Open the cage".into(),
         InteractKind::Teleporter => "[E] TELEPORT OUT".into(),
+        InteractKind::RewardChest => "[E] Open the miniboss cache (free)".into(),
     });
 
     if !keys.just_pressed(KeyCode::KeyE) {
@@ -546,6 +677,17 @@ pub fn interact_system(
             inter.used = true;
             sfx.write(SfxMsg(Sfx::Teleport));
             pending.0 = Some(run.stage + 1);
+        }
+        InteractKind::RewardChest => {
+            // Clearing the field is what despawns the chest (sync_reward_cache), here and
+            // on every client.
+            inter.used = true;
+            run.reward_chest = None;
+            run.chests_opened += 1;
+            let options = reward_cache_options(&ps, &mut rng);
+            *panel = ChoicePanel { title: "MINIBOSS CACHE".into(), options, banishing: false, is_levelup: false };
+            *phase = RunPhase::Modal;
+            sfx.write(SfxMsg(Sfx::Chest));
         }
     }
 }

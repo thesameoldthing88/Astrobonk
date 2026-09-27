@@ -625,6 +625,28 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                 Color::srgb(0.85, 0.87, 0.95),
             ));
             root.spawn(txt(format!("SILVER EARNED: +{}", data.silver_earned), FONT_BIG, Color::srgb(0.75, 0.85, 1.0)));
+            // The §10 formula, term by term.
+            if !data.silver_lines.is_empty() {
+                root.spawn((Node {
+                    flex_direction: FlexDirection::Column,
+                    width: Val::Px(440.0),
+                    row_gap: Val::Px(2.0),
+                    padding: UiRect::all(Val::Px(10.0)),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                }, BackgroundColor(CARD_BG), BorderColor::all(Color::srgb(0.35, 0.42, 0.6))))
+                    .with_children(|col| {
+                        for (label, amount) in &data.silver_lines {
+                            col.spawn((Node { width: Val::Percent(100.0), justify_content: JustifyContent::SpaceBetween, ..default() },))
+                                .with_children(|row| {
+                                    row.spawn(txt(label.clone(), FONT_SMALL, Color::srgb(0.7, 0.75, 0.88)));
+                                    let c = if amount.starts_with('x') { Color::srgb(1.0, 0.8, 0.4) } else { Color::srgb(0.75, 0.85, 1.0) };
+                                    row.spawn(txt(amount.clone(), FONT_SMALL, c));
+                                });
+                        }
+                    });
+            }
             if let Some((name, best, new_best)) = &data.daily {
                 root.spawn(txt(
                     format!("DAILY {name} — score {}   (best today: {best})", data.silver_earned),

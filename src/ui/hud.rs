@@ -467,6 +467,7 @@ pub fn update_edge_markers(
         }
         let (color, px) = match inter.kind {
             InteractKind::Teleporter => (Color::srgb(0.3, 1.0, 0.8), 16.0),
+            InteractKind::RewardChest => (Color::srgb(1.0, 0.85, 0.2), 15.0),
             InteractKind::Chest => (Color::srgb(1.0, 0.8, 0.25), 11.0),
             InteractKind::ShadyGuy => (Color::srgb(0.75, 0.5, 1.0), 11.0),
             InteractKind::Cage => (Color::srgb(0.75, 0.55, 0.35), 12.0),
