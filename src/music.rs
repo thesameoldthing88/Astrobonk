@@ -279,7 +279,8 @@ pub fn update_music(
     save: Res<MetaSave>,
     run: Option<Res<RunState>>,
     phase: Res<RunPhase>,
-    enemies: Query<(), With<Enemy>>,
+    // the horde, not the scenery: pots share `Enemy` but never chase anyone (L16)
+    enemies: Query<(), (With<Enemy>, Without<crate::interact::Pot>, Without<crate::enemies::Boss>)>,
     mut q: Query<(&mut AudioSink, &mut MusicStem)>,
 ) {
     let dt = time.delta_secs();

@@ -223,6 +223,20 @@ pub const SPAWN_EXHALE_SECS: f32 = 15.0;
 /// The Static's own base rate (then scaled like everything else) — it never stops growing.
 pub const STATIC_RATE_BASE: f32 = 4.2;
 pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
+/// Seconds of the §3 spawn-mix arc a chained world starts ahead per step of depth, on top
+/// of joining the arc where its shorter countdown begins (`scaling::mix_secs`).
+pub const MIX_DEPTH_HEAD_START_SECS: f32 = 60.0;
+/// The overflow valve (`enemies::director_spawn`, GDD §9). A crowd enemy this many arc
+/// metres from every astronaut is over any horizon — the spawn band is 42–58 m, and on the
+/// Dark Moon, the smallest world, nothing is more than 330 m away — so dissolving it into The Static costs
+/// the fight nothing, and its slot spawns fresh where the players are.
+pub const STATIC_RECYCLE_ARC: f32 = 100.0;
+/// Spawns the cap had no room for, banked for The Static at most this many per stage.
+pub const STATIC_BACKLOG_MAX: f32 = 300.0;
+/// Extra ghosts per second the backlog adds once The Static rises (room permitting).
+pub const STATIC_BACKLOG_DRAIN: f32 = 4.0;
+/// Backlog size at which the host is told The Static is gathering (once per stage).
+pub const STATIC_GATHERING_TELL: f32 = 40.0;
 /// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
 pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
 
