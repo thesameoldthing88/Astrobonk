@@ -1,5 +1,54 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — Wave 2: P03 Items 22 → 38 + P04 Accessibility & display settings
+- **P03:** the 15 GDD §7 items (Orbital Yo-Yo, Comet Tail, The Overheat, Downhill Momentum,
+  Second Astronaut, Encirclement Bonus, Icarus/Anti-Grav Boots, Little Black Hole, Dead Man's
+  Tether, Cracked Helmet, The Static Radio, Widow's Ring, Signal Flare, Devoured Sun Shard) in
+  every loot pool; per-copy Rarity Grades (+50% per rung over native) and the Cursed family; one
+  `run::roll_item` for every loot source; ONE death-save resolver (Tether > Warden hook >
+  Antipode/Boomerang hook > Widow's Ring); host-simulated items with `NetItemVis` + item events on
+  the hazard lane; camera glides (never snaps) on a Tether rewind. Fixed: the teleporter never
+  opened for a boss killed during The Static; a joiner's gold was sent before its Gold gain.
+- **P04:** one tabbed settings panel (GENERAL/DISPLAY/VISION/ASSIST) from menu and pause;
+  simulation-picked colorblind palettes for danger + rarity; danger outlines; flash reduction and
+  photosensitivity that work through base color (unlit materials ignore emissive) with ONE
+  screen-wide flash budget; UI scale 75–150% that fits 720p/Steam Deck; damage-number modes;
+  0–100% screenshake; §13 assists (density, enemy damage, "one more chance") that flag the run
+  ASSISTED and keep a separate daily board; telegraph rings lie flat and read by shape/motion;
+  Burrower crack decals (on the hazard lane for joiners).
+- **Integration:** conflicts in 10 files. `Rarity::color` takes the palette, and every palette
+  gained a Cursed color (Standard keeps P03's static-magenta, which collapses to ΔE 3.6 against a
+  grade for deuteranopes; picked by the same Machado-2009/CIELAB scoring: olive for deut/prot, min
+  ΔE 40.7; violet for tritanopes, min ΔE 33.8); the VISION swatches show it. P04's photosensitive
+  chain zaps were ported into P03's `fire_volley` (so Second Astronaut's ghost zaps share the
+  budget too; an empty chain no longer spends it). `apply_player_hits`: damage = hit × assist ×
+  Cracked Helmet's damage taken × armor; on a lethal hit the item resolver goes first and the
+  revive token is the LAST link, as both packages documented. Chest/shop/pause take P04's
+  fit-to-screen layout with P03's grade colors and graded lines. Both branches had taken
+  `PROTOCOL_ID` 0xA570B0_5, so the merged wire is `_6`; HazardEvent keeps P03's variants, then
+  P04's `Crack`, appended. Cross-package fixes: the in-run panels' bottom band now follows the
+  weapon tray's real height (P03's wrapping item chips put P04's level-up status line on top of
+  the second chip row at 150%), the item status line steps aside under panels like the tutorial
+  line, the `--assist` probe expects Cracked Helmet's ×2, and `--deathsave` now scripts the whole
+  chain (with `--coop2 --assist`: Tether → Widow's Ring → one more chance → down).
+- **Verified:** build clean (24 warnings, all pre-existing). Smoke 6/6 PASS plain and with
+  `--assist`. Every P03/P04 headless flag passes (ITEMS OK on moon/darkmoon/coop2, DEATHSAVE OK,
+  Radio/Shard/Flare fast-boss co-op, ASSIST OK ×4), plus the new combined
+  `--coop2 --deathsave --assist` (normal and fast-boss). Windowed: solo 56 s clean, main menu and
+  VISION tab (6 swatches) clean; `--items new --assist --give stormcore,deathray --a11y
+  deut,outline,flash,photo,ui=125,numbers=crits` ran to results with the ASSISTED RUN line and a
+  spent token; level-up at 150% with 15 items sits clear of both chip rows. Real co-op 70 s:
+  client streams proxies with `local_sim=0`; a 90 s co-op run with items + assists + outline/photo
+  shows item events crossing the wire, both revive tokens spent after the item saves, and the
+  joiner's HUD reading WIDOW +30% / TETHER SPENT / ONE MORE CHANCE: USED with the Widow halo.
+- **Known gaps:** Boomerang Insurance out of the pools until P06; Warden hook (post-1.0); Sun Shard
+  stand-in until P07; joiners don't see teammates' ghost/Anti-Grav volleys, damage numbers or a
+  results screen; §13 enemy-outline thickness and clutter merge moved to P24; no playtest of grade
+  steps, cursed rates, proc numbers or assist ranges. Seen, pre-existing (not wave 2): the
+  results screen always shows LEVEL 1 / GOLD 0 and `counters.best_level` never passes 1, because
+  `bank_results` (OnEnter Results) reads the LocalPlayer after `despawn_stage` (OnExit InRun) has
+  removed it; some UI strings still use glyphs the font lacks.
+
 ## 2026-09-27 — Wave 1: P01 Core rules conformance + P02 Co-op client parity
 - **P01:** new `run::scaling` is the one place enemy scaling is worked out (GDD §3 HP/DMG/spawn/
   elite over chain-wide `t`, depth `d`, planet threat `T`, Difficulty `Δ`; spawn rate follows the

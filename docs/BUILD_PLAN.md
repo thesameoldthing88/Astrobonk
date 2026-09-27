@@ -34,8 +34,8 @@ movement feel the GDD calls the skill ceiling.
 |---|---|---|
 | 1 | P01 Core rules conformance | ✅ wave 1. Gaps: balance not human-playtested (tune with `--balance`); Tome of Banishment/Ascension are hooks only (P05); co-op client can see but not open the miniboss cache (P14); per-enemy/boss party HP scaling left to P18 |
 | 1 | P02 Co-op client parity | ✅ wave 1. Gaps: version mismatch surfaces only after netcode's ~15 s timeout; a joiner's Silver (comet or pickups) goes into the host's shared pot and save, and per-player meta rewards have no owning package yet; client pause still freezes its local view |
-| 2 | P03 Items 22 → ~40 | ☐ |
-| 2 | P04 Accessibility & display settings | ☐ |
+| 2 | P03 Items 22 → ~40 | ✅ wave 2 (22 → 38). Gaps: Boomerang Insurance kept out of the pools until P06 fills `items::antipode_escape`; Warden Solongo death-save slot is a hook (hero #20 post-1.0); Devoured Sun Shard dims the sun as a stand-in until P07 shrinks the day side from `RunState.sun_shrink`; a joiner doesn't see a teammate's ghost/Anti-Grav volleys (teammate fire isn't streamed); grade/cursed/proc numbers not playtested |
+| 2 | P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
 | 3 | P05 Tomes 8 → 23 + loadout | ☐ |
 | 3 | P06 Movement techs + Antipode Blink | ☐ |
 | 4 | P07 Day/night cycle, world gimmicks, diegetic difficulty | ☐ |
@@ -295,6 +295,11 @@ on a curved arc; full-planet gem vacuum on level-up; crit hit-flash yellow; Stat
 (film grain, scanline flicker, edge desaturation overlay); level-up cards with rarity glow and
 evolution-ready glow; HUD layout per §13 (timer + threat tier top-center, HP + XP bottom-left,
 loadout with level pips bottom-right, off-screen threat arrows incl. Beamer aim).
+Also (assigned at the wave-2 merge; P04 left them unbuilt): §13 readability "minimum
+enemy-outline thickness" (a screen-space outline for the crowd: post-process edge pass or a
+clip-space vertex-extrusion material, never per-enemy hull children) and the "reduce clutter"
+mode that merges distant silhouettes. Keep the in-run panels' bands in sync with any HUD
+re-layout (`hud::keep_panels_clear_of_hud` measures the bottom cluster, whose P03 item chips wrap).
 
 ### P25 — NG+ "The Copy" + the Static as your dead runs (GDD §2, §10)
 Record each death locally (hero, suit colors, name/epitaph, build silhouette: weapons/evos).
