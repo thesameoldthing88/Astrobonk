@@ -18,6 +18,8 @@ use bevy::time::TimeUpdateStrategy;
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod world_probe;
+
 /// `--choices`: what the bot's scripted level-up economy has exercised so far.
 #[derive(Default)]
 struct ChoiceScript {
@@ -47,9 +49,9 @@ fn scripted_choice(
         panic!("SMOKE FAIL: a banished card was dealt again ({:?})", panel.options);
     }
     script.levelups += 1;
-    // Refresh until the free ones are gone, then once more at a price. Bounded, because
-    // Lady Fortuna's refreshes stay free forever and "once it costs Gold" never comes.
-    for _ in 0..=FREE_REFRESHES {
+    // Refresh until the free ones are gone, then once more at a price. Bounded: Lady Fortuna
+    // opens every hand with one more free reroll than anyone else.
+    for _ in 0..=FREE_REFRESHES + 1 {
         let (gold, price) = (ps.gold, ps.refresh_price());
         let ok = ps.spend_refresh();
         match (price, ok) {
@@ -415,6 +417,250 @@ fn storm_peer_check(
     *host_charging = now_host;
 }
 
+/// `--weapons base|evo|evolve|<name,…>`: the §6 Tier-1 weapon probe. The weapons go to
+/// EVERY astronaut at max level (with `--coop2` that includes the peer, so the host is seen
+/// running a joiner's guns too — past the four slots, as a probe may), and the summary
+/// asserts each one visibly did its own thing. `evolve` carries the six base weapons and
+/// evolves one per astronaut mid-run through the real `apply_upgrade`, to watch the §12
+/// fanfare come out of it (for a peer too, as the event a joiner is sent).
+#[derive(Resource, Default)]
+struct WeaponProbe {
+    list: Vec<crate::content::weapons::WeaponKind>,
+    evolve: bool,
+    granted: bool,
+    ticks: u64,
+    /// (player, evolution) the probe performed.
+    evolved: Vec<(u8, crate::content::weapons::WeaponKind)>,
+    /// PlayerIds whose evolution came out as a WeaponFx::Evolve.
+    fx_evolve: Vec<u8>,
+    /// Times the probe had to stage a max Yo-Yo combo for SWORD-YO's garrote.
+    staged_combo: u32,
+    /// Hits a STUNNED foe landed on an astronaut (must stay 0).
+    stunned_attacks: u32,
+    /// Frames some live foe stood within arm's reach (3.5 m) of an astronaut: the close-range
+    /// weapons (hug, cone, bell, yo-yo) can only be judged on a run that let foes that near.
+    close_frames: u32,
+}
+
+fn weapons_from_args() -> (Vec<crate::content::weapons::WeaponKind>, bool) {
+    use crate::content::weapons::WeaponKind as W;
+    let args: Vec<String> = std::env::args().collect();
+    let Some(list) = args.iter().position(|a| a == "--weapons").and_then(|i| args.get(i + 1)) else {
+        return (Vec::new(), false);
+    };
+    let base = vec![W::MeatballComet, W::StaticCling, W::RicochetDisc, W::SonicWhoopee, W::CosmonautsBell, W::YoYo];
+    match list.as_str() {
+        "base" => (base, false),
+        "evolve" => (base, true),
+        "evo" => (base.iter().filter_map(|w| w.def().evolves_to).collect(), false),
+        names => {
+            let key = |n: &str| n.to_lowercase().replace([' ', '-', '\'', '_'], "").replace('ù', "u");
+            let all: Vec<W> = W::BASE.into_iter().chain(W::BASE.iter().filter_map(|w| w.def().evolves_to)).collect();
+            let picked = names
+                .split(',')
+                .filter_map(|n| {
+                    let found = all.iter().copied().find(|w| key(w.def().name) == key(n));
+                    if found.is_none() {
+                        println!("  WEAPONS: no weapon called {n:?}");
+                    }
+                    found
+                })
+                .collect();
+            (picked, false)
+        }
+    }
+}
+
+/// Hand out the probe's weapons on the first frame the astronauts stand; with `evolve`,
+/// evolve one per astronaut 3 s in; keep SWORD-YO's garrote exercised.
+fn weapon_probe_drive(
+    mut probe: ResMut<WeaponProbe>,
+    save: Res<MetaSave>,
+    global: Res<RunState>,
+    mut q: Query<(&crate::player::PlayerId, &mut PlayerState, &mut crate::arsenal::WeaponProcs)>,
+    tm: Res<crate::arsenal::ArsenalTelemetry>,
+) {
+    use crate::content::weapons::WeaponKind;
+    if q.is_empty() {
+        return;
+    }
+    probe.ticks += 1;
+    if !probe.granted {
+        probe.granted = true;
+        for (pid, mut ps, _) in &mut q {
+            for w in probe.list.clone() {
+                if !ps.weapons.iter().any(|i| i.kind == w) {
+                    ps.weapons.push(crate::run::WeaponInstance { kind: w, level: MAX_WEAPON_LEVEL, cd: 0.0 });
+                }
+            }
+            println!(
+                "  WEAPONS player {} carries {}",
+                pid.0,
+                ps.weapons.iter().map(|w| w.kind.def().name).collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    if probe.evolve && probe.ticks == 90 {
+        for (pid, mut ps, _) in &mut q {
+            let base = probe.list[pid.0 as usize * 2 % probe.list.len()];
+            let Some(evo) = base.def().evolves_to else { continue };
+            if ps.apply_upgrade(&crate::run::UpgradeOption::Evolve(base), &save, global.greed_stacks) {
+                println!("  WEAPONS player {} evolved {} -> {}", pid.0, base.def().name, evo.def().name);
+                probe.evolved.push((pid.0, evo));
+            } else {
+                println!("  WEAPONS player {} could not evolve {}", pid.0, base.def().name);
+            }
+        }
+    }
+    // SWORD-YO garrotes only at max combo, and a bot in a dense crowd is hit before it gets
+    // there on its own: stage the combo every 2 s until the cord has cut something.
+    if probe.ticks % 60 == 0 && probe.ticks >= 300 && tm.garrote_hits == 0 {
+        for (_, ps, mut procs) in &mut q {
+            if ps.weapons.iter().any(|w| w.kind == WeaponKind::SwordYo) && procs.combo < YOYO_COMBO_MAX {
+                procs.combo = YOYO_COMBO_MAX;
+                probe.staged_combo += 1;
+            }
+        }
+    }
+}
+
+fn weapon_probe_watch(
+    mut probe: ResMut<WeaponProbe>,
+    mut fx: MessageReader<crate::arsenal::WeaponFxMsg>,
+    mut hurt: MessageReader<crate::messages::PlayerHitMsg>,
+    stunned: Query<(), With<crate::enemies::Stunned>>,
+    hash: Res<crate::enemies::SpatialHash>,
+    astronauts: Query<&Transform, With<Player>>,
+    foes: Query<&Enemy>,
+) {
+    let close = astronauts.iter().any(|tf| {
+        hash.near(tf.translation, 3.5).any(|(e, p)| {
+            p.distance_squared(tf.translation) < 3.5 * 3.5 && foes.get(e).is_ok_and(|en| en.speed > 0.0)
+        })
+    });
+    if close {
+        probe.close_frames += 1;
+    }
+    for m in fx.read() {
+        if let crate::arsenal::WeaponFx::Evolve { owner, .. } = m.fx {
+            if !probe.fx_evolve.contains(&owner) {
+                probe.fx_evolve.push(owner);
+            }
+        }
+    }
+    for h in hurt.read() {
+        if h.attacker.is_some_and(|a| stunned.contains(a)) {
+            probe.stunned_attacks += 1;
+        }
+    }
+}
+
+/// The summary's verdict on `--weapons`: each carried weapon did its own §6 thing.
+fn weapon_probe_verdict(world: &mut World, peers: usize) -> bool {
+    use crate::content::weapons::WeaponKind as W;
+    let loadouts: Vec<String> = world
+        .query::<(&crate::player::PlayerId, &PlayerState)>()
+        .iter(world)
+        .map(|(pid, ps)| format!("p{}[{}]", pid.0, ps.weapons.iter().map(|w| w.kind.def().name).collect::<Vec<_>>().join(", ")))
+        .collect();
+    println!("WEAPONS loadouts {}", loadouts.join(" "));
+    let world = &*world;
+    let probe = world.resource::<WeaponProbe>();
+    let tm = world.resource::<crate::arsenal::ArsenalTelemetry>();
+    let planet_r = world.resource::<CurrentPlanet>().radius;
+    let secs = probe.ticks as f32 * 0.033;
+    println!(
+        "WEAPONS lobs={} splits={} splats={} lob_hits={} lob_far={:.0}m | hug_hits={} huggers<={} novas={} nova_hits={} | discs={} bounces={} disc_hits={} laps={} | cones={} cone_hits={} panic={:.1}s repulsors={} rep_hits={} stuns={} stunned_attacks={} | tolls={} marks={} mark_crits={} wisps={} wisp_hits={} | yoyo_hits={} combo<={:.0} breaks={} garrote={} staged={} | evolutions={} pops={} fx={:?}",
+        tm.lobs, tm.splits, tm.splats, tm.lob_hits, tm.lob_far, tm.hug_hits, tm.max_huggers, tm.novas, tm.nova_hits,
+        tm.discs, tm.bounces, tm.disc_hits, tm.disc_laps, tm.cones, tm.cone_hits, tm.panic_secs, tm.repulsors,
+        tm.repulsor_hits, tm.stuns, probe.stunned_attacks, tm.tolls, tm.marks, tm.mark_crits, tm.wisps, tm.wisp_hits,
+        tm.yoyo_hits, tm.max_combo, tm.combo_breaks, tm.garrote_hits, probe.staged_combo, tm.evolutions, tm.fanfare_pops,
+        probe.fx_evolve
+    );
+    let mut fails: Vec<String> = Vec::new();
+    let mut need = |c: bool, what: &str| {
+        if !c {
+            fails.push(what.to_string());
+        }
+    };
+    // (close-range weapons are judged only on a run that brought foes into reach — the
+    // early game's thin crowd can leave a kiting bot untouched for the whole run)
+    let close = probe.close_frames >= 90;
+    if !close {
+        println!("  WEAPONS (only {} frames with a foe in reach: the close-range checks are skipped — use --fast-boss)", probe.close_frames);
+    }
+    let mut has: Vec<W> = probe.list.clone();
+    has.extend(probe.evolved.iter().map(|(_, w)| *w));
+    let carried = |w: W| has.contains(&w);
+    if carried(W::MeatballComet) || carried(W::RaguRain) {
+        need(tm.lobs > 0 && tm.splats > 0 && tm.lob_hits > 0, "no meatball landed on anything");
+        need(tm.lob_far >= 20.0, "no lob was aimed past 20 m (the horizon)");
+    }
+    if carried(W::RaguRain) {
+        need(tm.splits > 0 && tm.splats > tm.lobs, "RAGÙ RAIN never split on the way down");
+    }
+    if close && (carried(W::StaticCling) || carried(W::FullDischarge)) {
+        need(tm.hug_hits > 0, "the hug field never bit");
+    }
+    if carried(W::FullDischarge) {
+        // the nova always has to go off; that it BIT anyone is judged on a close run
+        need(tm.novas > 0 && (!close || tm.nova_hits > 0), "FULL DISCHARGE never went off");
+    }
+    if carried(W::RicochetDisc) || carried(W::Omnidisc) {
+        need(tm.discs > 0 && tm.disc_hits > 0 && tm.bounces > 0, "no disc bounced enemy to enemy");
+    }
+    if carried(W::Omnidisc) {
+        let lap = std::f32::consts::TAU * planet_r / 46.0;
+        need(secs < lap + 4.0 || tm.disc_laps > 0, "THE OMNIDISC never came all the way round the planet");
+    }
+    if close && carried(W::SonicWhoopee) {
+        need(tm.cones > 0 && tm.cone_hits > 0, "the Whoopee cone never caught anyone");
+    }
+    if carried(W::BrownNote) {
+        need(tm.repulsors > 0 && (!close || tm.repulsor_hits > 0), "THE BROWN NOTE's ring never shoved anyone");
+    }
+    if close && (carried(W::SonicWhoopee) || carried(W::BrownNote)) {
+        need(tm.stuns > 0, "nothing was ever stunned");
+    }
+    need(probe.stunned_attacks == 0, "a stunned foe landed a hit");
+    if carried(W::CosmonautsBell) || carried(W::Angelus) {
+        need(tm.tolls > 0, "the bell never tolled");
+    }
+    if close && (carried(W::CosmonautsBell) || carried(W::Angelus)) {
+        need(tm.marks > 0, "the bell never tolled on anyone");
+        need(tm.mark_crits > 0, "a bell mark never turned a hit into a crit");
+    }
+    if close && carried(W::Angelus) {
+        need(tm.wisps > 0 && tm.wisp_hits > 0, "THE ANGELUS raised no wisp that hit");
+    }
+    if carried(W::YoYo) || carried(W::SwordYo) {
+        need(!close || tm.yoyo_hits > 0, "the yo-yo never hit");
+        need(tm.max_combo >= 2.0, "the un-hit move combo never built");
+    }
+    if close && carried(W::SwordYo) {
+        need(tm.garrote_hits > 0, "SWORD-YO's cord never garrotted at max combo");
+    }
+    if probe.evolve {
+        need(probe.evolved.len() == peers, "not every astronaut evolved");
+        for (pid, _) in &probe.evolved {
+            need(
+                probe.fx_evolve.contains(pid),
+                &format!("player {pid}'s evolution never became a WeaponFx (what a joiner is sent)"),
+            );
+        }
+        need(tm.fanfare_pops as usize >= probe.evolved.len(), "an evolution's fanfare never popped");
+    }
+    if fails.is_empty() {
+        println!("WEAPONS OK ({})", has.iter().map(|w| w.def().name).collect::<Vec<_>>().join(", "));
+        true
+    } else {
+        for f in fails {
+            println!("FAIL: weapons: {f}");
+        }
+        false
+    }
+}
+
 /// `--items a,b,…` / `--deathsave`: the §7 item probes. Items are handed to EVERY
 /// astronaut (with `--coop2` that includes the peer, so the host is seen simulating a
 /// joiner's items too), and the summary asserts each one visibly did its thing.
@@ -660,7 +906,7 @@ fn tome_probe_drive(
     if t % 300 == 0 && probe.tomes.contains(&crate::content::tomes::TomeKind::Elite) {
         if let Some((e, mut en)) = crowd.iter_mut().find(|(_, en)| en.speed > 0.0 && en.hp > 0.0) {
             en.elite = true;
-            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO });
+            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO, weapon: None });
         }
     }
     for (pid, mut p, mut procs, ps, _) in &mut q {
@@ -669,7 +915,7 @@ fn tome_probe_drive(
         }
         if t == 60 {
             // just past the terminator on the dark side, fanned out per player
-            let night = -crate::planet::sunward();
+            let night = -crate::daynight::Sun::of(&run).toward;
             let (a, _) = sphere::tangent_frame(night);
             p.dir = sphere::offset_dir(night, a, 4.0 * pid.0 as f32, planet.radius);
             p.vel_t = Vec3::ZERO;
@@ -793,6 +1039,121 @@ fn tome_probe_withdraw(
 /// `--staticnow` (headless): a few seconds in, wind the clock out so The Static rises
 /// through the real `run_clock` path — with `--fast-boss` the marks have already fired, so
 /// nothing but The Static arrives. Tome of Static's payout and bite need it to be reached.
+/// `--overflow`: the GDD §9 overflow valve, staged. (1) A full cap of Shamblers dropped on
+/// the far side of the planet: the budget that arrives must dissolve the farthest into The
+/// Static and spawn over the bot's horizon instead. (2) A full cap of pinned, harmless elites
+/// (never recycled — their loot is promised): the budget has nowhere to go and must bank as
+/// The Static's backlog. (3) The pins cleared and The Static raised: the backlog must pour
+/// out as extra ghosts.
+#[derive(Resource, Default)]
+struct OverflowProbe {
+    phase: u8,
+    ticks: u32,
+    recycled: u32,
+    backlog_peak: f32,
+    backlog_at_static: f32,
+    backlog_end: f32,
+    ghosts: usize,
+    near_spawns: usize,
+    /// The crowd just after a flood landed (the probe itself overfills the cap by the bodies
+    /// already walking); the valve must never add to it.
+    baseline: usize,
+    over_cap: usize,
+}
+
+const OVERFLOW_FLOOD_TICK: u32 = 60;
+const OVERFLOW_PIN_TICK: u32 = 60 + 750;
+const OVERFLOW_STATIC_TICK: u32 = 60 + 1350;
+const OVERFLOW_END_TICK: u32 = 60 + 1800;
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn overflow_probe(
+    mut commands: Commands,
+    mut probe: ResMut<OverflowProbe>,
+    mut run: ResMut<RunState>,
+    director: Res<crate::enemies::Director>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    planet: Res<CurrentPlanet>,
+    q_me: Query<&Player, With<crate::player::LocalPlayer>>,
+    mut q_crowd: Query<(Entity, &mut Enemy, Has<crate::enemies::Buried>), (Without<crate::interact::Pot>, Without<crate::enemies::Boss>)>,
+    mut q_ps: Query<&mut PlayerState>,
+) {
+    probe.ticks += 1;
+    let Ok(me) = q_me.single() else { return };
+    // the party's cap, as `director_spawn` sizes it (co-op grows it)
+    let cap = crate::run::scaling::Scaling::for_run(&run, q_ps.iter().count()).live_cap;
+    let mut rng = rand::thread_rng();
+    let t = probe.ticks;
+    let crowd = q_crowd.iter().count();
+    if t == OVERFLOW_FLOOD_TICK + 2 || t == OVERFLOW_PIN_TICK + 2 {
+        probe.baseline = crowd.max(cap);
+    }
+    if (probe.phase == 1 || probe.phase == 2) && t > OVERFLOW_FLOOD_TICK + 2 && t != OVERFLOW_PIN_TICK + 1 {
+        probe.over_cap = probe.over_cap.max(crowd.saturating_sub(probe.baseline));
+    }
+    match t {
+        OVERFLOW_FLOOD_TICK => {
+            // the antipode's neighbourhood: 250+ m of arc away on every world
+            for _ in 0..cap {
+                let far = (-me.dir + crate::planet::random_dir(&mut rng) * 0.25).normalize();
+                crate::enemies::spawn_enemy(&mut commands, &assets, &planet, crate::content::enemies::EnemyKind::Shambler, far, false, 1.0, 1.0, &mut rng);
+            }
+            probe.phase = 1;
+        }
+        OVERFLOW_PIN_TICK => {
+            probe.recycled = director.static_recycled;
+            for (e, _, _) in &q_crowd {
+                commands.entity(e).despawn();
+            }
+            for _ in 0..cap {
+                let dir = crate::planet::random_dir(&mut rng);
+                crate::enemies::spawn_enemy(&mut commands, &assets, &planet, crate::content::enemies::EnemyKind::Shambler, dir, true, 1.0e6, 0.0, &mut rng);
+            }
+            probe.phase = 2;
+        }
+        OVERFLOW_STATIC_TICK => {
+            probe.backlog_at_static = director.static_backlog;
+            for (e, en, _) in &q_crowd {
+                if en.elite {
+                    commands.entity(e).despawn();
+                }
+            }
+            run.timer = run.timer.min(0.5);
+            probe.phase = 3;
+        }
+        OVERFLOW_END_TICK => {
+            probe.backlog_end = director.static_backlog;
+            probe.ghosts = q_crowd.iter().filter(|(_, e, _)| e.kind == crate::content::enemies::EnemyKind::Ghost).count();
+            probe.phase = 4;
+        }
+        _ => {}
+    }
+    if probe.phase == 1 {
+        // what the valve spawns in the flood's place lands over the bot's horizon
+        let me_dir = me.dir;
+        probe.near_spawns += q_crowd
+            .iter_mut()
+            .filter(|(_, e, _)| e.is_added() && crate::sphere::arc_dist(e.dir, me_dir, planet.radius) < STATIC_RECYCLE_ARC)
+            .count();
+    }
+    if probe.phase == 3 {
+        // the bot is not the test: keep it standing while The Static pours out
+        for mut ps in &mut q_ps {
+            ps.hp = ps.stats.max_hp;
+        }
+    }
+    if probe.phase == 2 {
+        // pinned and harmless: the cap stays full of bodies the valve may not touch
+        for (_, mut e, _) in &mut q_crowd {
+            if e.elite {
+                e.speed = 0.0;
+                e.damage = 0.0;
+            }
+        }
+    }
+    probe.backlog_peak = probe.backlog_peak.max(director.static_backlog);
+}
+
 fn static_now(mut run: ResMut<RunState>, mut ticks: Local<u32>) {
     *ticks += 1;
     if *ticks == 150 && !run.static_active {
@@ -1645,7 +2006,7 @@ fn bestiary_probe(
                 }
                 if t == BP_AEGIS + 66 {
                     probe.hp_mark = en.hp;
-                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO });
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO, weapon: None });
                 }
                 if t == BP_AEGIS + 67 {
                     let lost = probe.hp_mark - en.hp;
@@ -1661,7 +2022,7 @@ fn bestiary_probe(
                 }
                 if t == BP_AEGIS + 68 {
                     probe.hp_mark = en.hp;
-                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO });
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO, weapon: None });
                 }
                 if t == BP_AEGIS + 69 {
                     let lost = probe.hp_mark - en.hp;
@@ -1769,7 +2130,7 @@ fn bestiary_probe(
                     if let Some(ring) = ring {
                         probe.ring = Some(ring);
                         probe.mark = t;
-                        hits.write(crate::messages::HitMsg { source: Some(me), target: s, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+                        hits.write(crate::messages::HitMsg { source: Some(me), target: s, amount: 1.0e7, crit: false, knock: Vec3::ZERO, weapon: None });
                     }
                 }
                 if probe.mark > 0 && t == probe.mark + 4 {
@@ -1905,7 +2266,7 @@ fn bestiary_probe(
                 let arc = sphere::arc_dist(pin, en.dir, r);
                 probe.check(arc > probe.hp_mark + 2.0, format!("Mimic: fled {:.1} m", arc - probe.hp_mark), format!("Mimic: did not flee ({:.1} m)", arc - probe.hp_mark));
                 probe.mark = q_astro.get(me).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
-                hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+                hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO, weapon: None });
             }
         }
         if t == BP_MIMIC + 48 {
@@ -1934,7 +2295,7 @@ fn bestiary_probe(
                 probe.mark = host_gold;
                 if let Some((m, ..)) = q_foes.iter().find(|(_, en, _, mm, ..)| en.kind == K::Mimic && mm.is_some_and(|mm| mm.payer == Some(peer))) {
                     probe.staged.push(m);
-                    hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO, weapon: None });
                 } else {
                     probe.fail.push("Mimic: the peer's chest never sprang".into());
                 }
@@ -2007,7 +2368,6 @@ fn tally_xp(mut grants: MessageReader<crate::net::GrantOut>, mut tally: ResMut<X
     }
 }
 
-/// Fail-fast sanity checks each tick.
 /// `--enemydist`: histogram how far the horde actually is from each astronaut, in
 /// great-circle metres. This is the number the co-op streaming bandwidth budget rests on —
 /// interest management is only a win if most of the horde is genuinely out of view.
@@ -2073,17 +2433,19 @@ struct BalanceWindow {
     kills: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn balance_probe(
     time: Res<Time>,
     run: Res<RunState>,
-    mut q_ps: Query<&mut PlayerState>,
+    director: Res<crate::enemies::Director>,
+    mut q_ps: Query<(&mut PlayerState, Has<crate::player::LocalPlayer>)>,
     q_new: Query<&Enemy, (Added<Enemy>, Without<crate::enemies::Boss>)>,
     q_alive: Query<&Enemy>,
     mut kills: MessageReader<crate::messages::KillMsg>,
     mut win: Local<BalanceWindow>,
 ) {
     // Runs between apply_player_hits and downed_watch, so a lethal hit never ends the run.
-    for mut ps in &mut q_ps {
+    for (mut ps, _) in &mut q_ps {
         ps.hp = ps.stats.max_hp;
         ps.dead = false;
     }
@@ -2099,12 +2461,13 @@ fn balance_probe(
     }
     let w = win.secs;
     let sc = crate::run::scaling::Scaling::for_run(&run, q_ps.iter().count());
-    let lead = q_ps.iter().next();
+    // the local astronaut's build (with --coop2 the peer's is an arbitrary other one)
+    let lead = q_ps.iter().find(|(_, local)| *local).map(|(p, _)| p);
     let weapons: Vec<String> = lead
         .map(|p| p.weapons.iter().map(|w| format!("{}:{}", w.kind.def().name, w.level)).collect())
         .unwrap_or_default();
     println!(
-        "  BALANCE t={:>4.0}s stage={} lvl={:<3} horde[hp x{:.2} dmg x{:.2}] spawns/s={:>5.1} crowdHP/s={:>6.0} kills/s={:>5.1} alive={:>4} weapons=[{}]",
+        "  BALANCE t={:>4.0}s stage={} lvl={:<3} horde[hp x{:.2} dmg x{:.2}] spawns/s={:>5.1} crowdHP/s={:>6.0} kills/s={:>5.1} alive={:>4} valve[recycled={} backlog={:.0}] weapons=[{}]",
         run.total_elapsed,
         run.stage,
         lead.map(|p| p.level).unwrap_or(1),
@@ -2114,16 +2477,32 @@ fn balance_probe(
         win.spawned_hp / w,
         win.kills as f32 / w,
         q_alive.iter().filter(|e| e.speed > 0.0).count(),
+        director.static_recycled,
+        director.static_backlog,
         weapons.join(", ")
     );
     *win = BalanceWindow::default();
 }
 
-fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
+/// Fail-fast sanity checks each tick (cap breach, non-finite state) and the periodic
+/// progress line.
+#[allow(clippy::type_complexity)]
+fn bot_watchdog(
+    run: Res<RunState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
+    q_enemies: Query<(), With<Enemy>>,
+    q_crowd: Query<(), (With<Enemy>, Without<crate::interact::Pot>, Without<crate::enemies::Boss>)>,
+    q_party: Query<(), With<Player>>,
+    mut ticks: Local<u64>,
+) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
-    if alive > ENEMY_CAP + 400 {
-        panic!("SMOKE FAIL: enemy cap breached ({alive})");
+    // the crowd against the party's own cap (co-op grows it), with a margin for the boss
+    // add rings and staged probe scenes
+    let crowd = q_crowd.iter().count();
+    let cap = crate::run::scaling::Scaling::for_run(&run, q_party.iter().count()).live_cap;
+    if crowd > cap + 400 {
+        panic!("SMOKE FAIL: enemy cap breached ({crowd} crowd, cap {cap})");
     }
     let hp = q_ps.single().map(|p| p.hp).unwrap_or(1.0);
     if !hp.is_finite() || !run.timer.is_finite() {
@@ -2153,15 +2532,23 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| silver_self_check())
         .and_then(|_| crate::items::self_check(&MetaSave::default()))
         .and_then(|_| crate::save::settings_self_check())
+        .and_then(|_| crate::save::format_self_check())
+        .and_then(|_| crate::meshkit::winding_self_check())
+        .and_then(|_| crate::enemies::spatial_hash_self_check().map(|r| println!("  spatial hash probes (radius probed/old cube): {r}")))
         .and_then(|_| crate::fx::flash_gate_self_check())
+        .and_then(|_| crate::fx::hitstop_self_check())
+        .and_then(|_| crate::fx::shake_self_check())
+        .and_then(|_| crate::arsenal::self_check())
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
         .and_then(|_| crate::tomes::self_check())
         .and_then(|_| crate::techs::self_check())
         .and_then(|_| crate::net::edge_presses_self_check())
+        .and_then(|_| crate::daynight::self_check())
+        .and_then(|_| crate::gimmicks::self_check())
         .and_then(|_| crate::bestiary::self_check())
         .and_then(|_| crate::netenemy::state_lane_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes, movement techs, input edges, spawn tables, new enemies, enemy-state lane)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks, spawn tables, new enemies, enemy-state lane)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -2238,7 +2625,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     }
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
-        run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
+        // the late-game spawn mix (`scaling::mix_secs` reads the 95 s countdown: Beamers,
+        // UFOs, Burrowers, and Lobbers from 1:00 on)
+        run.elapsed = 570.0;
         run.total_elapsed = 570.0; // and the §3 run-time scaling that goes with it
     }
 
@@ -2275,6 +2664,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
         .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .insert_resource({
+            let (list, evolve) = weapons_from_args();
+            WeaponProbe { list, evolve, ..default() }
+        })
+        .insert_resource(world_probe::WorldProbe::from_args(&args))
         .insert_resource(BestiaryProbe {
             on: args.iter().any(|a| a == "--bestiary"),
             kinds: crate::bestiary::kinds_from_args("--bestiary"),
@@ -2282,13 +2676,21 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         })
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
+        .init_resource::<crate::gimmicks::WorldFlora>()
+        .init_resource::<crate::gimmicks::Crawl>()
+        .init_resource::<crate::gimmicks::GimmickTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
+        .init_resource::<crate::fx::ScreenFlash>()
+        .init_resource::<crate::arsenal::ArsenalTelemetry>()
+        .init_resource::<crate::arsenal::RecentKills>()
+        .init_resource::<crate::arsenal::Fanfare>()
         .init_resource::<crate::bestiary::BestiaryTelemetry>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
         .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::techs::TechFxMsg>()
+        .add_message::<crate::arsenal::WeaponFxMsg>()
         .add_message::<crate::bestiary::BestiaryFxMsg>()
         .add_message::<crate::bestiary::RefundMsg>()
         .add_message::<crate::messages::HitMsg>()
@@ -2345,6 +2747,46 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 .chain()
                 .run_if(crate::playing),
         )
+        // §6 the Tier-1 weapons — the set main.rs runs (headless IS the host, so the
+        // client-only adoption of the replicated combo never runs)
+        .add_systems(
+            Update,
+            (
+                crate::arsenal::yoyo_combo,
+                crate::arsenal::tether_update,
+                crate::arsenal::lob_update,
+                crate::arsenal::splat_fade,
+                crate::arsenal::disc_update,
+                crate::arsenal::repulsor_update,
+                crate::arsenal::wisp_update,
+                crate::arsenal::bell_marks,
+                crate::arsenal::bell_bodies,
+                crate::arsenal::animate_waves,
+                crate::enemies::tick_stuns,
+                crate::arsenal::record_kills,
+            )
+                .chain()
+                .after(crate::combat::drone_update)
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (weapon_probe_drive.before(crate::arsenal::tether_update), weapon_probe_watch)
+                .run_if(|p: Res<WeaponProbe>| !p.list.is_empty())
+                .run_if(crate::playing),
+        )
+        // §12 the fanfare, behind panels too (as in main.rs); and the §13 hitstop clock
+        .add_systems(
+            Update,
+            (
+                crate::arsenal::detect_evolutions,
+                crate::arsenal::weapon_fx_presentation,
+                crate::arsenal::animate_fanfare,
+            )
+                .chain()
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
+        )
+        .add_systems(Update, crate::fx::hitstop_system)
         // §9 new enemies (P08) — the same sets main.rs runs (headless IS the host)
         .add_systems(
             Update,
@@ -2397,9 +2839,39 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::items::singularity_update,
                 crate::items::push_net_item_vis,
                 crate::items::item_visuals,
-                crate::items::apply_sun_shrink,
             )
                 .chain()
+                .run_if(crate::playing),
+        )
+        // §4 day/night + §8 world gimmicks — the host's half as main.rs runs it (headless IS
+        // the host); of the presentation only the Farside gem swap (it is a handle swap)
+        .add_systems(
+            Update,
+            (
+                crate::daynight::advance_sun,
+                crate::gimmicks::crawl_sim.before(crate::enemies::director_spawn),
+                crate::gimmicks::spore_clock,
+                crate::gimmicks::spore_sim.after(crate::enemies::rebuild_hash),
+                crate::daynight::farside_gems,
+                crate::daynight::night_static.after(crate::enemies::enemy_move),
+            )
+                .chain()
+                .run_if(crate::playing),
+        )
+        // --daynight / --hazards (P07)
+        .add_systems(
+            Update,
+            (
+                world_probe::world_probe_stage
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .before(crate::pickups::kill_drops),
+                world_probe::world_probe_watch
+                    .after(crate::enemies::enemy_move)
+                    .after(crate::gimmicks::crawl_sim)
+                    .after(crate::daynight::night_static),
+            )
+                .run_if(world_probe::WorldProbe::on)
                 .run_if(crate::playing),
         )
         // §4 movement techs — the host's half as main.rs runs it (headless IS the host);
@@ -2441,7 +2913,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_systems(
             Update,
             crate::items::item_fx_presentation
-                .after(crate::items::apply_sun_shrink)
+                .after(crate::items::item_visuals)
                 .run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         .add_systems(
@@ -2531,6 +3003,15 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             crate::director::dev_miniboss_now
                 .run_if(crate::playing)
                 .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
+        )
+        .add_systems(Update, crate::director::snapshot_local_sheet)
+        .init_resource::<OverflowProbe>()
+        .add_systems(
+            Update,
+            overflow_probe
+                .after(crate::enemies::director_spawn)
+                .run_if(crate::playing)
+                .run_if(|| std::env::args().any(|a| a == "--overflow")),
         );
 
     // enter InRun immediately
@@ -2586,6 +3067,35 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             .unwrap_or((0, 1.0, 1.0));
         crate::director::silver_payout(&run, false, golden, rocks, gain, static_silver)
     };
+    // L7: nothing placed by the stage layout may stand inside a solid prop (the boss-drop
+    // teleporter and the miniboss cache land where a corpse fell, so they are exempt).
+    let buried_in_props = {
+        let props: Vec<(Vec3, f32)> = world.resource::<crate::planet::PropColliders>().0.iter().map(|c| (c.dir, c.radius)).collect();
+        let radius = world.resource::<CurrentPlanet>().radius;
+        let placed: Vec<Vec3> = world
+            .query::<(&Transform, Option<&crate::interact::Interactable>, Has<crate::interact::Pot>)>()
+            .iter(world)
+            .filter(|(_, i, pot)| {
+                *pot || i.is_some_and(|i| {
+                    !matches!(i.kind, crate::interact::InteractKind::Teleporter | crate::interact::InteractKind::RewardChest)
+                })
+            })
+            .map(|(tf, ..)| tf.translation.normalize_or_zero())
+            .collect();
+        placed.iter().filter(|d| props.iter().any(|(c, r)| sphere::arc_dist(**d, *c, radius) < *r)).count()
+    };
+    // H1: Results bank from `RunState::final_sheet` AFTER OnExit(InRun) has despawned the
+    // stage, astronaut included. Tear the stage down the same way and make sure what would
+    // be banked is still the live sheet, not a level-1 fallback.
+    {
+        use bevy::ecs::system::RunSystemOnce;
+        // (the snapshot's last in-run frame, so a gem banked on the final tick counts)
+        let _ = world.run_system_once(crate::director::snapshot_local_sheet);
+        let _ = world.run_system_once(crate::planet::despawn_stage);
+        world.flush();
+    }
+    let banked = world.resource::<RunState>().final_sheet;
+    let stale_bank = ps.as_ref().is_some_and(|p| banked.level != p.level || banked.gold != p.gold);
     let storm = world.resource::<crate::events_world::DustStorm>();
     let storm_state = format!("spawned={} active={}", storm.spawned_vis, storm.active);
 
@@ -2599,6 +3109,39 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     println!("silver={} [{}] chests_opened={} boss_kills={}", silver.total, lines.join(", "), run.chests_opened, run.boss_kills);
 
     let mut ok = true;
+    if std::env::args().any(|a| a == "--overflow") {
+        let o = world.resource::<OverflowProbe>();
+        let line = format!(
+            "recycled={} near_spawns={} backlog_peak={:.0} backlog_at_static={:.0} backlog_end={:.0} ghosts={} over_cap={}",
+            o.recycled, o.near_spawns, o.backlog_peak, o.backlog_at_static, o.backlog_end, o.ghosts, o.over_cap
+        );
+        if o.phase < 4 {
+            println!("FAIL: --overflow never finished its script (phase {}; run more ticks) {line}", o.phase);
+            ok = false;
+        } else if o.recycled == 0 || o.near_spawns == 0 {
+            println!("FAIL: a cap full of far stragglers was not recycled into fresh spawns {line}");
+            ok = false;
+        } else if o.backlog_at_static <= 0.0 {
+            println!("FAIL: overflow with nothing to recycle was discarded, not banked for The Static {line}");
+            ok = false;
+        } else if o.backlog_end >= o.backlog_at_static || o.ghosts == 0 {
+            println!("FAIL: The Static never drew on its backlog {line}");
+            ok = false;
+        } else if o.over_cap > 0 {
+            println!("FAIL: the valve let the crowd past the live cap {line}");
+            ok = false;
+        } else {
+            println!("OVERFLOW OK {line}");
+        }
+    }
+    if buried_in_props > 0 {
+        println!("FAIL: {buried_in_props} pots/interactables were placed inside solid props (L7)");
+        ok = false;
+    }
+    if stale_bank {
+        println!("FAIL: Results would bank level {} / gold {}, the run ended at level {p_level} / gold {p_gold} (H1)", banked.level, banked.gold);
+        ok = false;
+    }
     if silver.total == 0 && run.total_elapsed > SILVER_SURVIVAL_SECS_PER {
         println!("FAIL: the run banked zero Silver (§10: no run ever pays out zero)");
         ok = false;
@@ -2619,9 +3162,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // `--staticnow` winds the run into The Static within seconds, and while it is up no
     // kill drops XP (`pickups::kill_drops` pays its ghosts' Silver instead): the XP pipeline
     // is judged on the runs that walk a horde, not on this one.
-    // `--bestiary` pins and disarms the bot for most of the run to stage its scenes: it
-    // walks no horde either.
-    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--bestiary");
+    // `--overflow` ends in The Static the same way, after burying the bot's horizon in a
+    // staged flood; `--hazards` on the Dark Moon winds the clock to The Crawl; `--bestiary`
+    // pins and disarms the bot for most of the run to stage its scenes: none walk a horde.
+    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--overflow" || a == "--bestiary")
+        && !(world.resource::<world_probe::WorldProbe>().hazards && planet_kind == PlanetKind::DarkMoon);
     if xp_run && run.kills > 50 && xp_grants == 0 && gems_left == 0 {
         println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
@@ -2746,8 +3291,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             }
         }
         // held for a full period (the probe's own clock: fast-boss winds total_elapsed)
-        if has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_SHARD_PERIOD + 1.0 {
+        if has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_EAT_SECS + 1.0 {
             need(tel.sun_steps > 0 && run.sun_shrink > 0.0, "Devoured Sun Shard never shrank the sun");
+        }
+        // §3 diegetic difficulty: Cursed Δ eats the sun too, in proportion (P07)
+        if has(I::CursedMoonRock) && !has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_EAT_SECS + 1.0 {
+            need(run.difficulty > 0.0 && run.sun_shrink > 0.0, "Cursed Moon Rock's Difficulty never ate the sun");
         }
         for (pid, ps, vis) in &item_sheets {
             let who = format!("player {pid}");
@@ -2998,6 +3547,29 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             ok = false;
         }
     }
+    if !world.resource::<WeaponProbe>().list.is_empty() && !weapon_probe_verdict(world, peers.len()) {
+        ok = false;
+    }
+    // §13 hitstop canon, every run: only this machine's kills ask, and they stay SPARSE — a
+    // crowd stop at most once per HITSTOP_KILL_GAP of play, whatever the kill rate.
+    {
+        let hs = world.resource::<crate::fx::Hitstop>();
+        let played = world.resource::<Time<Virtual>>().elapsed_secs();
+        let crowd_cap = (played / HITSTOP_KILL_GAP) as u32 + 1;
+        let local_kills = hs.granted.iter().sum::<u32>() + hs.refused;
+        println!(
+            "HITSTOP crowd/elite/boss={:?} refused={} frozen={:.2}s over {played:.0}s",
+            hs.granted, hs.refused, hs.frozen_secs
+        );
+        if hs.granted[0] > crowd_cap {
+            println!("FAIL: {} crowd-kill hitstops in {played:.0}s (cap {crowd_cap}) — not sparse", hs.granted[0]);
+            ok = false;
+        }
+        if run.kills >= 30 && local_kills == 0 {
+            println!("FAIL: {} kills and not one asked for a hitstop (§13: your kills freeze)", run.kills);
+            ok = false;
+        }
+    }
     // §13: a run with every assist off must never be flagged; one with them must be.
     if run.assisted != assist {
         println!("FAIL: run.assisted={} with --assist {}", run.assisted, if assist { "on" } else { "off" });
@@ -3030,6 +3602,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             println!("ASSIST OK: density, damage, one more chance, run flagged");
         }
     }
+    if !world_probe::report(world) {
+        ok = false;
+    }
     if enemies == 0 && !run.boss_dead {
         println!("FAIL: spawner produced no live enemies");
         ok = false;
@@ -3057,14 +3632,14 @@ fn headless_enter(
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
     // work is testable without launching two windows by hand.
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, &props, Vec3::Y);
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
 }

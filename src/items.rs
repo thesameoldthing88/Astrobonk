@@ -165,7 +165,10 @@ pub fn ghost_anchor(body: &Transform, t: f32) -> Vec3 {
 /// Weapons the ghost can mirror: the ones that FIRE. An orbit or aura is a field around its
 /// owner — a ghost copy would just be a second one around the same astronaut.
 pub fn ghost_can_mirror(w: WeaponKind) -> bool {
-    !matches!(w.def().behavior, Behavior::Orbit { .. } | Behavior::Aura { .. })
+    !matches!(
+        w.def().behavior,
+        Behavior::Orbit { .. } | Behavior::Aura { .. } | Behavior::Hug { .. } | Behavior::Tether { .. }
+    )
 }
 
 // ─── the death-save resolver (§7 stacking rule, §15) ─────────────────────────
@@ -429,14 +432,12 @@ pub fn setup_item_assets(
 // ─── HOST simulation ─────────────────────────────────────────────────────────
 
 /// HOST: the run-wide cursed levers and each astronaut's slow-ticking item state.
-///   * The Static Radio / Devoured Sun Shard act on the WORLD, so any carrier sets them for
-///     the whole party (like `RunState::difficulty`).
+///   * The Static Radio acts on the WORLD, so any carrier sets it for the whole party (like
+///     `RunState::difficulty`; the Devoured Sun Shard does too, in `daynight::advance_sun`).
 ///   * Tether memory, Widow's recharge, the ghost's weapon pick, Insurance's re-arm.
 pub fn item_upkeep(
     time: Res<Time>,
     mut run: ResMut<RunState>,
-    mut telemetry: ResMut<ItemTelemetry>,
-    mut banners: MessageWriter<BannerMsg>,
     mut q: Query<(&Player, &mut PlayerState, &mut ItemProcs)>,
 ) {
     let dt = time.delta_secs();
@@ -446,19 +447,7 @@ pub fn item_upkeep(
     run.static_radio = q.iter().any(|(_, ps, _)| ps.has_item(ItemKind::StaticRadio));
     // Tome of the Elite: elites are world loot, so the best Elite Loot in the party pays
     run.elite_loot = q.iter().map(|(_, ps, _)| ps.stats.elite_loot).fold(1.0f32, f32::max);
-    if q.iter().any(|(_, ps, _)| ps.has_item(ItemKind::DevouredSunShard)) && run.sun_shrink < 1.0 {
-        run.sun_shard_secs += dt;
-        if run.sun_shard_secs >= SUN_SHARD_PERIOD {
-            run.sun_shard_secs -= SUN_SHARD_PERIOD;
-            run.sun_shrink = (run.sun_shrink + SUN_SHARD_STEP).min(1.0);
-            telemetry.sun_steps += 1;
-            banners.write(BannerMsg(if run.sun_shrink >= 1.0 {
-                "THE SUN IS GONE".into()
-            } else {
-                format!("THE SUN SHRINKS ({:.0}% EATEN)", run.sun_shrink * 100.0)
-            }));
-        }
-    }
+    // (the Devoured Sun Shard eats the sun in `daynight::advance_sun`, with the Cursed Δ)
 
     let mut rng = rand::thread_rng();
     for (p, mut ps, mut procs) in &mut q {
@@ -701,6 +690,7 @@ pub fn orbit_chunks(
                 amount: c.damage * cm * elite,
                 crit,
                 knock: offset.normalize_or_zero() * 6.0,
+                weapon: None,
             });
             c.hit.push(te);
             telemetry.yoyo_hits += 1;
@@ -798,7 +788,7 @@ pub fn comet_tail(
                 if en.speed <= 0.0 || tpos.distance(c) > r + en.scale * 0.5 || !struck.insert(te) {
                     continue;
                 }
-                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO, weapon: None });
                 telemetry.trail_hits += 1;
             }
         }
@@ -846,7 +836,7 @@ pub fn trail_patches(
             if en.speed <= 0.0 || tpos.distance(pos) > COMET_TAIL_RADIUS + en.scale * 0.5 {
                 continue;
             }
-            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO, weapon: None });
             telemetry.trail_hits += 1;
         }
     }
@@ -1241,38 +1231,6 @@ pub fn item_visuals(
                 (assets.glow_mesh.clone(), assets.glow_mat.clone())
             };
             commands.spawn((ItemGlow { owner: be, flag }, Mesh3d(mesh), MeshMaterial3d(mat), glow_pose(flag, btf, t), StageScoped));
-        }
-    }
-}
-
-/// The planet's sun, as `planet::spawn_stage` builds it.
-#[derive(Component)]
-pub struct SunLight {
-    pub base: f32,
-}
-#[derive(Component)]
-pub struct SunDisc;
-
-/// Every machine: the Devoured Sun Shard's lever made visible — the sun dims and its disc
-/// shrinks with `RunState::sun_shrink` (streamed in RunSnapMsg, so both machines match).
-/// A stand-in until P07's day/night cycle, which shrinks the lit HEMISPHERE toward
-/// night-lock from the same value and replaces this.
-pub fn apply_sun_shrink(
-    run: Res<RunState>,
-    mut lights: Query<(&mut DirectionalLight, &SunLight)>,
-    mut discs: Query<&mut Transform, With<SunDisc>>,
-) {
-    let s = run.sun_shrink.clamp(0.0, 1.0);
-    for (mut l, sun) in &mut lights {
-        let want = sun.base * (1.0 - 0.8 * s);
-        if (l.illuminance - want).abs() > 1.0 {
-            l.illuminance = want;
-        }
-    }
-    let scale = 1.0 - 0.85 * s;
-    for mut tf in &mut discs {
-        if (tf.scale.x - scale).abs() > 1e-3 {
-            tf.scale = Vec3::splat(scale);
         }
     }
 }

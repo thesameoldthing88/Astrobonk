@@ -1,6 +1,7 @@
 //! Cross-module messages (Bevy 0.18 Message API).
 
 use crate::content::enemies::EnemyKind;
+use crate::content::weapons::WeaponKind;
 use bevy::prelude::*;
 
 /// Damage dealt to an enemy-side entity (enemies, bosses, pots). `amount` is final.
@@ -14,6 +15,10 @@ pub struct HitMsg {
     pub amount: f32,
     pub crit: bool,
     pub knock: Vec3,
+    /// The weapon that dealt it (`None` for items, techs, thorns, the world). What a hit
+    /// DOES beyond damage keys off it — a Whoopee's stun, a bell's mark, a cryo vent's own
+    /// slow — and so does the §13 hitstop's evolved-weapon bonus.
+    pub weapon: Option<WeaponKind>,
 }
 
 /// Player took a hit (pre-mitigation).
@@ -88,6 +93,15 @@ pub enum Sfx {
     Grind,
     Blink,
     Flashlight,
+    // ---- §8 world gimmicks ----
+    Thorns,
+    Spore,
+    SporePop,
+    // ---- §6 Tier-1 weapons ----
+    Toll,
+    Whoopee,
+    Splat,
+    Discharge,
     // ---- §9 new enemies (P08) ----
     /// A Sunskimmer commits to its dive.
     Whine,

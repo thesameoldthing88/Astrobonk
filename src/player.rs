@@ -23,6 +23,9 @@ pub struct Player {
     pub slide_timer: f32,
     pub slide_cd: f32,
     pub land_timer: f32, // time since landing (for bhop window)
+    /// Grace after leaving footing without jumping, in which a jump still counts as from the
+    /// ground. Height is terrain-relative, so walking never leaves the ground; running off
+    /// the end of a Grind-Line (which rides GRIND_RAIL_LIFT above it) is what uses this.
     pub coyote: f32,
     // --- animation state (see the code-art-animation skill) ---
     pub stride: f32,     // gait phase, advanced by DISTANCE so feet don't skate
@@ -72,10 +75,15 @@ pub fn nearest_astronaut(from_dir: Vec3, list: &[AstronautSnap], radius: f32) ->
 #[derive(Component, Clone, Copy, Debug)]
 pub struct InputIntent {
     pub wish: Vec3,       // desired move dir, world-space tangent, normalized
-    pub forward: Vec3,    // camera forward (tangent) — drives facing/aim
+    /// Camera forward (tangent). Aim is auto-target / `Player.facing`, not this; it is the
+    /// axis an Antipode Blink turns momentum about (`techs::blink_body`).
+    pub forward: Vec3,
     pub jump: bool,       // edge-triggered (true only on the frame pressed)
     pub slide: bool,      // edge-triggered
-    pub interact: bool,   // edge-triggered
+    /// Edge-triggered. Carried to the host for a joiner; the local E press is still read
+    /// straight from the keyboard by `interact::interact_system` until P14 routes the
+    /// interactables through this.
+    pub interact: bool,
     pub jump_held: bool,  // level: jump is down this frame (Anti-Grav Boots hover)
     pub slide_held: bool, // level: slide is down (a hold in the air commits the Slam)
     pub blink: bool,      // edge-triggered: Antipode Blink
@@ -163,11 +171,15 @@ pub struct CamRig {
     /// A teleport glide in flight: the focus it left from, seconds into it, and the axis
     /// of the great circle it sweeps along (fixed at the start — see `glide_axis`).
     pub glide: Option<(Vec3, f32, Vec3)>,
+    /// Where the camera stands WITHOUT shake — what the easing follows and what it aims
+    /// from. Easing from the shaken transform would feed each frame's shake into the next
+    /// aim: rotational jitter, the thing the camera law forbids.
+    pub unshaken: Option<Vec3>,
 }
 
 impl Default for CamRig {
     fn default() -> Self {
-        Self { forward: Vec3::NEG_Z, pitch: 0.55, last_body: None, focus: Vec3::ZERO, glide: None }
+        Self { forward: Vec3::NEG_Z, pitch: 0.55, last_body: None, focus: Vec3::ZERO, glide: None, unshaken: None }
     }
 }
 
@@ -265,6 +277,7 @@ pub fn spawn_player(
             crate::comet::CometState::default(),
             crate::items::ItemProcs::default(),
             crate::techs::MoveTech::default(),
+            crate::arsenal::WeaponProcs::default(),
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
@@ -272,6 +285,7 @@ pub fn spawn_player(
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 crate::net::NetItemVis::default(),
+                crate::arsenal::NetWeaponVis::default(),
                 bevy_replicon::prelude::Replicated,
             ),
             Transform::from_translation(pos),
@@ -280,7 +294,7 @@ pub fn spawn_player(
         ))
         .insert_if(LocalPlayer, || is_local)
         .id();
-    build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor);
+    build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor, is_local);
 }
 
 /// Which hero's suit an astronaut's rig was built in. Compared against the sheet by
@@ -295,16 +309,16 @@ pub fn refit_astronaut_rigs(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut q: Query<(Entity, &PlayerState, &mut RigHero)>,
+    mut q: Query<(Entity, &PlayerState, &mut RigHero, Has<LocalPlayer>)>,
 ) {
-    for (e, ps, mut rig) in &mut q {
+    for (e, ps, mut rig, local) in &mut q {
         if rig.0 == ps.character {
             continue;
         }
         rig.0 = ps.character;
         let def = ps.character.def();
         commands.entity(e).despawn_related::<Children>();
-        build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor);
+        build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, local);
     }
 }
 
@@ -314,6 +328,13 @@ pub fn refit_astronaut_rigs(
 /// `StageScoped` — a replicated entity is owned by the server, and giving it a `Player`
 /// would both stomp its network-driven transform in `player_physics` and break the many
 /// `.single()` player queries across the codebase.
+///
+/// The meshes, and the materials that only depend on the suit's colours, are built once per
+/// session and shared by every rig (L9: each astronaut, on every stage entry and every
+/// re-suit, used to allocate its own eight meshes and five materials). Only the flashlight
+/// lens stays per-astronaut: its glow follows that astronaut's own F switch. And only the
+/// `local` astronaut's flashlight casts shadows — with four players, every teammate's beam
+/// rendered its own spot shadow map on top of the sun's cascades.
 pub fn build_astronaut_rig(
     commands: &mut Commands,
     root: Entity,
@@ -321,21 +342,36 @@ pub fn build_astronaut_rig(
     materials: &mut Assets<StandardMaterial>,
     suit_color: Color,
     visor_color: Color,
+    local: bool,
 ) {
-    let suit = materials.add(StandardMaterial {
+    let suit = rig_material(materials, RigMat::Suit, suit_color, || StandardMaterial {
         base_color: suit_color,
         perceptual_roughness: 0.7,
         ..default()
     });
-    let visor = materials.add(StandardMaterial {
+    let visor = rig_material(materials, RigMat::Visor, visor_color, || StandardMaterial {
         base_color: visor_color,
         emissive: visor_color.to_linear() * 1.2,
         perceptual_roughness: 0.15,
         ..default()
     });
-    let pack = materials.add(StandardMaterial {
+    let pack = rig_material(materials, RigMat::Pack, Color::WHITE, || StandardMaterial {
         base_color: Color::srgb(0.8, 0.8, 0.85),
         perceptual_roughness: 0.9,
+        ..default()
+    });
+    let torso_mesh = rig_mesh(meshes, RigMesh::Torso, astronaut_torso_mesh);
+    let backpack = rig_mesh(meshes, RigMesh::Backpack, backpack_mesh);
+    let helmet = rig_mesh(meshes, RigMesh::Helmet, || Mesh::from(Sphere::new(0.3)));
+    let visor_mesh = rig_mesh(meshes, RigMesh::Visor, || Mesh::from(Sphere::new(0.24)));
+    let arm_mesh = rig_mesh(meshes, RigMesh::Arm, astronaut_arm_mesh);
+    let leg_mesh = rig_mesh(meshes, RigMesh::Leg, astronaut_leg_mesh);
+    let tool_mesh = rig_mesh(meshes, RigMesh::Tool, || Mesh::from(Cuboid::new(0.14, 0.16, 0.68)));
+    let lens_mesh = rig_mesh(meshes, RigMesh::Lens, || Mesh::from(Cuboid::new(0.09, 0.09, 0.2)));
+    let tool_mat = rig_material(materials, RigMat::Tool, Color::WHITE, || StandardMaterial {
+        base_color: Color::srgb(0.25, 0.27, 0.32),
+        perceptual_roughness: 0.5,
+        metallic: 0.6,
         ..default()
     });
 
@@ -349,12 +385,12 @@ pub fn build_astronaut_rig(
             ))
             .with_children(|b| {
                 b.spawn((
-                    Mesh3d(meshes.add(astronaut_torso_mesh())),
+                    Mesh3d(torso_mesh),
                     MeshMaterial3d(suit.clone()),
                     Transform::IDENTITY,
                 ));
                 b.spawn((
-                    Mesh3d(meshes.add(backpack_mesh())),
+                    Mesh3d(backpack),
                     MeshMaterial3d(pack),
                     Transform::from_xyz(0.0, 0.18, 0.0),
                 ));
@@ -369,20 +405,18 @@ pub fn build_astronaut_rig(
             ))
             .with_children(|h| {
                 h.spawn((
-                    Mesh3d(meshes.add(Mesh::from(Sphere::new(0.3)))),
+                    Mesh3d(helmet),
                     MeshMaterial3d(suit.clone()),
                     Transform::IDENTITY,
                 ));
                 h.spawn((
-                    Mesh3d(meshes.add(Mesh::from(Sphere::new(0.24)))),
+                    Mesh3d(visor_mesh),
                     MeshMaterial3d(visor),
                     Transform::from_xyz(0.0, 0.02, -0.16).with_scale(Vec3::new(1.05, 0.85, 0.7)),
                 ));
             });
 
             // ---- LIMB joints: arms pivot at shoulders, legs at hips ----
-            let arm_mesh = meshes.add(astronaut_arm_mesh());
-            let leg_mesh = meshes.add(astronaut_leg_mesh());
             for (limb, x, y, mesh) in [
                 (Limb::ArmL, -0.34, 0.42, arm_mesh.clone()),
                 (Limb::ArmR, 0.34, 0.42, arm_mesh),
@@ -405,14 +439,8 @@ pub fn build_astronaut_rig(
                 ));
             }
             // hand tool (whatever weapon is equipped, this is its silhouette)
-            let tool_mat = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.25, 0.27, 0.32),
-                perceptual_roughness: 0.5,
-                metallic: 0.6,
-                ..default()
-            });
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.14, 0.16, 0.68)))),
+                Mesh3d(tool_mesh),
                 MeshMaterial3d(tool_mat),
                 Transform::from_xyz(0.42, 0.12, -0.28),
             ));
@@ -424,7 +452,7 @@ pub fn build_astronaut_rig(
                 ..default()
             });
             p.spawn((
-                Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.09, 0.09, 0.2)))),
+                Mesh3d(lens_mesh),
                 MeshMaterial3d(lens_mat.clone()),
                 FlashlightLens { mat: lens_mat, on: true },
                 Transform::from_xyz(0.42, 0.24, -0.52),
@@ -442,13 +470,61 @@ pub fn build_astronaut_rig(
                     radius: 0.05,
                     inner_angle: 0.22,
                     outer_angle: 0.55,
-                    shadows_enabled: true,
+                    shadows_enabled: local,
                     ..default()
                 },
                 Transform::from_xyz(0.42, 0.3, -0.5)
                     .with_rotation(Quat::from_rotation_x(-0.10)),
             ));
         });
+}
+
+/// The rig's shared meshes, one stable handle each (see `build_astronaut_rig`).
+#[derive(Clone, Copy)]
+enum RigMesh {
+    Torso,
+    Backpack,
+    Helmet,
+    Visor,
+    Arm,
+    Leg,
+    Tool,
+    Lens,
+}
+
+/// Which slot of the rig a shared material fills (half of its cache key; the colour is the
+/// other half).
+#[derive(Clone, Copy, Hash)]
+enum RigMat {
+    Suit,
+    Visor,
+    Pack,
+    Tool,
+}
+
+/// The high half of the rig's shared-asset UUIDs.
+const RIG_ASSET_UUID_HI: u64 = 0xA570_B0_7E_2169_0001;
+
+fn rig_mesh(meshes: &mut Assets<Mesh>, which: RigMesh, build: impl FnOnce() -> Mesh) -> Handle<Mesh> {
+    let h = Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(RIG_ASSET_UUID_HI, which as u64), default());
+    let _ = meshes.get_or_insert_with(&h, build);
+    h
+}
+
+fn rig_material(
+    materials: &mut Assets<StandardMaterial>,
+    which: RigMat,
+    color: Color,
+    build: impl FnOnce() -> StandardMaterial,
+) -> Handle<StandardMaterial> {
+    use std::hash::{Hash, Hasher};
+    let mut key = std::collections::hash_map::DefaultHasher::new();
+    which.hash(&mut key);
+    color.to_srgba().to_u8_array().hash(&mut key);
+    // keep clear of the mesh ids (small integers) by setting the top bit
+    let h = Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(RIG_ASSET_UUID_HI, key.finish() | 1 << 63), default());
+    let _ = materials.get_or_insert_with(&h, build);
+    h
 }
 
 /// The astronaut's TORSO only — limbs are separate joint entities so they can be
@@ -516,8 +592,9 @@ fn backpack_mesh() -> Mesh {
 }
 
 /// WASD + jump + slide, in the camera's tangent frame.
-/// Read keyboard/mouse into the LOCAL astronaut's intent. This is the only place
-/// hardware input is read; everything downstream consumes `InputIntent`.
+/// Read the keyboard into the LOCAL astronaut's movement intent; movement, the techs and
+/// the joiner's input packet all consume `InputIntent`. (Panels, E at an interactable, the
+/// camera's mouse look and the `--dev` keys still read the hardware themselves.)
 pub fn gather_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     rig: Res<CamRig>,
@@ -724,7 +801,8 @@ pub fn player_physics(
     props: Res<crate::planet::PropColliders>,
     global: Res<RunState>,
     lines: Res<crate::techs::GrindLines>,
-    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    flora: Res<crate::gimmicks::WorldFlora>,
+    (mut telemetry, mut gimmicks): (ResMut<crate::items::ItemTelemetry>, ResMut<crate::gimmicks::GimmickTelemetry>),
     mut sfx: MessageWriter<crate::messages::SfxMsg>,
     mut q: Query<(
         &mut Player,
@@ -740,6 +818,7 @@ pub fn player_physics(
     if dt <= 0.0 {
         return;
     }
+    let sun = crate::daynight::Sun::of(&global);
     for (mut p, mut run, mut procs, mut tech, intent, mut tf, is_local) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
@@ -829,6 +908,19 @@ pub fn player_physics(
         }
     }
 
+    // Mars's thorn flora (§8): wading through a bush drags you down to THORN_SLOW of your
+    // speed (`move_speed_mult`), lingering a moment after you leave it; a jump clears it.
+    if !run.dead && flora.thorn_contact(p.dir, p.height, PLAYER_RADIUS, planet.radius) {
+        if run.thorned <= 0.0 {
+            gimmicks.thorn_snags += 1;
+            if is_local {
+                sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Thorns));
+            }
+        }
+        run.thorned = THORN_LINGER;
+        gimmicks.thorn_secs += dt;
+    }
+
     // terrain contact
     if p.height <= 0.0 {
         if !p.grounded {
@@ -904,8 +996,9 @@ pub fn player_physics(
     // altitude above the core, so a crater slope and a fall both count as descent
     run.descent_m = procs.track_descent(planet.surface(p.dir) + p.height, dt);
     telemetry.max_descent = telemetry.max_descent.max(run.descent_m);
-    // Tome of Nightfall reads the side of the planet we stand on…
-    run.night = crate::planet::is_night(p.dir, global.sun_shrink);
+    run.thorned = (run.thorned - dt).max(0.0);
+    // Tome of Nightfall reads the side of the planet we stand on (the one sun, `daynight`)…
+    run.night = sun.is_night(p.dir);
     // …and Tome of Momentum how long we have kept moving (airborne counts: a bunny-hop
     // chain is the purest momentum there is)
     run.momentum = if p.vel_t.length() >= MOMENTUM_MIN_SPEED && !run.dead {
@@ -1128,9 +1221,11 @@ pub fn camera_rig(
             }
         }
         _ => {
-            // a new body (stage start): take it where it stands
+            // a new body (stage start): take it where it stands, easing from wherever the
+            // (possibly new) camera is
             rig.focus = body;
             rig.glide = None;
+            rig.unshaken = None;
         }
     }
     rig.last_body = Some((pe, body));
@@ -1188,7 +1283,8 @@ pub fn camera_rig(
     }
 
     let k = 1.0 - (-CAM_STIFFNESS * dt).exp();
-    let pos = cam.translation.lerp(target_pos, k);
+    let pos = rig.unshaken.unwrap_or(cam.translation).lerp(target_pos, k);
+    rig.unshaken = Some(pos);
 
     // Aim from the UNSHAKEN position so shake never becomes rotational jitter,
     // and never re-aim across a degenerate (near-zero) look vector.
@@ -1198,13 +1294,12 @@ pub fn camera_rig(
         cam.look_at(look_at, up);
     }
 
-    // positional-only screenshake, applied after aiming (scaled by the settings slider)
-    let tr = shake.trauma * shake.trauma * save.shake_scale;
-    if tr > 0.001 {
-        let t = (time.elapsed_secs() % 60.0) * 33.0;
-        cam.translation += (t.sin() * 0.12 + (t * 1.7).cos() * 0.09) * tr * fwd.cross(up)
-            + ((t * 1.3).cos() * 0.10) * tr * up;
-    }
+    // positional-only screenshake, applied after aiming (scaled by the settings slider) and
+    // hard-clamped at the camera: the offset never subtends more than SHAKE_MAX_DEG about
+    // the point we look at (§13), however much trauma the sources pile up
+    let t = (time.elapsed_secs() % 60.0) * 33.0;
+    let (right, cam_up) = (cam.right().as_vec3(), cam.up().as_vec3());
+    cam.translation += crate::fx::shake_offset(shake.trauma, save.shake_scale, t, right, cam_up, (look_at - pos).length());
 }
 
 /// Lock the cursor while playing, free it for menus/panels.

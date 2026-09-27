@@ -282,6 +282,8 @@ pub struct BestiaryTelemetry {
     pub aegis_open_hits: u32,
     pub skim_dives: u32,
     pub skim_blasts: u32,
+    /// Divers shoved off their line by a stun (they crash harmlessly).
+    pub skim_fizzles: u32,
     pub skim_blast_hits: u32,
     pub ticks_latched: u32,
     pub mimic_springs: u32,
@@ -434,8 +436,9 @@ pub fn rollo_roll(
     planet: Res<CurrentPlanet>,
     props: Res<PropColliders>,
     particles: Option<Res<ParticleAssets>>,
+    run: Res<RunState>,
     q_player: Query<(Entity, &Player, &PlayerState), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &mut self::Rollo, &mut EnemyVis), Without<Buried>>,
+    mut q: Query<(Entity, &mut Enemy, &mut self::Rollo, &mut EnemyVis, Has<crate::enemies::Stunned>), Without<Buried>>,
     mut hits: MessageWriter<HitMsg>,
     mut telemetry: ResMut<BestiaryTelemetry>,
 ) {
@@ -443,13 +446,22 @@ pub fn rollo_roll(
     if dt <= 0.0 {
         return;
     }
+    // it steers itself (it skips `enemy_move`), so it takes the §4 night pace here
+    let sun = crate::daynight::Sun::of(&run);
     let marks: Vec<Vec3> = q_player.iter().filter(|(_, _, ps)| !ps.dead).map(|(_, p, _)| p.dir).collect();
-    for (entity, mut e, mut r, mut vis) in &mut q {
+    for (entity, mut e, mut r, mut vis, stunned) in &mut q {
         enemies::tick_enemy(&mut e, dt);
         if r.bite <= 0.0 {
             r.bite = e.damage.max(0.01);
         }
         let up = e.dir;
+        // a Whoopee shove (P12's `Stunned`) dazes it like a bonk: uncurled, harmless, still
+        if stunned {
+            e.contact_cd = e.contact_cd.max(0.3);
+            vis.state = EnemyVis::STUNNED;
+            vis.heading = r.heading;
+            continue;
+        }
         if r.stun > 0.0 {
             r.stun -= dt;
             // dizzy, uncurled: harmless until it rolls again
@@ -477,7 +489,7 @@ pub fn rollo_roll(
             .clamp(ROLLO_MIN_SPEED, ROLLO_MAX_SPEED);
         telemetry.rollo_max_speed = telemetry.rollo_max_speed.max(r.speed);
         let rad = planet.surface(up);
-        let (next, vel) = sphere::advance(up, r.heading * r.speed * (1.0 - e.slow), rad, dt);
+        let (next, vel) = sphere::advance(up, r.heading * r.speed * (1.0 - e.slow) * sun.enemy_speed(up), rad, dt);
         let rock = props.resolve(next, 0.0, e.scale * 0.5, planet.radius);
         let wall = grade > ROLLO_WALL_GRADE;
         if (wall || rock.is_some()) && r.speed > ROLLO_BONK_SPEED {
@@ -486,7 +498,7 @@ pub fn rollo_roll(
             r.speed = ROLLO_MIN_SPEED;
             r.heading = -r.heading;
             telemetry.rollo_bonks += 1;
-            hits.write(HitMsg { source: None, target: entity, amount: e.max_hp * ROLLO_BONK_SELF, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: None, target: entity, amount: e.max_hp * ROLLO_BONK_SELF, crit: false, knock: Vec3::ZERO, weapon: None });
             if let Some(pa) = &particles {
                 fx::burst(&mut commands, pa, planet.surface_point(up) + up * e.scale * 0.5, up, Pcolor::White, 10, 5.0);
             }
@@ -520,10 +532,11 @@ pub fn trencher_update(
     assets: Res<EnemyAssets>,
     particles: Option<Res<ParticleAssets>>,
     mut q_astro: Query<(Entity, &mut Player, &PlayerState, &PlayerId, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &mut self::Trencher, &mut EnemyVis), Without<Player>>,
+    mut q: Query<(Entity, &mut Enemy, &mut self::Trencher, &mut EnemyVis, Has<crate::enemies::Stunned>), Without<Player>>,
     mut hits: MessageWriter<PlayerHitMsg>,
     mut fx_out: MessageWriter<BestiaryFxMsg>,
     mut telemetry: ResMut<BestiaryTelemetry>,
+    run: Res<RunState>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -535,7 +548,8 @@ pub fn trencher_update(
         .map(|(en, p, _, pid, tf)| Mark { entity: en, pid: pid.0, dir: p.dir, pos: tf.translation, vel: p.vel_t, height: p.height })
         .collect();
     let mut launches: Vec<Entity> = Vec::new();
-    for (entity, mut e, mut t, mut vis) in &mut q {
+    let sun = crate::daynight::Sun::of(&run);
+    for (entity, mut e, mut t, mut vis, stunned) in &mut q {
         match t.phase {
             EnemyVis::SINKING => {
                 t.timer -= dt;
@@ -555,7 +569,7 @@ pub fn trencher_update(
                 let close = match mark {
                     Some(m) => {
                         t.target = Some(m.entity);
-                        let step = TRENCH_TUNNEL_SPEED * (1.0 - e.slow) * dt / planet.surface(e.dir);
+                        let step = TRENCH_TUNNEL_SPEED * (1.0 - e.slow) * sun.enemy_speed(e.dir) * dt / planet.surface(e.dir);
                         e.dir = sphere::step_toward(e.dir, m.dir, step);
                         sphere::arc_dist(e.dir, m.dir, planet.radius) < 1.0
                     }
@@ -610,9 +624,10 @@ pub fn trencher_update(
                 }
             }
             _ => {
-                // surfaced: `enemy_move` walks it in; dive once a mark is in reach
+                // surfaced: `enemy_move` walks it in; dive once a mark is in reach — never while
+                // reeling from a stun (it can only be stunned up here: buried, nothing reaches it)
                 t.cd -= dt;
-                if t.cd <= 0.0 {
+                if t.cd <= 0.0 && !stunned {
                     if let Some(m) = nearest_mark(e.dir, &marks, planet.radius) {
                         let arc = sphere::arc_dist(e.dir, m.dir, planet.radius);
                         if (TRENCH_MIN_ARC..=TRENCH_DIVE_ARC).contains(&arc) {
@@ -652,9 +667,10 @@ pub fn skimmer_update(
     particles: Option<Res<ParticleAssets>>,
     mut shake: ResMut<Shake>,
     q_astro: Query<(Entity, &Player, &PlayerState, &PlayerId, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &mut Skimmer, &mut EnemyVis)>,
+    mut q: Query<(Entity, &mut Enemy, &mut Skimmer, &mut EnemyVis, Has<crate::enemies::Stunned>)>,
     mut hits: MessageWriter<PlayerHitMsg>,
     mut telemetry: ResMut<BestiaryTelemetry>,
+    run: Res<RunState>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -666,14 +682,33 @@ pub fn skimmer_update(
         .filter(|(_, _, ps, ..)| !ps.dead)
         .map(|(en, p, _, pid, tf)| Mark { entity: en, pid: pid.0, dir: p.dir, pos: tf.translation, vel: p.vel_t, height: p.height })
         .collect();
-    for (entity, mut e, mut s, mut vis) in &mut q {
+    let sun = crate::daynight::Sun::of(&run);
+    for (entity, mut e, mut s, mut vis, stunned) in &mut q {
         enemies::tick_enemy(&mut e, dt);
         // no contact bite: its blast is the attack
         e.contact_cd = e.contact_cd.max(0.5);
         let up = e.dir;
+        if s.diving && stunned {
+            // shoved off its line mid-dive (P12's Whoopee stun): it loses the plunge and crashes
+            // where it is — no blast, and its landing ring dies with it
+            pop(&mut commands, &assets, &planet, e.dir);
+            if let Some(pa) = &particles {
+                fx::burst(&mut commands, pa, planet.surface_point(e.dir) + e.dir * s.alt, e.dir, Pcolor::White, 10, 5.0);
+            }
+            telemetry.skim_fizzles += 1;
+            commands.entity(entity).despawn();
+            continue;
+        }
+        if !s.diving && stunned {
+            // reeling at cruise height: it stalls in the air and commits to nothing
+            e.hover = s.alt;
+            vis.state = EnemyVis::CRUISE;
+            vis.alt = s.alt;
+            continue;
+        }
         if !s.diving {
             let Some(m) = nearest_mark(up, &marks, planet.radius) else { continue };
-            let step = e.speed * (1.0 - e.slow) * dt / (planet.surface(up) + s.alt);
+            let step = e.speed * (1.0 - e.slow) * sun.enemy_speed(up) * dt / (planet.surface(up) + s.alt);
             let mut dir = sphere::step_toward(up, m.dir, step);
             if e.knock.length_squared() > 0.001 {
                 dir = sphere::advance(dir, e.knock, planet.surface(dir), dt).0;
@@ -734,7 +769,7 @@ pub fn aegis_turn(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(&Player, &PlayerState), Without<Enemy>>,
-    mut q: Query<(&Enemy, &mut AegisShield, &mut EnemyVis)>,
+    mut q: Query<(&Enemy, &mut AegisShield, &mut EnemyVis), Without<crate::enemies::Stunned>>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -781,7 +816,7 @@ pub fn shield_blocks(at: Vec3, facing: Vec3, knock: Vec3, shooter: Option<Vec3>)
 pub fn tick_latch(
     mut commands: Commands,
     particles: Option<Res<ParticleAssets>>,
-    q_ticks: Query<(Entity, &Enemy, &Transform), Without<Buried>>,
+    q_ticks: Query<(Entity, &Enemy, &Transform), (Without<Buried>, Without<crate::enemies::Stunned>)>,
     mut q_astro: Query<(Entity, &PlayerState, &PlayerId, &Transform, Option<&mut Tracked>), Without<Enemy>>,
     mut fx_out: MessageWriter<BestiaryFxMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -887,7 +922,7 @@ pub fn mimic_flee(
     planet: Res<CurrentPlanet>,
     assets: Res<EnemyAssets>,
     q_player: Query<(&Player, &PlayerState), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &mut Mimic, &mut EnemyVis)>,
+    mut q: Query<(Entity, &mut Enemy, &mut Mimic, &mut EnemyVis), Without<crate::enemies::Stunned>>,
     mut banners: MessageWriter<BannerMsg>,
     mut telemetry: ResMut<BestiaryTelemetry>,
 ) {
@@ -940,7 +975,7 @@ pub fn prime_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform, &mut EnemyVis), (With<PrimeSight>, Without<Buried>)>,
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform, &mut EnemyVis, Has<crate::enemies::Stunned>), (With<PrimeSight>, Without<Buried>)>,
     q_lines: Query<(Entity, &AimLine)>,
     mut telemetry: ResMut<BestiaryTelemetry>,
 ) {
@@ -964,7 +999,18 @@ pub fn prime_attack(
             }
         }
     };
-    for (entity, e, mut b, tf, mut vis) in &mut q {
+    for (entity, e, mut b, tf, mut vis, stunned) in &mut q {
+        // a stunned Prime loses its lock, like any Beamer: the telegraph drops rather than
+        // hanging frozen and firing the moment the stun wears off
+        if stunned {
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
+            vis.state = EnemyVis::IDLE;
+            continue;
+        }
         let latched = b.target.filter(|_| b.charging > 0.0).and_then(|t| all.iter().copied().find(|(m, _)| m.entity == t));
         if let Some((_, true)) = latched {
             // the mark ducked into the dust: the telegraph was for them, hold fire

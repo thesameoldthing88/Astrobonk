@@ -154,6 +154,7 @@ All flags are plain `std::env::args()` tokens; there is no argument parser. Seve
 | `--autopick` | none | Windowed | Takes option 1 of every card panel and closes chest/shop panels immediately | `src/main.rs:166-171,455-480` |
 | `--stagenow` | none | Windowed | Boot tier becomes 3 (Moon, Mars, Dark Moon) and, about 20 s into stage 1, the host requests stage 2 | `src/main.rs:160-165,381-385,484-500` |
 | `--bossnow` | none | Windowed | On the first in-run frame (host or solo), winds the clock to `BOSS_MARK + 4` s and marks both minibosses as spawned | `src/main.rs:504-520` |
+| `--warp` (with `--dev`) | `noon`, `dusk` or `night` | Windowed | A second into the run, sets the local astronaut (host/solo only) where the sun stands high, just on the lit side of the terminator, or deep in the night, facing away from the sun — the toon look's windowed checks (section 16.9) | `dev_warp` in `src/main.rs` |
 
 ### 3.2 Flag interactions and traps
 
@@ -244,7 +245,6 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `--headless 2400 --coop2` | Host correctness with two `Player`/`PlayerState` astronauts: shared XP, per-player targeting, run continues while one player is alive. Before Stage 3 this path showed a frozen clock and 0 kills | Anything on the wire; the second astronaut is not driven by `InputIntent` | Pass (last run as `--headless --coop2`, i.e. 1500 ticks) |
 | `--headless 1200 --fast-boss` | The boss spawns at the boss mark and the late-game mix (Beamer, Lobber, UFO, Burrower) runs without panicking | That the bot can fight: today it dies at level 1 with 0 kills and still passes, because the kill check is skipped | Pass (weak) |
 | `--headless 1200 --fast-boss --coop2` | Same, with two astronauts | | Flaky, 1 of 3 passed, because of the summary-query bug above |
-| `--headless 1200 --bestiary [all\|rollo,trencher,aegis,skimmer,tick,mimic,prime] [--coop2] [--planet …]` (P08) | The §9 batch-1 kinds through the real systems, with the bot pinned and disarmed: Aegis blocks a frontal hit and takes a flank one; Rollo bonks into a rock and never out-turns its cap; a Trencher tunnels out of the hash under a ridge and launches a grounded astronaut, spares an airborne one, and its ring dies with it; a Sunskimmer at altitude sits in the hash at weapon height and blasts its mark; a Beacon Tick tracks and runs out; a Mimic eats the price, shockwaves, flees, refunds its payer (with `--coop2`, a PEER's purse and grant) or digs out; a Beamer Prime leads a running mark. RULES adds the spawn tables and the enemy-state lane round-trip | Client drawing (use coop.sh with `--dev --enemies all`) | Pass (new) |
 | `--headless ... --planet mars` | Dust storm spawns and blows (the first storm comes 10 s in); with `--fast-boss` added, Anubot and the Verdict Beam run (a plain 2400-tick run ends about 79 s into a 600 s stage, long before the 90 s boss mark) | | Not re-run for this document |
 
 ### 4.6 Limitations
@@ -266,6 +266,7 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `src/headless.rs` | 382 | Smoke harness | Section 4 |
 | `src/sphere.rs` | 176 | Spherical math and the analytic terrain | `hills` `:26-37`; `hash_dir` `:59-68`; `Terrain` `:72-111`; `tangent_frame` `:114-119`; `frame_quat` `:122-126`; `step_toward` `:130-137`; `advance` `:141-151`; `arc_dist` `:154-156`; `offset_dir` `:159-165`; `fib_sphere` `:168-176` |
 | `src/planet.rs` | 517 | Stage world: `StageScoped`, prop colliders, `CurrentPlanet`, the terrain mesh, prop/flora/sky/sun spawning | `PropColliders::resolve` `:33-55`; `CurrentPlanet` `:59-89`; `despawn_stage` `:91-95`; `planet_mesh` `:98-130`; `spawn_stage` `:143-503`; `random_dir` `:505-517` |
+| `src/toon.rs` | 440 | The toon look (P36): `ToonPlugin`, the bevy_pbr lighting patch, the ink/rim render-graph pass (`src/toon_outline.wgsl`), per-world grading, the camera bundle | Section 16.9 |
 | `src/meshkit.rs` | 224 | Procedural mesh compositor (bakes primitives into one vertex-coloured `Mesh`) and `icosphere()` | `MeshData` `:13-173`; `icosphere` `:182-224` |
 | `src/player.rs` | 875 | The astronaut: components, spawning, the rig, local input gathering, movement and physics, the animator, the camera, cursor lock, per-player upkeep | Section 8; `spawn_player` `:117-175`; `build_astronaut_rig` `:183-313`; `gather_local_input` `:382-414`; `player_input` `:418-520`; `player_physics` `:523-589`; `animate_rig` `:617-706`; `camera_rig` `:747-824`; `cursor_control` `:827-839`; `player_upkeep` `:842-875` |
 | `src/enemies.rs` | 1663 | The horde and bosses: components, assets, spatial hash, spawn director, steering, crowd animation, every enemy attack, the Craterpillar and Anubot, telegraphs, hit-flash, the DEV boss key | `director_spawn` `:539-626`; `spawn_boss` `:628-714`; `enemy_move` `:1019-1121`; `animate_crowd` `:1129-1193` |
@@ -310,6 +311,7 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `net::NetPlugin` | `src/net.rs:341-458` | `RepliconPlugins`, `RepliconRenetPlugins`, replication rules, all wire messages, identity, run sync, build sync, grants, input routing, seating, `--netlog` |
 | `remote::RemoteVisualsPlugin` | `src/remote.rs:43-57` | Teammate rigs on clients |
 | `netenemy::EnemyStreamPlugin` | `src/netenemy.rs:150-222` | Stream lanes and the client proxy chain |
+| `toon::ToonPlugin` | `src/toon.rs` | Cel lighting patch, ink/rim pass (render app: `RenderStartup` pipeline, `InkNode` between tonemapping and FXAA), per-world grade, sun tracking. Windowed only |
 | `playlog::PlayLogPlugin` | `src/playlog.rs:50-83` | Session log and panic hook (the log file is opened in `build`, before the app runs) |
 
 Everything else is registered directly in `main()` (`src/main.rs:90-333`).
@@ -1055,7 +1057,7 @@ This section states the rules exactly as the code applies them. Design intent li
 
 ### 11.2 THE STATIC
 
-When the timer reaches 0, `static_active` becomes true and `run_clock` thereafter only advances `static_timer`, `elapsed` and `total_elapsed` and returns early (`src/director.rs:55-59`). Consequences: no further marks, and **a boss killed during the Static never opens the teleporter** (the teleporter check sits after the early return). The spawner emits only `Ghost` enemies at `10 + 0.15·static_timer` per second (times party scale); ghosts give no XP and drop 1 silver half the time (`src/pickups.rs:329-333`). The music detunes (section 17). `counters.static_secs_best` banks the longest Static of the **last** stage only (`src/director.rs:290`).
+When the timer reaches 0, `static_active` becomes true and `run_clock` thereafter only advances `static_timer`, `elapsed` and `total_elapsed` and returns early (`src/director.rs:55-59`). Consequences: no further marks, and **a boss killed during the Static never opens the teleporter** (the teleporter check sits after the early return). The spawner emits only `Ghost` enemies at `10 + 0.15·static_timer` per second (times party scale); ghosts give no XP and drop 1 silver half the time (`src/pickups.rs:329-333`). The music detunes (section 17). `counters.static_secs_best` banks the longest single Static stretch of the run, on any stage (`RunState::static_secs_peak`, P30; it used to bank the last stage only).
 
 ### 11.3 The spawn director
 
@@ -1069,28 +1071,20 @@ rate     = (1 + 2.1 · elapsed/60) · (1 + difficulty) · P                  nor
 spawn_bank += rate · dt ; every 0.25 s spawn floor(spawn_bank), limited to room = floor(1200·P) - live Enemy count
 ```
 
-- The cap counts every `Enemy`, so pots (60 on the Moon) and bosses use cap slots. Overflow is discarded, not banked.
+- **Superseded by P01/P30** (the formulas above are the pre-P01 ones; `run::scaling` holds the §3 model): the cap counts the crowd only (no pots, no bosses). At the cap the overflow valve (GDD §9) dissolves crowd enemies more than `STATIC_RECYCLE_ARC` from every astronaut into The Static, farthest first, and spawns the budget over the players' horizon; what still does not fit is banked per stage in `Director::static_backlog` and drains as extra ghosts once The Static rises. `--overflow` stages it headlessly.
 - Each spawn round-robins over the anchors, picks a uniform heading, and places the enemy 42-58 m of arc out (over the horizon). Burrowers instead appear 9-16 m away.
-- The kind is picked from the **world's spawn table** (`content::enemies::spawn_table`, P08): each row is `(kind, join, weight, cap, can_elite)`. `pick_spawn` draws once per spawn over the rows that have joined by `elapsed` (stage seconds) and are under their live cap (`cap × PARTY_SPAWN_SCALE[P]`, counted over the live horde by kind), weighted. The built eight share one arc on every world at weight 1; each world adds its GDD §9 kinds:
+- The kind is uniform over `EnemyKind::mix(..)` (`src/content/enemies.rs`). Since P30 its clock is `run::scaling::mix_secs` (the 10:00 countdown position plus 60 s per chain depth), not the per-stage `elapsed`, so a chained world no longer restarts at Shamblers:
 
-| `elapsed` (s) | Every world | Moon | Mars | Dark Moon |
-|---|---|---|---|---|
-| 0 | Shambler | | | |
-| 90 | + Sprinter | | | |
-| 120 | | | | + Beacon Tick (0.25, cap 3) |
-| 150 | | + Rollo (0.55, cap 8) | | |
-| 180 | + Spitter | | | |
-| 200 | | | + Aegis Drone (0.55, cap 10) | |
-| 240 | | + Beacon Tick (0.22, cap 3) | + Beacon Tick (0.22, cap 3) | |
-| 270 | + Bruiser | | | |
-| 280 | | | + Sunskimmer (0.40, cap 5, never elite) | |
-| 320 | | + Trencher (0.40, cap 6) | | |
-| 360 | + UFO, Beamer | | | |
-| 420 | | | + Longshot Beamer Prime (0.14, cap 2, never elite) | |
-| 450 | + Burrower | | | |
-| 540 | + Lobber | | | |
+| `elapsed` (s) | Mix |
+|---|---|
+| 0-89 | Shambler |
+| 90-179 | + Sprinter |
+| 180-269 | + Spitter |
+| 270-359 | + Bruiser |
+| 360-449 | + UFO, Beamer |
+| 450-539 | + Burrower |
+| 540+ | + Lobber |
 
-  The Mimic Chest is in no table: it is laid out with the chests. A pending elite waits for a row with `can_elite`. The boss phase add rings draw from the same table (at `max(elapsed, 300)`) and respect the per-kind caps.
 - Elites: from `elapsed > 150` each spawn has a 1.2% chance, and a guaranteed elite whenever `elite_timer` (45 s, then every 40 s) expires (`src/enemies.rs:612-616`).
 - All spawn-side randomness here comes from `GameRng` (section 12).
 
@@ -1120,13 +1114,6 @@ Party size scales spawn count only; per-enemy and boss HP do not scale with play
 | Burrower | Spawns buried near the player, rumbles for 1.3 s, erupts | Eruption hits within 2.6 m | `src/enemies.rs:1196-1234` |
 | Enemy projectile | Travels over the sphere; the first astronaut within √1.1 m takes it | | `src/enemies.rs:1522-1558` |
 | Telegraph | Grows over its timer, then detonates | Ring: hits `0.35·r < d < r + 1`; disc: `d < r + 0.6` | `src/enemies.rs:1608-1647` |
-| Rollo (P08) | Rolls a great circle at the nearest astronaut: eases to 7 m/s on the flat, ±16 m/s² per unit of grade, 2-12.5 m/s, turns ≤ 0.9 rad/s; bite scales with speed and it rolls through. Into a crater wall (uphill grade > 0.42) or a rock above 5.5 m/s it bonks: stunned 1.8 s, loses 35% max HP | `ROLLO_*` | `src/bestiary.rs` `rollo_roll` |
-| Trencher (P08) | Surfaced it walks; with a mark 4-20 m off it sinks (0.45 s, `Buried`, out of the hash), tunnels at 8 m/s under a ridge of mounds (≤ 4 s), marks the spot (owned disc, 0.75 s), then uppercuts every GROUNDED astronaut within 3 m for 1.4× its bite and launches them (vel_r 13); airborne ones are spared. 6 s cooldown | `TRENCH_*` | `trencher_update` |
-| Aegis Drone (P08) | Walks in like a melee kind; its shield facing turns toward the nearest astronaut at 1.4 rad/s. Hits whose line (knockback, else the shooter's position) comes from inside its ±66° cone land 10% and show BLOCK | `AEGIS_*` | `aegis_turn`, `combat::apply_hits` |
-| Sunskimmer (P08) | Cruises at 12 m altitude at 11 m/s; within 15 m it commits (owned disc at the mark, led by half the dive), dives 1.3 s and blasts 3.2 m (astronauts over 2.5 m up ride it out), dying with it. Hitbox: the column under it (hash at 1 m), shadow drawn under it, whine for a local astronaut within 38 m | `SKIM_*` | `skimmer_update` |
-| Beacon Tick (P08) | No bite; its touch spends it and tracks the astronaut 6 s: the horde reads them at 0.35× their distance and anything over 30 m from its mark moves 1.35× faster; a blinking beacon over them | `TRACKER_*` | `tick_latch`, `enemies::horde_lure` |
-| Mimic Chest (P08) | 14% of stage chests (layout stream). E with enough gold pays the price into it: it springs, 360° disc shockwave (5 m, 0.45 s, 1.5× bite), flees at 6.8 m/s zig-zagging for 12 s then digs out. Killed: `RefundMsg` pays the price back to the PAYER's purse (a joiner's by `GrantOut::Loot`), plus elite loot | `MIMIC_*` | `mimic_spring`, `mimic_flee`, `pay_refunds` |
-| Longshot Beamer Prime (P08) | Holds 38 m off; paints the nearest visible astronaut within 62 m for 1.6 s (last 0.35 s locked), LEADING them by the bolt's flight; fires a 46 m/s railbolt on a line of fire from its muzzle to the led mark's chest height (`CurveShot`) that any terrain rising above the line stops. Elite loot | `PRIME_*` | `prime_attack`, `enemies::enemy_projectiles` |
 | Dust storm | Spitters, UFOs, Beamers and Lobbers do nothing while the local player is inside a storm (Beamers also drop their aim lines) | | `src/enemies.rs:1284,1342-1350,1456` |
 
 ### 11.6 Bosses
@@ -1803,17 +1790,18 @@ args    : target/release/astrobonk.exe --netlog
 
 ### 16.1 Zero-asset policy
 
-Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` use. Meshes come from Bevy primitives (`Mesh::from(Sphere/Cuboid/Cylinder/Cone/Torus/Capsule3d)`) or the `meshkit` compositor; materials are plain `StandardMaterial`s with no textures; every sound is synthesized into an in-memory WAV (section 17); UI text uses Bevy's built-in default font. Colour comes from material base colours, vertex colours and emissive values driven through HDR bloom.
+Nothing is loaded from disk: there is no `assets/` folder. The one `AssetServer` use is the toon ink shader, compiled into the binary with `embedded_asset!` (section 16.9). Meshes come from Bevy primitives (`Mesh::from(Sphere/Cuboid/Cylinder/Cone/Torus/Capsule3d)`) or the `meshkit` compositor; materials are plain `StandardMaterial`s with no textures; every sound is synthesized into an in-memory WAV (section 17); UI text uses Bevy's built-in default font. Colour comes from material base colours, vertex colours and emissive values driven through HDR bloom.
 
 ### 16.2 Camera and post-processing
 
 | Item | Value | Where |
 |---|---|---|
 | Camera | One `Camera3d` for the whole process, marked `PlayerRig` | `src/main.rs:337-346` |
-| HDR and bloom | `Hdr` component, `Bloom::NATURAL` | same |
+| HDR and bloom | `Hdr` component, `Bloom::NATURAL` at `BLOOM_INTENSITY` 0.1 (0.04 under flash reduction or photosensitivity) with a soft prefilter threshold (`BLOOM_THRESHOLD` 0.6), so only suns, stars, glows and flashes bloom | `setup_camera` in `src/main.rs`; `fx::apply_fx_settings` |
 | Tonemapping | `AcesFitted` | same |
+| Toon look (P36) | `toon::camera_bundle()`: `DepthPrepass` + `NormalPrepass` (read by the ink pass), `Msaa::Off` + `Fxaa`, `ShadowFilteringMethod::Hardware2x2` (crisp cel shadows), `ColorGrading`, `ToonInk`. See 16.9 | `src/toon.rs` |
 | Field of view | Default perspective (π/4); widens ×1.09 while sliding, eased at rate 10 | `src/player.rs:762-770` |
-| Clear colour | Not set, so Bevy's default grey shows behind the starfield. `PlanetDef.sky` exists but is never read | `src/content/planets.rs:35` |
+| Clear colour | `ClearColor` is the stage planet's `PlanetDef.sky`, set by `toon::apply_world_look` whenever `CurrentPlanet` changes (the Moon's sky before any run) | `src/toon.rs` |
 | Chase camera | Distance 7.5, height term `1.28` (`0.4 × CAM_HEIGHT`), pitch 0.12-1.25 rad (default 0.55), eased at stiffness 14 in real time; target clamped 1.2 m above terrain; looks at `player + 1.2·up + 2·forward`; aims from the unshaken position | `src/player.rs:747-824` |
 | Screenshake | Positional only, applied after aiming: `trauma² × shake_scale` × a few sines along right and up. Trauma decays 1.6/s | `src/player.rs:817-823`; `src/fx.rs:7-20` |
 
@@ -1821,7 +1809,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 
 | Light | Settings | Where |
 |---|---|---|
-| Ambient | `GlobalAmbientLight`, colour (0.65, 0.7, 0.9), brightness 80: dim on purpose so the night side is dark | `src/main.rs:81-85` |
+| Ambient | `GlobalAmbientLight`: the night side's only light, re-graded per world from `PlanetKind::look()` (`night`, `night_brightness` 60-70) by `toon::apply_world_look`; dim on purpose so the night side is dark and the flashlight is the read | `src/content/planets.rs`, `src/toon.rs` |
 | Sun | One `DirectionalLight` per stage, planet `sun` colour, 9,000 lux, shadows on, from a **fixed** direction (-0.55, 0.35, -0.75); there is no day/night rotation. A visible unlit sun disc sits 1600 m away | `src/planet.rs:477-500` |
 | Flashlight | Every astronaut rig (local, host-side peers, and client teammate rigs) carries a `SpotLight`: warm white, intensity 6,000,000, range 55 m, inner 0.22 rad, outer 0.55 rad, **shadows on** | `src/player.rs:297-311` |
 | Emissive glow | Visors, crystals, beacon lights, pickups, projectiles, telegraphs, particles, stars, Earth and the sun rely on emissive colour plus bloom | Section 16.5 |
@@ -1844,7 +1832,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 
 **Colour convention.** Vertex colour multiplies the material's base colour: pass `Color::WHITE` for body parts (the material colour shows fully) and darker greys for accents (visors, joints, undersides), so one material per kind still reads as a detailed model (`src/meshkit.rs:5-7`; `BODY`/`DARK`/`MID` at `src/enemies.rs:220-223`).
 
-**Winding caveat (M12, code-derived).** The ±X and ±Y faces of `add_box` and every cylinder and cone triangle appear to be wound clockwise when seen from outside, which with default back-face culling would render those surfaces inside-out (correct silhouette, wrong shading). Not visually confirmed.
+**Winding.** Every helper winds counter-clockwise seen from outside (Bevy's front face); `build_ccw` is now the same as `build`. Until P36 the ±X/±Y box faces and every cylinder and cone triangle were clockwise, so back-face culling drew those surfaces inside-out (M12). The unit test `meshkit::tests::every_shape_winds_outward` guards it (`cargo test meshkit`).
 
 ### 16.5 Materials
 
@@ -1859,7 +1847,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 | Weapons | Per weapon: unlit, alpha-blend, emissive 3× its colour. Aura bubble: alpha 0.12, emissive 0.6×, double-sided, no culling | `src/combat.rs:71-94` |
 | Pickups | Unlit emissive: gem green (big gem blue), coin gold, silver pale blue, food red, powerup purple | `src/pickups.rs:53-70` |
 | Particles | 7 unlit emissive colours (×2.5) | `src/fx.rs:103-129` |
-| Terrain | White base, roughness 0.95, vertex colours | `src/planet.rs:158-163` |
+| Terrain | White base, roughness 0.95, vertex colours in `TOON_TERRAIN_BANDS` flat height steps; shading normals leaned toward the radial (`TOON_TERRAIN_NORMAL_DETAIL`) so the cel bands follow the planet's curve | `planet_mesh`, `toon_height_band`, `toon_terrain_normals` in `src/planet.rs` |
 | Scenery | Rocks (`ground_low`, darker variant), emissive crystals in the planet's `enemy_tint`, metallic wrecks and beacons, unlit red beacon lights, flora pairs per style (GlowShrooms emissive), unlit stars, emissive Earth, unlit sun | `src/planet.rs:172-500` |
 | Astronaut | Per rig: suit (roughness 0.7), emissive visor, backpack, metallic tool, unlit lens (5 materials) | `src/player.rs:191-296` |
 | Interactables | Per spawn: an emissive shape material and a darker pedestal material in the kind's colour; teleporter unlit alpha-blend; charge rings unlit alpha-blend cyan | `src/interact.rs:198-233,275-282,310-317` |
@@ -1911,6 +1899,19 @@ Bosses: the Craterpillar's segments ripple (`sin(3.9t - 0.8i)`, lift `0.40·scal
 | Hurt vignette | Full-screen red with alpha `min(0.55·iframes, 0.4)` | `src/ui/hud.rs:379-381` |
 
 ---
+
+### 16.9 The toon look (P36)
+
+Locked direction #7. Two central mechanisms in `src/toon.rs` (`ToonPlugin`, windowed app only; presentation, never simulation, so it has no net gating and no wire path), so every mesh any system spawns is toon without touching a material site:
+
+| Part | How | Tuning |
+|---|---|---|
+| Cel lighting | `patch_pbr_lighting` rewrites bevy_pbr's `bevy_pbr::lighting` shader module in `Assets<Shader>` once it has loaded (Bevy's hot-reload path recompiles every pipeline that imports it). Three anchored lines: the sun's and point/spot lights' N·L go through `toon_band` (none / mid / full), specular through `toon_spec` (a hard highlight or none), the spot cone through `toon_cone` (outer ring + core). Each anchor must match exactly once or nothing is patched and a `TOON lighting NOT applied` warning is logged; success logs `TOON lighting: bevy_pbr::lighting patched (3 sites)`. Unlit materials never run it. Pure fragment ALU: crowd enemies stay one instanced draw per kind | `TOON_BAND_*`, `TOON_SPEC_EDGE`, `TOON_CONE_*` in `config.rs` |
+| Ink + rim | `InkNode`, a fullscreen render-graph pass between `Node3d::Tonemapping` and `Node3d::Fxaa` (`src/toon_outline.wgsl`, embedded). Silhouettes: second difference of reverse-Z depth relative to the pixel's depth (≈0 on any plane, however grazing). Creases: normal-prepass turn against the four neighbours. Rim: pixels within 2-3 line widths inside a silhouette whose normal faces the sun (`track_sun` feeds the sun direction, colour and Devoured-Sun dimming). Faded out between `TOON_INK_FADE` metres, so the starfield and sun disc never ink. Line width scales with window height; ×`TOON_INK_HIGH_CONTRAST` in the §13 high-contrast mode | `TOON_INK_*`, `TOON_RIM_STRENGTH` |
+| Per-world grade | `PlanetKind::look()` → `ToonLook { ink, night, night_brightness, saturation, exposure }`; `apply_world_look` applies it with `PlanetDef.sky` as the clear colour whenever `CurrentPlanet` changes (enter_run, every stage transition, host and client alike). Exhaustive match: a new planet must pick a look | `src/content/planets.rs` |
+| Terrain | Height colours in flat steps; shading normals leaned toward the radial (16.5) | `TOON_TERRAIN_*` |
+
+Windowed checks: `--dev --warp noon|dusk|night` sets the local astronaut (host/solo) down under a high sun, just inside the terminator, or deep in the night, facing away from the sun (`dev_warp` in `src/main.rs`).
 
 ## 17. Audio and music synthesis
 
@@ -2160,11 +2161,11 @@ General rules for every change: never rename or reorder an enum variant that is 
 
 ### 21.4 Add an enemy
 
-1. `src/content/enemies.rs`: add an `EnemyKind` variant (append), its `EnemyDef` arm (`hp`, `speed`, contact `damage`, `xp`, `scale`, `color`, `hover` (> 0 makes a flier), `standoff` (> 0 makes it hold that arc and strafe)), add it to `EnemyKind::ALL` (wire-code order), give it an `accent()` colour if its mesh has a `set_glow` part, and a row in each world's spawn table (`MOON_TABLE`…) it lives on — `table_self_check` fails a world that lacks its §9 kinds. Behaviour for a kind that needs more than steering goes in `src/bestiary.rs`: `attach` gives it its components (every spawn path calls it), a host system acts, `EnemyVis` carries what a client must see, `bestiary_pose` draws it; spawn through `enemies::spawn_enemy_at` from anywhere else.
+1. `src/content/enemies.rs`: add an `EnemyKind` variant (`:4-14`), its `EnemyDef` arm (`:40-152`: `hp`, `speed`, contact `damage`, `xp`, `scale`, `color`, `hover` (> 0 makes a flier), `standoff` (> 0 makes it hold that arc and strafe)), and add it to the `mix()` windows (`:155-167`).
 2. `src/enemies.rs`: add a mesh arm in `enemy_mesh` (`:226-298`, exhaustive) and add the kind to the list in `setup_enemy_assets` (`:373-383`). This is required: `spawn_enemy` indexes `assets.meshes[&kind]` and `mats[&kind]`. Add per-kind attack components in `spawn_enemy` (`:524-535`).
 3. A special attack is a new component plus a system that snapshots living astronauts first (`AstronautSnap`), targets with `nearest_astronaut`, writes `PlayerHitMsg { victim, .. }`, and spawns hazards with the existing `EnemyProjectile`, `Telegraph` or `MortarShell` components (then they stream to clients with no extra code). Register it in chain D (`src/main.rs:185-214`) with `.run_if(net::is_simulating)` and in `src/headless.rs:246-267`. A ranged attack should respect `DustStorm.player_inside`.
 4. Optional: a per-kind bob and waddle in `animate_crowd` (`src/enemies.rs:1153-1177`).
-5. Co-op: add it to `kind_code` (exhaustive, so the compiler reminds you) **and** `kind_from_code` (the headless `state_lane_self_check` fails a code that does not round-trip in `ALL` order), which silently falls back to Shambler (`src/netenemy.rs:1039-1064`). Keep `scale × 1.65 × 1.1 ≤ 3.25`, the range of the spawn descriptor's scale byte (`src/netenemy.rs:351,1119`). A new hazard type needs a `HazardEvent` variant plus `stream_hazards` and `receive_hazards` arms. Bump `PROTOCOL_ID`.
+5. Co-op: add it to `kind_code` (exhaustive, so the compiler reminds you) **and** `kind_from_code`, which silently falls back to Shambler (`src/netenemy.rs:1039-1064`). Keep `scale × 1.65 × 1.1 ≤ 3.25`, the range of the spawn descriptor's scale byte (`src/netenemy.rs:351,1119`). A new hazard type needs a `HazardEvent` variant plus `stream_hazards` and `receive_hazards` arms. Bump `PROTOCOL_ID`.
 6. Verify: `--headless 1200 --fast-boss` (the full late-game mix) and `--headless 2400`.
 
 ### 21.5 Add a planet

@@ -595,6 +595,7 @@ fn stream_hazards(
     added_mortar: Query<&MortarShell, Added<MortarShell>>,
     added_lines: Query<(Entity, &AimLine), Added<AimLine>>,
     added_cracks: Query<&CrackDecal, (Added<CrackDecal>, Without<NetHazard>)>,
+    added_spores: Query<&crate::gimmicks::SporeBurst, Added<crate::gimmicks::SporeBurst>>,
     beamers: Query<(&NetId, &Beamer)>,
     astronauts: Query<&PlayerId>,
     mut removed_lines: RemovedComponents<AimLine>,
@@ -606,6 +607,8 @@ fn stream_hazards(
     mut item_fx: MessageReader<crate::items::ItemFxMsg>,
     // §4 movement-tech one-shots (a Slam landing, a blink), the same way
     mut tech_fx: MessageReader<crate::techs::TechFxMsg>,
+    // §6/§12 weapon one-shots (an evolution's fanfare, THE ANGELUS's wisps), the same way
+    mut weapon_fx: MessageReader<crate::arsenal::WeaponFxMsg>,
     // §9 new-enemy one-shots (an uppercut, a tracker, a sprung mimic), the same way
     mut bestiary_fx: MessageReader<crate::bestiary::BestiaryFxMsg>,
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
@@ -631,6 +634,13 @@ fn stream_hazards(
                 axis: axis.to_array(),
                 insured,
             },
+        });
+    }
+    for m in weapon_fx.read().filter(|m| !m.from_wire) {
+        use crate::arsenal::WeaponFx;
+        events.push(match m.fx {
+            WeaponFx::Evolve { owner, weapon } => HazardEvent::Evolve { owner, weapon: weapon.code() },
+            WeaponFx::Wisp { owner, dir, power } => HazardEvent::Wisp { owner, dir: dir.to_array(), power },
         });
     }
     for m in bestiary_fx.read().filter(|m| !m.from_wire) {
@@ -705,6 +715,10 @@ fn stream_hazards(
     for c in &added_cracks {
         events.push(HazardEvent::Crack { dir: c.dir.to_array(), dur: c.timer });
     }
+    // Dark Moon spore caps: the plant's index is enough, both machines lay the same flora
+    for b in added_spores.iter().filter(|b| b.live) {
+        events.push(HazardEvent::Spore { plant: b.plant });
+    }
     if events.is_empty() {
         return;
     }
@@ -726,6 +740,8 @@ fn receive_hazards(
     lines: Query<(Entity, &AimLine)>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
     mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
+    mut weapon_fx: MessageWriter<crate::arsenal::WeaponFxMsg>,
+    flora: Option<Res<crate::gimmicks::WorldFlora>>,
     mut bestiary_fx: MessageWriter<crate::bestiary::BestiaryFxMsg>,
 ) {
     use crate::bestiary::{BestiaryFx, BestiaryFxMsg};
@@ -763,6 +779,19 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 tech_fx.write(TechFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the weapons', for `arsenal::weapon_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Evolve { owner, weapon } => crate::content::weapons::WeaponKind::from_code(weapon)
+                    .map(|weapon| crate::arsenal::WeaponFx::Evolve { owner, weapon }),
+                HazardEvent::Wisp { owner, dir, power } => {
+                    Some(crate::arsenal::WeaponFx::Wisp { owner, dir: Vec3::from(dir), power })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                weapon_fx.write(crate::arsenal::WeaponFxMsg { fx, from_wire: true });
                 continue;
             }
             // ...and the new enemies', for `bestiary::bestiary_fx_presentation`
@@ -869,7 +898,22 @@ fn receive_hazards(
                         crate::planet::StageScoped,
                     ));
                 }
-                // handled above, as ItemFxMsg / TechFxMsg / BestiaryFxMsg
+                HazardEvent::Spore { plant } => {
+                    // a cap on a world we are not standing on (a straggler across a stage
+                    // change) has no plant to swell
+                    let Some(pl) = flora
+                        .as_ref()
+                        .filter(|f| f.style == Some(crate::content::planets::FloraStyle::GlowShrooms))
+                        .and_then(|f| f.plants.get(plant as usize).copied())
+                    else {
+                        continue;
+                    };
+                    commands.spawn((
+                        crate::gimmicks::spore_bundle(&planet, crate::gimmicks::SporeBurst::new(plant, pl.dir, false)),
+                        NetHazard,
+                    ));
+                }
+                // handled above, as ItemFxMsg / TechFxMsg / BestiaryFxMsg / WeaponFxMsg
                 HazardEvent::ItemOrbit { .. }
                 | HazardEvent::Singularity { .. }
                 | HazardEvent::TrailIgnite { .. }
@@ -878,7 +922,9 @@ fn receive_hazards(
                 | HazardEvent::Blink { .. }
                 | HazardEvent::Uppercut { .. }
                 | HazardEvent::Tracked { .. }
-                | HazardEvent::MimicSprung { .. } => {}
+                | HazardEvent::MimicSprung { .. }
+                | HazardEvent::Evolve { .. }
+                | HazardEvent::Wisp { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
@@ -1245,7 +1291,6 @@ fn client_stage_transition(
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run.planet());
     let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     crate::player::spawn_player(
         &mut commands,
         &mut meshes,
@@ -1268,8 +1313,10 @@ fn client_stage_transition(
         &crate::run::PlayerState::new(run.character, &save),
         &save,
         &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
     *phase = crate::run::RunPhase::Playing;

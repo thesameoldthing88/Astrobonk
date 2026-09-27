@@ -1,5 +1,74 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P12 lands: the Tier-1 weapons play as §6 describes
+- **P12:** `arsenal.rs` gives the six newest weapons their own behaviours — lobbed Meatball Comet
+  (RAGÙ RAIN splits x3), Static Cling's hug field (FULL DISCHARGE's periodic nova), the Ricochet
+  Disc bouncing enemy to enemy and lapping the planet (THE OMNIDISC), the Whoopee's cone shove +
+  stun (THE BROWN NOTE's repulsor ring), the Bell's 4 s tolls marking foes for +crit (THE
+  ANGELUS's friendly wisps), the un-hit-combo Yo-Yo (SWORD-YO's garrote) with a HUD combo. The
+  §12 evolution fanfare runs on every machine; §13 hitstop only on the local player's kills,
+  sparse (50/90/130 ms, evolved +20 ms); the 1.8° shake clamp holds at the camera; stunned foes
+  cannot attack. `--weapons base|evo|evolve|<names>` and `--dev --evolvenow` probes.
+- **Reconciled/fixed on landing:** one cryo-slow path (`HitMsg.weapon`; P30's `SlowMsg` removed);
+  the camera's grade comes from the toon bundle and the fanfare dips relative to it; the melee
+  swing is a see-through, shadowless crescent over the arc that hit instead of a solid orange
+  slab; the weapon probe judges close-range hits only on runs that brought foes into reach.
+- **Verified:** smoke 6/6; `--weapons` base/evo/evolve solo and co-op, with `--fast-boss` (nova
+  134 hits, repulsor 117); windowed swings (via a temporary 2 s swing life) and the fanfare;
+  co-op 60 s (client 107 proxies, `local_sim=0`).
+
+## 2026-09-27 — P07 lands: the turning sun, night rules and the world gimmicks
+- **P07:** `daynight.rs` — ONE sun (`Sun::of`) replacing the fixed `sunward`/`is_night`; the host
+  turns it and eats it (Devoured Sun Shard + Cursed Δ every 60 s toward night-lock), both on
+  `RunSnapMsg`, clients dead-reckon; lighting follows it everywhere (a lit crash site at the
+  start); night = +15% horde pace, spawns 20% closer, +25% kill Gold, the Static fading at
+  night; the Moon's Earthside/Farside (Earthlight, brighter gems, +20% elites). `gimmicks.rs` —
+  Mars thorn flora snags, Dark Moon spore caps (telegraphed, hazard lane), The Crawl (Static
+  massing seen through the crust via an x-ray material, then erupting as The Static rises).
+  Headless `--daynight` / `--hazards` probes assert the numbers.
+- **Reconciled on landing:** the toon rim now follows `daynight::SunLight` (P03's stand-in sun
+  is gone); `daynight::apply_sky` is the one ambient writer and its night end is P36's toon
+  night fill (P07's own night ambient fields removed); `--warp` uses the live sun.
+- **Fixed on landing:** the Crawl's sites lagged the clock by a frame per level-up (a level-up
+  opening mid-frame stops the `playing` systems after `run_clock`), so after a few level-ups
+  they were not erupting when The Static rose — pre-Static mass is now derived from the clock.
+- **Verified:** smoke 6/6; `--daynight` solo/co-op, `--hazards` on Moon/Mars/Dark Moon solo and
+  co-op, `--overflow`; windowed Moon (lit start) and Dark Moon; co-op 60 s, identical layouts.
+
+## 2026-09-27 — P36 lands: the toon art style
+- **P36:** `toon.rs` patches bevy_pbr's own lighting module once it loads (3 cel steps, a hard
+  specular, a two-step flashlight cone) — every material in every lane gets the look with no
+  per-site changes, and crowd enemies keep one draw per kind — plus one fullscreen pass between
+  tonemapping and FXAA that inks silhouettes (depth second-difference) and creases (normal
+  prepass) and rims sun-facing edges. Per-world `ToonLook` (ink, night fill, saturation,
+  exposure, sky); stepped terrain height colours; sparer bloom; thicker ink in high-contrast.
+  `--dev --warp noon|dusk|night` gives windowed checks a lit view.
+- **Fixed while landing:** charge-shrine rings stood on their edge since v0.1 (an extra
+  quarter-turn on top of `frame_quat`) — they now lie flat and outline the 4.2 m zone; props now
+  keep 12 m (`START_CLEAR_ARC`) clear of the drop point, so a stage never opens with the camera
+  inside a boulder. The sky colour has one writer (`toon::apply_world_look`). P30's meshkit
+  winding fix kept over P36's duplicate.
+- **Verified:** build, smoke 6/6 (incl. the winding self-check), windowed Moon/Mars/Dark Moon at
+  noon, three fresh layouts with a clear start, co-op 50 s with identical layout checksums.
+
+## 2026-09-27 — P30 lands: the solo/save/world/combat known-issues sweep
+- **Context:** the second container wipe lost the first builds of P07/P08/P10/P12/P14/P22/P30/P32
+  and the partial P11/P13/P36. Rebuilt with GitHub backup branches (`claude/pensive-keller-0cood4-PXX`,
+  approved by the user) and a `tools/dev/` harness in the repo. Six lanes then ran until the
+  account's **weekly agent limit** (resets 2026-10-02 10:00 UTC) stopped every agent mid-build;
+  their work is saved on the backup branches, and the lead now lands it directly.
+- **P30:** the save counters bank again (H1: `bank_results` reads a run-long snapshot of the local
+  sheet; H2/H3 were already fixed by P01); the save format tolerates new counters, renamed content
+  and crashes mid-write (M13); meshkit winds outward (M12 — the astronaut's backpack and limbs no
+  longer render near-black in daylight); B/T dev keys need `--dev` (M14); pots are out of the cap
+  and overflow dissolves far stragglers into The Static with a per-stage backlog (L16, M16, M17);
+  the spatial hash scans only reachable cells (M18); ABANDON clears the pause overlay (M19);
+  per-planet skies (L6); props kept clear of interactables; cached terrain and rig assets (L8/L9).
+- **Verified:** build (21 warnings, none new), smoke 6/6, `--overflow` solo + co-op (4000 ticks),
+  windowed solo 32 s, two-instance co-op 50 s (client 93 proxies, `seq_gaps=0`).
+- **Not done:** the independent adversarial review (the agent limit hit first); the lead reviewed
+  the save-format change line by line.
+
 ## 2026-09-27 — Wave 3: P05 Tomes 8 → 23 + loadout + P06 Movement techs + Antipode Blink
 - **P05:** all 15 GDD §7 tomes as stat lines folded by `recompute_stats` (so a joiner's own tomes
   reach the host in `PlayerBuildMsg`), each wired to its effect site (`tomes.rs` has the table);

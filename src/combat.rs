@@ -3,6 +3,7 @@
 
 use crate::config::*;
 use crate::content::weapons::{Behavior, WeaponKind};
+use crate::arsenal;
 use crate::enemies::{Boss, Buried, Enemy, SpatialHash};
 use crate::fx::{self, Hitstop, Pcolor, ParticleAssets, Shake};
 use crate::interact::Pot;
@@ -20,11 +21,79 @@ pub struct WeaponAssets {
     pub proj_mesh: Handle<Mesh>,
     pub drone_mesh: Handle<Mesh>,
     pub beam_mesh: Handle<Mesh>,
-    pub sweep_mesh: Handle<Mesh>,
+    /// A melee swing's swoosh: a flat crescent per swing width (degrees, rounded), 360
+    /// always present for ring volleys. Unit outer radius, pointing along -Z.
+    pub sweep_arcs: HashMap<u32, Handle<Mesh>>,
+    /// See-through, glowing: a swing is a streak you read at a glance, not a slab.
+    pub sweep_mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
     pub aura_mesh: Handle<Mesh>,
     pub mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
     /// Faint see-through variants for the aura sphere so it doesn't blind the player.
     pub aura_mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
+    // ---- the Tier-1 weapons (`arsenal.rs`) and the evolution fanfare ----
+    /// A flat disc: a meatball's sauce splat.
+    pub splat_mesh: Handle<Mesh>,
+    /// A unit torus: toll rings, the nova, the repulsor, bell-mark halos, the fanfare ring.
+    pub ring_mesh: Handle<Mesh>,
+    /// The Sonic Whoopee's flat fan, unit range, pointing along -Z.
+    pub cone_mesh: Handle<Mesh>,
+    pub disc_mesh: Handle<Mesh>,
+    pub bell_mesh: Handle<Mesh>,
+    pub yoyo_mesh: Handle<Mesh>,
+    /// The fanfare's gold (dimmed under flash reduction by `apply_weapon_photosensitivity`).
+    pub fanfare_mat: Handle<StandardMaterial>,
+    /// THE ANGELUS's friendly wisps: warm and see-through — a ghost that is on your side.
+    pub wisp_mat: Handle<StandardMaterial>,
+}
+
+/// A melee swing's swoosh: a flat crescent (an annular sector from SWEEP_INNER to 1) of
+/// `arc_deg` round -Z, both faces. A crescent reads as the arc the weapon travelled; the old
+/// solid box read as an orange slab lying on the ground.
+fn sweep_arc_mesh(arc_deg: f32) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let n = ((arc_deg / 8.0).ceil() as u32).max(8);
+    let half = arc_deg.to_radians() / 2.0;
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    for i in 0..=n {
+        let (s, c) = (-half + 2.0 * half * i as f32 / n as f32).sin_cos();
+        pos.push([s * SWEEP_INNER, 0.0, -c * SWEEP_INNER]);
+        pos.push([s, 0.0, -c]);
+    }
+    let mut idx: Vec<u32> = Vec::new();
+    for i in 0..n {
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        idx.extend([a, c, b, b, c, d]);
+        idx.extend([a, b, c, b, d, c]);
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; pos.len()];
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(idx))
+}
+
+/// The Whoopee's fan: a flat sector of `arc_deg` round -Z, unit radius, both faces.
+fn cone_fan_mesh(arc_deg: f32) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let n = 14;
+    let half = arc_deg.to_radians() / 2.0;
+    let mut pos: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]];
+    for i in 0..=n {
+        let a = -half + 2.0 * half * i as f32 / n as f32;
+        pos.push([a.sin(), 0.0, -a.cos()]);
+    }
+    let mut idx: Vec<u32> = Vec::new();
+    for i in 1..=n as u32 {
+        idx.extend([0, i + 1, i]);
+        idx.extend([0, i, i + 1]);
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; pos.len()];
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(idx))
 }
 
 pub fn setup_weapon_assets(
@@ -34,6 +103,9 @@ pub fn setup_weapon_assets(
 ) {
     let mut mats = HashMap::new();
     let mut aura_mats = HashMap::new();
+    let mut sweep_mats = HashMap::new();
+    let mut sweep_arcs: HashMap<u32, Handle<Mesh>> = HashMap::new();
+    sweep_arcs.insert(360, meshes.add(sweep_arc_mesh(360.0)));
     for kind in [
         WeaponKind::Wrench,
         WeaponKind::LaserPistol,
@@ -79,11 +151,28 @@ pub fn setup_weapon_assets(
                 ..default()
             }),
         );
-        // A faint, see-through version for the aura bubble that surrounds the player.
+        // A faint, see-through version for the aura bubble that surrounds the player. A hug
+        // field is fainter still: it sits right round you, and its zaps already say "biting".
+        let alpha = if matches!(kind.def().behavior, Behavior::Hug { .. }) { 0.06 } else { 0.12 };
+        if let Behavior::MeleeArc { arc_deg, .. } = kind.def().behavior {
+            sweep_arcs.entry(arc_deg.round() as u32).or_insert_with(|| meshes.add(sweep_arc_mesh(arc_deg)));
+            sweep_mats.insert(
+                kind,
+                materials.add(StandardMaterial {
+                    base_color: c.with_alpha(SWEEP_ALPHA),
+                    emissive: c.to_linear() * 1.2,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                }),
+            );
+        }
         aura_mats.insert(
             kind,
             materials.add(StandardMaterial {
-                base_color: c.with_alpha(0.12),
+                base_color: c.with_alpha(alpha),
                 emissive: c.to_linear() * 0.6,
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
@@ -93,12 +182,38 @@ pub fn setup_weapon_assets(
             }),
         );
     }
+    let gold = Color::srgb(1.0, 0.82, 0.25);
+    let whoopee_arc = match WeaponKind::SonicWhoopee.def().behavior {
+        Behavior::Cone { arc_deg, .. } => arc_deg,
+        _ => 80.0,
+    };
     commands.insert_resource(WeaponAssets {
         proj_mesh: meshes.add(Mesh::from(Sphere::new(0.22))),
         drone_mesh: meshes.add(Mesh::from(Cuboid::new(0.4, 0.25, 0.55))),
         beam_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
-        sweep_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 0.12, 1.0))),
+        sweep_arcs,
+        sweep_mats,
         aura_mesh: meshes.add(Mesh::from(Sphere::new(1.0))),
+        splat_mesh: meshes.add(Mesh::from(Cylinder::new(1.0, 0.04))),
+        ring_mesh: meshes.add(Mesh::from(Torus::new(0.9, 1.0))),
+        cone_mesh: meshes.add(cone_fan_mesh(whoopee_arc)),
+        disc_mesh: meshes.add(Mesh::from(Cylinder::new(0.42, 0.09))),
+        bell_mesh: meshes.add(Mesh::from(ConicalFrustum { radius_top: 0.12, radius_bottom: 0.4, height: 0.55 })),
+        yoyo_mesh: meshes.add(Mesh::from(Cylinder::new(0.34, 0.26))),
+        fanfare_mat: materials.add(StandardMaterial {
+            base_color: fanfare_gold(false),
+            emissive: gold.to_linear() * 4.0,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
+        wisp_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.93, 0.62, 0.62),
+            emissive: LinearRgba::rgb(2.0, 1.8, 1.0),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        }),
         mats,
         aura_mats,
     })
@@ -132,6 +247,8 @@ pub struct Projectile {
     pub bounces: u8,
     /// Seconds left of the skip's hop (0 = flying level).
     pub hop: f32,
+    /// The weapon that fired it (carried onto its hits).
+    pub weapon: WeaponKind,
 }
 
 impl Projectile {
@@ -172,6 +289,7 @@ pub struct Beam {
     pub tick_cd: f32,
     /// Fired by Second Astronaut's ghost: it streams from where the ghost floats.
     pub ghost: bool,
+    pub weapon: WeaponKind,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -193,11 +311,15 @@ pub struct AuraVis {
     pub weapon: WeaponKind,
 }
 
+/// The foes a weapon can see: every enemy-side body above ground (pots included — they
+/// piggyback on `Enemy`; the targeting skips them).
+pub type Foes<'w, 's> = Query<'w, 's, (Entity, &'static Transform, &'static Enemy), (Without<Buried>, Without<Player>)>;
+
 /// Nearest live enemy to `pos` within `max_d` meters — pottery is scenery, not a target.
 fn nearest_enemy(
     pos: Vec3,
     max_d: f32,
-    enemies: &Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    enemies: &Foes,
     pots: &Query<(), With<Pot>>,
 ) -> Option<(Entity, Vec3)> {
     let mut best: Option<(Entity, Vec3, f32)> = None;
@@ -228,50 +350,65 @@ pub fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32
 }
 
 /// One volley of one weapon: who fires it, from where, at what, and how hard.
-struct Volley {
-    owner: Entity,
-    kind: WeaponKind,
-    dmg: f32,
-    count: u32,
-    size: f32,
+pub struct Volley {
+    pub owner: Entity,
+    /// The owner's PlayerId (what a wire event names it by).
+    pub pid: u8,
+    pub kind: WeaponKind,
+    pub dmg: f32,
+    pub count: u32,
+    pub size: f32,
     /// Where the shooter stands (melee reach and chain hops measure from here) and where
     /// its shots leave from (a little above that).
-    center: Vec3,
-    origin: Vec3,
-    up: Vec3,
-    aim: Vec3,
+    pub center: Vec3,
+    pub origin: Vec3,
+    pub up: Vec3,
+    pub aim: Vec3,
     /// Anti-Grav Boots, airborne: every directional weapon fires a full 360° ring.
-    ring: bool,
+    pub ring: bool,
     /// Second Astronaut's ghost fired this (its beams track the ghost, not the owner).
-    ghost: bool,
-    crit_ch: f32,
+    pub ghost: bool,
+    pub crit_ch: f32,
+}
+
+/// What one of `ps`'s weapons fires right now: damage per hit, bodies/projectiles, size.
+/// The one formula `weapon_fire` and the always-on weapons (`arsenal::tether_update`) share.
+pub fn weapon_numbers(ps: &PlayerState, stats: &crate::stats::Stats, wi: &crate::run::WeaponInstance) -> (f32, u32, f32) {
+    let def = wi.kind.def();
+    let (lvl_dmg, lvl_extra, lvl_size) = wi.kind.level_scaling(wi.level);
+    // Tome of Ascension's later ranks: evolved weapons hit harder
+    let evo = if wi.kind.is_evolution() { stats.evo_damage } else { 1.0 };
+    let dmg = def.damage * lvl_dmg * ps.damage_mult() * evo;
+    let count = (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1);
+    (dmg, count, lvl_size * stats.size)
 }
 
 /// Evenly spaced headings all the way round `up`, starting at `aim` (a 360° ring).
-fn ring_headings(up: Vec3, aim: Vec3, n: u32) -> impl Iterator<Item = Vec3> {
+pub fn ring_headings(up: Vec3, aim: Vec3, n: u32) -> impl Iterator<Item = Vec3> {
     (0..n).map(move |i| Quat::from_axis_angle(up, i as f32 / n as f32 * std::f32::consts::TAU) * aim)
 }
 
 /// How this machine may draw chain-lightning zaps (§13 photosensitivity, P04): the setting
 /// plus the one screen-wide flash budget every astronaut's zaps (and the ghost's) share.
-struct ZapLook<'a> {
-    photo: bool,
-    gate: &'a mut fx::FlashGate,
-    now: f32,
+pub struct ZapLook<'a> {
+    pub photo: bool,
+    pub gate: &'a mut fx::FlashGate,
+    pub now: f32,
 }
 
-/// Fire one volley (every behavior except the always-on Orbit and Aura).
+/// Fire one volley (every behavior except the always-on Orbit, Aura, Hug and Tether).
 #[allow(clippy::too_many_arguments)]
 fn fire_volley(
     v: &Volley,
     stats: &crate::stats::Stats,
     assets: &WeaponAssets,
-    enemies: &Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    enemies: &Foes,
     pots: &Query<(), With<Pot>>,
     commands: &mut Commands,
     hits: &mut MessageWriter<HitMsg>,
     sfx: &mut MessageWriter<SfxMsg>,
     zaps: &mut ZapLook,
+    ax: &mut arsenal::ArsenalCx,
     rng: &mut impl Rng,
 ) {
     let def = v.kind.def();
@@ -297,20 +434,20 @@ fn fire_volley(
                         amount: dmg * cm * elite,
                         crit,
                         knock: vt * 9.0 * stats.knockback,
+                        weapon: Some(v.kind),
                     });
                 }
             }
-            // sweep visual
+            // sweep visual: a crescent over exactly the arc and reach that just hit
+            let arc_mesh = assets.sweep_arcs.get(&(arc_deg.round() as u32)).unwrap_or(&assets.sweep_arcs[&360]);
             commands.spawn((
-                Mesh3d(assets.sweep_mesh.clone()),
-                MeshMaterial3d(assets.mats[&v.kind].clone()),
-                Transform::from_translation(if v.ring { origin } else { origin + aim * r * 0.5 })
+                Mesh3d(arc_mesh.clone()),
+                MeshMaterial3d(assets.sweep_mats.get(&v.kind).unwrap_or(&assets.mats[&v.kind]).clone()),
+                Transform::from_translation(origin + up * SWEEP_LIFT)
                     .with_rotation(sphere::frame_quat(up, aim))
-                    .with_scale(if v.ring {
-                        Vec3::new(r * 2.0, 0.1, r * 2.0)
-                    } else {
-                        Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)
-                    }),
+                    .with_scale(Vec3::new(r, 1.0, r)),
+                // a see-through streak must not print a solid shadow on the ground
+                bevy::light::NotShadowCaster,
                 Fader { life: 0.14, max: 0.14, swell: None },
                 StageScoped,
             ));
@@ -346,6 +483,7 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: Projectile::roll_bounce(stats, rng),
                         hop: 0.0,
+                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -377,6 +515,7 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: Projectile::roll_bounce(stats, rng),
                         hop: 0.0,
+                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -412,6 +551,7 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: 0, // it comes back; it never comes down
                         hop: 0.0,
+                        weapon: v.kind,
                     },
                     Mesh3d(assets.drone_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -434,6 +574,7 @@ fn fire_volley(
                         ticks_left: (5.0 * stats.duration) as u32 + 1,
                         tick_cd: 0.0,
                         ghost: v.ghost,
+                        weapon: v.kind,
                     },
                     Mesh3d(assets.beam_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -477,7 +618,7 @@ fn fire_volley(
             for (e, pos) in &chain {
                 let (cm, crit) = roll_crit(v.crit_ch, stats.crit_damage, rng);
                 let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
-                hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(v.kind) });
                 // zap segment visual
                 if show_zaps {
                     let mid = (prev + *pos) / 2.0;
@@ -521,6 +662,7 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: 0, // a rocket that comes down goes off
                         hop: 0.0,
+                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -529,7 +671,23 @@ fn fire_volley(
                 ));
             }
         }
-        Behavior::Orbit { .. } | Behavior::Aura { .. } => {}
+        // ---- the Tier-1 weapons' own behaviours (arsenal.rs) ----
+        Behavior::Lob { range, flight, aoe, split } => {
+            arsenal::fire_lob(v, range, flight, aoe, split, assets, enemies, pots, commands, ax, rng);
+        }
+        Behavior::Disc { speed, bounces, link } => {
+            arsenal::fire_disc(v, speed, bounces, link, stats, assets, commands, sfx, ax);
+        }
+        Behavior::Cone { arc_deg, range } => {
+            arsenal::fire_cone(v, arc_deg, range, stats, assets, enemies, pots, commands, hits, sfx, ax, rng);
+        }
+        Behavior::Repulsor { radius } => {
+            arsenal::fire_repulsor(v, radius, assets, commands, sfx, ax);
+        }
+        Behavior::Toll { radius, wisps } => {
+            arsenal::fire_toll(v, v.pid, radius, wisps, stats, assets, enemies, pots, commands, hits, sfx, ax, rng);
+        }
+        Behavior::Orbit { .. } | Behavior::Aura { .. } | Behavior::Hug { .. } | Behavior::Tether { .. } => {}
     }
 }
 
@@ -539,7 +697,7 @@ fn aim_from(
     center: Vec3,
     up: Vec3,
     facing: Vec3,
-    enemies: &Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    enemies: &Foes,
     pots: &Query<(), With<Pot>>,
 ) -> Vec3 {
     let aim = match nearest_enemy(center, 40.0, enemies, pots) {
@@ -558,26 +716,41 @@ fn aim_from(
 const STROBING_WEAPONS: [WeaponKind; 3] = [WeaponKind::Tesla, WeaponKind::StormCore, WeaponKind::DeathRay];
 
 /// PRESENTATION: photosensitivity mode turns the strobing weapons' shared materials into a
-/// dim, see-through version of themselves. Base color and alpha, not emissive: the weapon
-/// materials are unlit, and an unlit material draws its base color and nothing else.
+/// dim, see-through version of themselves; flash reduction takes the evolution fanfare's
+/// gold down from HDR (where it blooms, and keeps its colour through the fanfare's
+/// desaturation) to a plain gold. Base color and alpha, not emissive: the weapon materials
+/// are unlit, and an unlit material draws its base color and nothing else.
 pub fn apply_weapon_photosensitivity(
     save: Res<crate::save::MetaSave>,
     assets: Option<Res<WeaponAssets>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut applied: Local<Option<bool>>,
+    mut applied: Local<Option<(bool, bool)>>,
 ) {
-    let photo = save.accessibility.photosensitive;
-    if *applied == Some(photo) {
+    let want = (save.accessibility.photosensitive, save.accessibility.flash_reduction);
+    if *applied == Some(want) {
         return;
     }
     let Some(assets) = assets else { return };
+    let (photo, reduced) = want;
     for kind in STROBING_WEAPONS {
         if let Some(m) = assets.mats.get(&kind).and_then(|h| materials.get_mut(h)) {
             let c = kind.def().color;
             m.base_color = if photo { c.with_alpha(PHOTO_WEAPON_ALPHA) } else { c };
         }
     }
-    *applied = Some(photo);
+    if let Some(m) = materials.get_mut(&assets.fanfare_mat) {
+        m.base_color = fanfare_gold(reduced);
+    }
+    *applied = Some(want);
+}
+
+/// The fanfare's gold: HDR at rest, plain under flash reduction.
+fn fanfare_gold(reduced: bool) -> Color {
+    if reduced {
+        Color::linear_rgb(0.85, 0.55, 0.08)
+    } else {
+        Color::linear_rgb(3.2, 2.0, 0.35)
+    }
 }
 
 /// Tick weapon cooldowns and fire.
@@ -586,22 +759,29 @@ pub fn apply_weapon_photosensitivity(
 /// host, the owner's cosmetic prediction on a client — so the §7 firing rules live here
 /// too: The Overheat's jam, Anti-Grav Boots' airborne 360° ring, and Second Astronaut's
 /// ghost volley.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn weapon_fire(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<WeaponAssets>,
     particles: Option<Res<ParticleAssets>>,
-    mut telemetry: ResMut<crate::items::ItemTelemetry>,
-    (save, mut flash_gate): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>),
-    mut q_player: Query<(Entity, &Player, &mut PlayerState, &mut crate::items::ItemProcs, &Transform)>,
-    enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    (mut telemetry, mut arsenal_tm): (ResMut<crate::items::ItemTelemetry>, ResMut<arsenal::ArsenalTelemetry>),
+    (save, mut flash_gate, mut recent_kills): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>, ResMut<arsenal::RecentKills>),
+    mut q_player: Query<(
+        Entity,
+        &Player,
+        &crate::player::PlayerId,
+        &mut PlayerState,
+        &mut crate::items::ItemProcs,
+        &mut arsenal::WeaponProcs,
+        &Transform,
+    )>,
+    enemies: Foes,
     q_pots: Query<(), With<Pot>>,
-    q_drones: Query<(Entity, &Drone)>,
-    q_auras: Query<(Entity, &AuraVis)>,
-    mut hits: MessageWriter<HitMsg>,
-    mut sfx: MessageWriter<SfxMsg>,
+    (q_drones, q_auras, q_discs): (Query<(Entity, &Drone)>, Query<(Entity, &AuraVis)>, Query<&arsenal::Disc>),
+    (mut hits, mut sfx, mut weapon_fx): (MessageWriter<HitMsg>, MessageWriter<SfxMsg>, MessageWriter<arsenal::WeaponFxMsg>),
     role: Res<crate::net::NetRole>,
+    (hash, planet): (Res<SpatialHash>, Res<CurrentPlanet>),
 ) {
     use crate::content::items::ItemKind;
     let dt = time.delta_secs();
@@ -612,19 +792,33 @@ pub fn weapon_fire(
     let t_now = time.elapsed_secs();
     let simulating = role.simulates();
     let mut zaps = ZapLook { photo: save.accessibility.photosensitive, gate: &mut *flash_gate, now: t_now };
+    let mut live_discs: HashMap<Entity, usize> = HashMap::new();
+    for d in &q_discs {
+        *live_discs.entry(d.owner).or_insert(0) += 1;
+    }
+    let mut ax = arsenal::ArsenalCx {
+        hash: &hash,
+        planet: &planet,
+        kills: &mut recent_kills,
+        fx: &mut weapon_fx,
+        tm: &mut arsenal_tm,
+        simulating,
+        now: t_now,
+        live_discs: &live_discs,
+        tolled: false,
+    };
 
     // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
     let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32, f32)> = HashMap::new();
     let mut want_auras: Vec<(Entity, WeaponKind)> = Vec::new();
     let mut player_pos: Vec<(Entity, Vec3)> = Vec::new();
 
-    for (pe, player, mut run, mut procs, ptf) in &mut q_player {
+    for (pe, player, pid, mut run, mut procs, mut wprocs, ptf) in &mut q_player {
     if run.dead {
         continue; // a downed astronaut stops firing
     }
     player_pos.push((pe, ptf.translation));
     let atk_speed = run.attack_speed();
-    let dmg_mult = run.damage_mult();
     let stats = run.live_stats();
     let crit_ch = run.crit_chance(); // captured before the &mut weapons loop (Reticle pulse)
     let aura_sc = run.aura_scale(); // Aurora's fields swell while sprinting
@@ -634,15 +828,10 @@ pub fn weapon_fire(
     let jammed = procs.jam > 0.0;
     let up = player.dir;
     let origin = ptf.translation + up * 0.4;
+    let numbers: Vec<(f32, u32, f32)> = run.weapons.iter().map(|wi| weapon_numbers(&run, &stats, wi)).collect();
 
-    for wi in run.weapons.iter_mut() {
+    for (wi, &(dmg, count, size)) in run.weapons.iter_mut().zip(&numbers) {
         let def = wi.kind.def();
-        let (lvl_dmg, lvl_extra, lvl_size) = wi.kind.level_scaling(wi.level);
-        // Tome of Ascension's later ranks: evolved weapons hit harder
-        let evo = if wi.kind.is_evolution() { stats.evo_damage } else { 1.0 };
-        let dmg = def.damage * lvl_dmg * dmg_mult * evo;
-        let count = (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1);
-        let size = lvl_size * stats.size;
 
         match def.behavior {
             Behavior::Orbit { radius, deg_per_sec } => {
@@ -651,7 +840,10 @@ pub fn weapon_fire(
                 want_drones.insert((pe, wi.kind), (count as usize, dmg, radius * size * orbit, deg_per_sec * orbit, orbit));
                 continue;
             }
-            Behavior::Aura { radius, slow } => {
+            // the yo-yos are always out (`arsenal::tether_update` swings them)
+            Behavior::Tether { .. } => continue,
+            Behavior::Aura { radius, slow: _ } => {
+                // (the slow rides on the hit: `apply_hits` reads it off `HitMsg::weapon`)
                 let radius = radius * aura_sc;
                 want_auras.push((pe, wi.kind));
                 if jammed {
@@ -671,9 +863,36 @@ pub fn weapon_fire(
                                 amount: dmg * cm * elite,
                                 crit,
                                 knock: Vec3::ZERO,
+                                weapon: Some(wi.kind),
                             });
-                            let _ = slow; // applied in apply_hits via kind check
                         }
+                    }
+                }
+                continue;
+            }
+            Behavior::Hug { radius, nova } => {
+                want_auras.push((pe, wi.kind));
+                if jammed {
+                    continue;
+                }
+                wi.cd -= dt * atk_speed;
+                if wi.cd <= 0.0 {
+                    wi.cd = def.cooldown;
+                    let r = radius * aura_sc * size;
+                    arsenal::hug_pulse(
+                        pe, wi.kind, ptf.translation, r, dmg, crit_ch, &stats, &enemies, &q_pots, &hash, &assets,
+                        &mut commands, &mut hits, &mut zaps, ax.tm, &mut rng,
+                    );
+                }
+                // FULL DISCHARGE: the field stores charge and lets it all go at once
+                if nova > 0.0 {
+                    wprocs.discharge += dt * atk_speed;
+                    if wprocs.discharge >= FULL_DISCHARGE_SECS {
+                        wprocs.discharge = 0.0;
+                        arsenal::discharge_nova(
+                            pe, wi.kind, ptf.translation, nova * size, dmg, crit_ch, &stats, &enemies, &q_pots, &planet,
+                            &assets, &mut commands, &mut hits, &mut sfx, ax.tm, &mut rng,
+                        );
                     }
                 }
                 continue;
@@ -684,7 +903,20 @@ pub fn weapon_fire(
         if jammed {
             continue;
         }
-        wi.cd -= dt * atk_speed;
+        // Sonic Whoopee is the panic button: mobbed, it recharges several times faster
+        let panic = matches!(def.behavior, Behavior::Cone { .. } | Behavior::Repulsor { .. })
+            && hash
+                .near(ptf.translation, WHOOPEE_PANIC_RADIUS)
+                .filter(|(e, p)| {
+                    p.distance_squared(ptf.translation) < WHOOPEE_PANIC_RADIUS * WHOOPEE_PANIC_RADIUS
+                        && enemies.get(*e).is_ok_and(|(_, _, en)| en.speed > 0.0)
+                })
+                .count()
+                >= WHOOPEE_PANIC_CROWD;
+        if panic {
+            ax.tm.panic_secs += dt;
+        }
+        wi.cd -= dt * atk_speed * if panic { WHOOPEE_PANIC_RATE } else { 1.0 };
         if wi.cd > 0.0 {
             continue;
         }
@@ -693,6 +925,7 @@ pub fn weapon_fire(
         let aim = aim_from(ptf.translation, up, player.facing, &enemies, &q_pots);
         let v = Volley {
             owner: pe,
+            pid: pid.0,
             kind: wi.kind,
             dmg,
             count,
@@ -705,7 +938,11 @@ pub fn weapon_fire(
             ghost: false,
             crit_ch,
         };
-        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut rng);
+        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut ax, &mut rng);
+        if ax.tolled {
+            ax.tolled = false;
+            wprocs.last_toll = t_now;
+        }
         if ring {
             telemetry.ring_volleys += 1;
         }
@@ -728,22 +965,21 @@ pub fn weapon_fire(
     // (and fires at our Overheat-boosted speed), so an Overheat jam — including one this
     // very frame — silences it too.
     let ghost_power = run.item_power(ItemKind::SecondAstronaut);
-    let mirrored = run.ghost_weapon.and_then(|g| run.weapons.iter().find(|w| w.kind == g).map(|w| (w.kind, w.level)));
-    if let (true, Some((kind, level)), false) = (ghost_power > 0.0, mirrored, procs.jam > 0.0) {
+    let mirrored = run.ghost_weapon.and_then(|g| run.weapons.iter().find(|w| w.kind == g).cloned());
+    if let (true, Some(wi), false) = (ghost_power > 0.0, mirrored, procs.jam > 0.0) {
         procs.ghost_cd -= dt * atk_speed;
         if procs.ghost_cd <= 0.0 {
-            let def = kind.def();
-            procs.ghost_cd = def.cooldown;
-            let (lvl_dmg, lvl_extra, lvl_size) = kind.level_scaling(level);
+            procs.ghost_cd = wi.kind.def().cooldown;
+            let (dmg, count, size) = weapon_numbers(&run, &stats, &wi);
             let gpos = crate::items::ghost_anchor(ptf, t_now);
             let gup = gpos.normalize_or_zero();
-            let evo = if kind.is_evolution() { stats.evo_damage } else { 1.0 };
             let v = Volley {
                 owner: pe,
-                kind,
-                dmg: def.damage * lvl_dmg * dmg_mult * evo * GHOST_MIRROR * ghost_power,
-                count: (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1),
-                size: lvl_size * stats.size,
+                pid: pid.0,
+                kind: wi.kind,
+                dmg: dmg * GHOST_MIRROR * ghost_power,
+                count,
+                size,
                 center: gpos,
                 origin: gpos,
                 up: gup,
@@ -752,7 +988,8 @@ pub fn weapon_fire(
                 ghost: true,
                 crit_ch,
             };
-            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut rng);
+            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut ax, &mut rng);
+            ax.tolled = false;
             telemetry.ghost_volleys += 1;
         }
     }
@@ -820,7 +1057,7 @@ pub fn weapon_fire(
     let existing_auras: Vec<(Entity, WeaponKind)> = q_auras.iter().map(|(_, a)| (a.owner, a.weapon)).collect();
     for (owner, kind) in want_auras {
         if !existing_auras.contains(&(owner, kind)) {
-            if let Behavior::Aura { radius, .. } = kind.def().behavior {
+            if let Some(radius) = field_radius(kind) {
                 let home = player_pos.iter().find(|(e, _)| *e == owner).map(|(_, p)| *p).unwrap_or(Vec3::ZERO);
                 commands.spawn((
                     AuraVis { owner, weapon: kind },
@@ -926,7 +1163,7 @@ pub fn projectile_move(
         }
         if p.life <= 0.0 {
             if let ProjKind::Rocket { aoe } = p.kind {
-                explode(&mut commands, &hash, &enemies, &run, p.owner, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                explode(&mut commands, &hash, &enemies, &run, p.owner, p.weapon, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
             }
             commands.entity(pe).despawn();
             continue;
@@ -966,7 +1203,7 @@ pub fn projectile_move(
             let reach = hit_r + en.scale * 0.5;
             if tpos.distance_squared(tf.translation) < reach * reach {
                 if let ProjKind::Rocket { aoe } = p.kind {
-                    explode(&mut commands, &hash, &enemies, &run, p.owner, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                    explode(&mut commands, &hash, &enemies, &run, p.owner, p.weapon, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
                     exploded = true;
                     break;
                 }
@@ -978,6 +1215,7 @@ pub fn projectile_move(
                     amount: p.damage * cm * elite,
                     crit,
                     knock: p.heading * 4.0 * run.stats.knockback,
+                    weapon: Some(p.weapon),
                 });
                 p.hit_cd.insert(te, 0.5);
                 p.pierce -= 1;
@@ -1001,6 +1239,7 @@ fn explode(
     run: &PlayerState,
     // the astronaut whose rocket this was — carried so AoE damage credits the right player
     owner: Entity,
+    weapon: WeaponKind,
     pos: Vec3,
     aoe: f32,
     damage: f32,
@@ -1015,7 +1254,7 @@ fn explode(
             let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), rng);
             let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
             let kdir = (tpos - pos).normalize_or_zero();
-            hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0 });
+            hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0, weapon: Some(weapon) });
         }
     }
     if let Some(pa) = particles {
@@ -1065,6 +1304,7 @@ pub fn drone_update(
                         amount: d.damage * cm * elite,
                         crit,
                         knock: offset.normalize_or_zero() * 5.0,
+                        weapon: Some(d.weapon),
                     });
                     hit_any = true;
                 }
@@ -1124,7 +1364,7 @@ pub fn beam_update(
                 if perp < beam.width + en.scale * 0.5 {
                     let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
-                    hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO });
+                    hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(beam.weapon) });
                 }
             }
         }
@@ -1140,10 +1380,31 @@ pub fn aura_follow(
     let t = time.elapsed_secs();
     for (a, mut tf) in &mut q {
         let Ok((run, ptf)) = q_player.get(a.owner) else { continue };
-        if let Behavior::Aura { radius, .. } = a.weapon.def().behavior {
-            tf.translation = ptf.translation;
-            tf.scale = Vec3::splat(radius * run.aura_scale() * (1.0 + (t * 3.0).sin() * 0.04));
-        }
+        let Some(radius) = field_radius(a.weapon) else { continue };
+        // drawn at the radius it DAMAGES at: level and the Size stat grow it too
+        let size = run
+            .weapons
+            .iter()
+            .find(|w| w.kind == a.weapon)
+            .map(|w| w.kind.level_scaling(w.level).2)
+            .unwrap_or(1.0)
+            * run.stats.size;
+        // a hug field crackles; a cold one breathes
+        let pulse = if matches!(a.weapon.def().behavior, Behavior::Hug { .. }) {
+            1.0 + ((t * 31.0).sin() * (t * 17.0).cos()) * 0.03
+        } else {
+            1.0 + (t * 3.0).sin() * 0.04
+        };
+        tf.translation = ptf.translation;
+        tf.scale = Vec3::splat(radius * run.aura_scale() * size * pulse);
+    }
+}
+
+/// The radius a field weapon's bubble is drawn at (before level and size).
+fn field_radius(kind: WeaponKind) -> Option<f32> {
+    match kind.def().behavior {
+        Behavior::Aura { radius, .. } | Behavior::Hug { radius, .. } => Some(radius),
+        _ => None,
     }
 }
 
@@ -1170,15 +1431,17 @@ pub fn fader_update(
 }
 
 /// Resolve HitMsg against enemies / bosses / pots: damage, flash, knockback,
-/// lifesteal, slows, deaths.
-#[allow(clippy::too_many_arguments)]
+/// lifesteal, slows, deaths — and what a hit's weapon does beyond damage: a bell mark's
+/// extra crit (anyone's hit), a Whoopee's stun, a cryo vent's own slow. A killing blow by
+/// THIS machine's astronaut asks for the §13 hitstop (sparse; solo only — `fx::Hitstop`).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn apply_hits(
     mut commands: Commands,
     mut reader: MessageReader<HitMsg>,
     mut run: ResMut<RunState>,
     mut q_ps: Query<&mut PlayerState>,
-    mut shake: ResMut<Shake>,
-    mut hitstop: ResMut<Hitstop>,
+    q_local: Query<(), With<crate::player::LocalPlayer>>,
+    (mut shake, mut hitstop, time, role): (ResMut<Shake>, ResMut<Hitstop>, Res<Time>, Res<crate::net::NetRole>),
     mut enemies: Query<
         (
             &mut Enemy,
@@ -1187,6 +1450,7 @@ pub fn apply_hits(
             Option<&crate::enemies::MinibossSlot>,
             Option<&mut crate::bestiary::AegisShield>,
             Option<&crate::bestiary::Mimic>,
+            Has<arsenal::BellMark>,
         ),
         Without<Pot>,
     >,
@@ -1195,26 +1459,18 @@ pub fn apply_hits(
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
     // (§9) where a hit's shooter stands — the Aegis Drone's shield reads the line of it —
-    // and a dead Mimic's swallowed gold, back to whoever paid it
-    (shooters, mut refunds, mut telemetry): (
+    // and a dead Mimic's swallowed gold, back to whoever paid it; (§6) the arsenal's tallies
+    (shooters, mut refunds, mut telemetry, mut tm): (
         Query<&Player>,
         MessageWriter<crate::bestiary::RefundMsg>,
         ResMut<crate::bestiary::BestiaryTelemetry>,
+        ResMut<arsenal::ArsenalTelemetry>,
     ),
 ) {
     let mut rng = rand::thread_rng();
+    let now = time.elapsed_secs();
 
     for msg in reader.read() {
-        // Resolve cryo against THIS hit's shooter, not an arbitrary player.
-        let has_cryo = msg
-            .source
-            .and_then(|s| q_ps.get(s).ok())
-            .map(|ps| {
-                ps.weapons
-                    .iter()
-                    .any(|w| matches!(w.kind, WeaponKind::CryoVent | WeaponKind::AbsoluteZero))
-            })
-            .unwrap_or(false);
         // Pots first: they piggyback on the enemy hash but die as pots.
         if let Ok((mut pot, tf)) = pots.get_mut(msg.target) {
             if pot.broken {
@@ -1235,13 +1491,20 @@ pub fn apply_hits(
             commands.entity(msg.target).despawn();
             continue;
         }
-        if let Ok((mut e, tf, boss, slot, shield, mimic)) = enemies.get_mut(msg.target) {
+        if let Ok((mut e, tf, boss, slot, shield, mimic, marked)) = enemies.get_mut(msg.target) {
             if e.hp <= 0.0 {
                 continue;
             }
+            // Cosmonaut's Bell: a tolled foe takes crits more easily — from anyone's hit
+            let (mut amount, mut crit) = (msg.amount, msg.crit);
+            if marked && !crit && rng.gen_bool(BELL_MARK_CRIT as f64) {
+                let crit_dmg = msg.source.and_then(|s| q_ps.get(s).ok()).map(|ps| ps.crit_damage()).unwrap_or(2.0);
+                amount *= crit_dmg;
+                crit = true;
+                tm.mark_crits += 1;
+            }
             // The Aegis Drone's shield: a hit along its facing cone lands a sliver and does
             // not stagger it (§9 — flank it). A shape-coded BLOCK read-out, throttled per drone.
-            let mut amount = msg.amount;
             let mut blocked = false;
             if let Some(mut sh) = shield {
                 let shooter = msg.source.and_then(|s| shooters.get(s).ok()).map(|p| p.dir);
@@ -1269,17 +1532,27 @@ pub fn apply_hits(
                 1.0
             };
             e.knock += msg.knock * knock_scale;
-            if has_cryo {
-                e.slow = (e.slow + 0.25).min(0.65);
+            if let Some(w) = msg.weapon {
+                // a cold field slows by ITS OWN amount, and only its own hits do (L14)
+                if let Behavior::Aura { slow, .. } = w.def().behavior {
+                    if slow > 0.0 {
+                        e.slow = e.slow.max(slow);
+                    }
+                }
+                // a Whoopee shove leaves the crowd reeling; bosses shrug it off
+                if let (Some(secs), None) = (arsenal::stun_secs(w), boss) {
+                    commands.entity(msg.target).try_insert(crate::enemies::Stunned { secs });
+                    tm.stuns += 1;
+                }
             }
             if !blocked {
                 numbers.write(NumberMsg {
                     pos: tf.translation,
                     amount,
-                    kind: if msg.crit { NumKind::Crit } else { NumKind::Hit },
+                    kind: if crit { NumKind::Crit } else { NumKind::Hit },
                 });
             }
-            if msg.crit {
+            if crit {
                 sfx.write(SfxMsg(Sfx::Crit));
             }
             // lifesteal: chance to heal 1 — heals the SHOOTER, not an arbitrary player
@@ -1314,9 +1587,17 @@ pub fn apply_hits(
                     run.boss_dead = true;
                     run.boss_kills += 1;
                     shake.add(0.8);
-                    hitstop.timer = 0.25;
-                } else if msg.crit {
-                    shake.add(0.06);
+                }
+                // §13 hitstop: only on YOUR killing blow (never a teammate's, never chip)
+                if fx::freezes(&role) && msg.source.is_some_and(|s| q_local.contains(s)) {
+                    let weight = if is_boss {
+                        fx::KillWeight::Boss
+                    } else if e.elite || is_mini {
+                        fx::KillWeight::Elite
+                    } else {
+                        fx::KillWeight::Crowd
+                    };
+                    hitstop.kill(weight, msg.weapon.is_some_and(|w| w.is_evolution()), now);
                 }
                 commands.entity(msg.target).despawn();
             }
@@ -1346,6 +1627,7 @@ pub fn apply_player_hits(
         &crate::player::PlayerId,
         &Transform,
         Has<crate::player::LocalPlayer>,
+        &mut arsenal::WeaponProcs,
     )>,
     mut q_crowd: Query<(&mut Enemy, Has<Boss>), Without<Pot>>,
     mut shake: ResMut<Shake>,
@@ -1353,7 +1635,11 @@ pub fn apply_player_hits(
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
     (mut item_fx, mut tech_fx): (MessageWriter<crate::items::ItemFxMsg>, MessageWriter<crate::techs::TechFxMsg>),
-    (mut telemetry, mut tech_telemetry): (ResMut<crate::items::ItemTelemetry>, ResMut<crate::techs::TechTelemetry>),
+    (mut telemetry, mut tech_telemetry, mut arsenal_tm): (
+        ResMut<crate::items::ItemTelemetry>,
+        ResMut<crate::techs::TechTelemetry>,
+        ResMut<arsenal::ArsenalTelemetry>,
+    ),
     mut banners: MessageWriter<BannerMsg>,
 ) {
     let mut rng = rand::thread_rng();
@@ -1361,7 +1647,7 @@ pub fn apply_player_hits(
         // Address the hit to its actual victim. `continue`, never unwrap: messages are
         // double-buffered, so a victim CAN be despawned between the write and this read
         // (stage change, disconnect).
-        let Ok((mut run_ps, mut body, mut procs, mut tech, intent, pid, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
+        let Ok((mut run_ps, mut body, mut procs, mut tech, intent, pid, ptf, is_local, mut wprocs)) = q_ps.get_mut(msg.victim) else { continue };
         // Boomerang Insurance's escape is an Antipode Blink (§15: one mechanic), turned
         // the way this astronaut is looking, like a keyed one.
         let mut insured_blink = |body: &mut Player,
@@ -1406,15 +1692,21 @@ pub fn apply_player_hits(
         run_ps.shield_cd = 5.0;
         run_ps.hp -= amount;
         run_ps.iframes = 0.4;
+        // a hit that lands (shield or not — a dodge is not a hit) breaks the Yo-Yo combo
+        if wprocs.combo >= 1.0 {
+            arsenal_tm.combo_breaks += 1;
+        }
+        wprocs.combo = 0.0;
+        wprocs.combo_m = 0.0;
         if is_local {
-            shake.add(0.12);
+            shake.add(SHAKE_PLAYER_HIT);
             sfx.write(SfxMsg(Sfx::Hurt));
         }
 
         // thorns
         if run_ps.stats.thorns > 0.0 {
             if let Some(att) = msg.attacker {
-                hits.write(HitMsg { source: Some(msg.victim), target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(msg.victim), target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO, weapon: None });
             }
         }
 

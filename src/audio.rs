@@ -172,6 +172,22 @@ pub fn build_sfx_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSo
     tone(&mut b, Wave::Noise, 0.0, 0.0, 0.015, 0.15, 0.0);
     add(Sfx::Flashlight, std::mem::take(&mut b));
 
+    // thorns: a dry scratch and a little yelp of fabric — you are wading through it
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.12, 0.28, 0.0);
+    tone(&mut b, Wave::Saw, 1900.0, 1300.0, 0.06, 0.12, 0.0);
+    tone(&mut b, Wave::Saw, 1700.0, 1100.0, 0.05, 0.1, 0.07);
+    add(Sfx::Thorns, std::mem::take(&mut b));
+
+    // spore cap primed: a wet, rising hiss — something is about to go
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.5, 0.18, 0.0);
+    tone(&mut b, Wave::Sine, 180.0, 520.0, 0.5, 0.16, 0.0);
+    add(Sfx::Spore, std::mem::take(&mut b));
+
+    // spore cap bursts: a soft thump and a puff
+    tone(&mut b, Wave::Sine, 150.0, 60.0, 0.22, 0.4, 0.0);
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.3, 0.26, 0.02);
+    add(Sfx::SporePop, std::mem::take(&mut b));
+
     // Sunskimmer whine: a thin rising scream with a sour second voice — the dive coming
     tone(&mut b, Wave::Saw, 700.0, 1900.0, 0.9, 0.16, 0.0);
     tone(&mut b, Wave::Sine, 1400.0, 3600.0, 0.9, 0.12, 0.0);

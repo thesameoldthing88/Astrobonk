@@ -49,9 +49,13 @@ use std::time::{Duration, SystemTime};
 // PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
-// Bumped for P08: kind codes 9-15 (the §9 batch-1 enemies), five appended HazardEvents
-// (OwnedTelegraph, CurveBolt, Uppercut, Tracked, MimicSprung) and the EnemyStateMsg lane.
-pub const PROTOCOL_ID: u64 = 0xA570B0_9;
+// P07: the sun's phase and The Crawl's sites in RunSnapMsg, HazardEvent::Spore -> _9.
+// P12 (merged after P07): the replicated `arsenal::NetWeaponVis` (the Yo-Yo combo) and the
+// Evolve / Wisp hazard events -> _A.
+// P08 (merged after P12): kind codes 9-15 (the §9 batch-1 enemies), five appended
+// HazardEvents (OwnedTelegraph, CurveBolt, Uppercut, Tracked, MimicSprung) and the
+// EnemyStateMsg lane -> _B.
+pub const PROTOCOL_ID: u64 = 0xA570B0_B;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -241,8 +245,15 @@ pub struct RunSnapMsg {
     pub storm_dir: [f32; 3],
     pub storm_heading: [f32; 3],
     pub storm_radius: f32,
-    /// Devoured Sun Shard: how much of the sun is eaten — both machines light the same sky.
+    /// §3 diegetic difficulty: how much of the sun is eaten — both machines light the same sky.
     pub sun_shrink: f32,
+    /// §4 day/night: how far the sun has turned this stage. A client dead-reckons it between
+    /// snapshots (`daynight::drift_sun`), so both machines light — and judge night by — one sun.
+    pub sun_phase: f32,
+    /// The Dark Moon's CRAWL: where The Static is massing / erupting, as direction + mass
+    /// (`gimmicks::Crawl::to_wire`; a handful of sites at most). A client masses them on
+    /// between snapshots and draws them through the ground.
+    pub crawl: Vec<[f32; 4]>,
     /// The Static Radio is in the party (The Static comes early; the pause screen's threat
     /// line and anything else a joiner derives from `Scaling` must know).
     pub static_radio: bool,
@@ -479,6 +490,17 @@ pub enum HazardEvent {
     /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
     /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
     Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
+    // ---- appended (P07): world gimmicks, see `gimmicks` ----
+    /// A Dark Moon spore cap was primed: plant `plant` of the stage's `WorldFlora` (seeded,
+    /// so indexed alike on every machine) runs its fuse → burst → cloud → regrowth. The fuse's
+    /// danger disc arrives as its own Telegraph.
+    Spore { plant: u16 },
+    // ---- appended (P12): weapon one-shots, see `arsenal::WeaponFx` ----
+    /// `owner` evolved a weapon into `weapon` (`WeaponKind::code`): every machine plays the
+    /// §12 fanfare on them.
+    Evolve { owner: u8, weapon: u8 },
+    /// THE ANGELUS raised a friendly wisp for `owner` at `dir` (`power`: its hit, host-only).
+    Wisp { owner: u8, dir: [f32; 3], power: f32 },
     // ---- appended (P08): the §9 new enemies, see `bestiary` ----
     /// A telegraph that belongs to one crowd enemy (`enemy`, its NetId): a Trencher's
     /// uppercut spot, a Sunskimmer's landing. The client ties its copy to that proxy, so it
@@ -733,6 +755,7 @@ impl Plugin for NetPlugin {
             .replicate::<NetHero>()
             .replicate::<NetComet>()
             .replicate::<NetItemVis>()
+            .replicate::<crate::arsenal::NetWeaponVis>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
@@ -856,6 +879,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
+                (crate::arsenal::log_weapon_fx, crate::daynight::log_sky)
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 crate::netenemy::log_stream_stats.run_if(|d: Res<NetDebug>| d.log),
             )
             .add_systems(
@@ -958,6 +987,7 @@ fn announce_player_ids(
 fn push_run_snapshot(
     run: Res<crate::run::RunState>,
     storm: Res<crate::events_world::DustStorm>,
+    crawl: Res<crate::gimmicks::Crawl>,
     session: Res<SessionState>,
     mut out: MessageWriter<ToClients<RunSnapMsg>>,
 ) {
@@ -986,6 +1016,8 @@ fn push_run_snapshot(
             storm_heading: storm.heading.to_array(),
             storm_radius: storm.radius,
             sun_shrink: run.sun_shrink,
+            sun_phase: run.sun_phase,
+            crawl: crawl.to_wire(),
             static_radio: run.static_radio,
             assist: run.assist,
             assisted: run.assisted,
@@ -1000,6 +1032,7 @@ fn apply_run_snapshot(
     mut run: ResMut<crate::run::RunState>,
     mut sync: ResMut<RunSync>,
     mut storm: ResMut<crate::events_world::DustStorm>,
+    mut crawl: ResMut<crate::gimmicks::Crawl>,
 ) {
     for m in msgs.read() {
         // A straggler from a run that has already ended (or been superseded).
@@ -1040,6 +1073,8 @@ fn apply_run_snapshot(
         storm.heading = Vec3::from(m.storm_heading);
         storm.radius = m.storm_radius;
         run.sun_shrink = m.sun_shrink;
+        run.sun_phase = m.sun_phase;
+        crawl.adopt(&m.crawl);
         run.static_radio = m.static_radio;
         run.assist = m.assist;
         run.assisted = m.assisted;
@@ -1845,8 +1880,10 @@ pub fn start_host(commands: &mut Commands, channels: &RepliconChannels, port: u1
     commands.insert_resource(transport);
     commands.insert_resource(HostPort(port));
     commands.insert_resource(NetRole::Host);
-    info!("hosting on port {port}");
-    crate::playlog::line(format!("NET hosting on port {port}"));
+    // the address too: it is what the other player types, and what a log reader needs
+    let ip = local_ip();
+    info!("hosting on {ip} port {port}");
+    crate::playlog::line(format!("NET hosting on {ip} port {port}"));
     Ok(())
 }
 
@@ -2378,6 +2415,21 @@ fn reset_after_session(
 //    Repro: headless `--techs [--coop2] [--planet …]`; windowed
 //        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
 //    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
+// 2i. DAY/NIGHT + WORLD GIMMICKS (P07, see daynight.rs / gimmicks.rs) — one sun: the host
+//    turns it (`RunState::sun_phase`) and eats it (`sun_shrink`, Sun Shard + Cursed Δ); both
+//    ride RunSnapMsg and a client dead-reckons the phase (`daynight::drift_sun`), so every
+//    machine lights from, and judges night by, the same `daynight::Sun`. Night's effects on
+//    the horde (speed, closer spawns) and on loot (+25% Gold) are host simulation; the
+//    joiner's own Nightfall reading comes from its predicted body against the same sun.
+//    Mars's thorns snag in `player_physics` from the seeded flora both machines lay, so a
+//    joiner predicts its own snag. Dark Moon spore caps are host-primed; the cycle rides the
+//    hazard lane (HazardEvent::Spore, the plant's index) and its fuse disc streams as a
+//    Telegraph like any other; the damage is the host's. The Crawl's sites ride RunSnapMsg
+//    (`crawl`), massed on locally between snapshots, and draw through the ground on both.
+//    The Moon's Earthside/Farside is geometry both machines know (the Earth is fixed).
+//    Repro: headless `--daynight [--coop2] [--planet …]`, `--hazards --planet mars|darkmoon
+//    [--coop2]`; windowed coop.sh … --planet darkmoon --dev --staticnow and compare the
+//    two sides' SKY / GIMMICK lines.
 // 2i. NEW ENEMIES (P08, see bestiary.rs) — the seven §9 batch-1 kinds are ordinary crowd
 //    records (kind codes 9-15). What a client cannot derive from position rides a new
 //    ENEMY-STATE lane (EnemyStateMsg, 7-byte records at NET_ENEMY_STATE_HZ, only for ids
