@@ -1,0 +1,193 @@
+//! The §3 difficulty-scaling model, in ONE place.
+//!
+//! ```text
+//! EnemyHP(t)     = HP_base   × (1 + 0.11·t)^1.35 × (1 + 0.20·d) × T × (1 + 0.06·Δ)
+//! EnemyDMG(t)    = DMG_base  × (1 + 0.08·t)      × (1 + 0.15·d) × T × (1 + 0.05·Δ)
+//! SpawnRate(t)   = Rate_base × (1 + 0.14·t)      × (1 + 0.10·d)       × (1 + 0.04·Δ)
+//! EliteChance(t) = min(0.35, 0.02·t + 0.05·d + 0.03·Δ)
+//! ```
+//!
+//! `HP_base` / `DMG_base` are each `EnemyDef`'s own numbers times the `SCALE_HP_BASE` /
+//! `SCALE_DMG_BASE` anchors in config.rs (which say why the anchor sits where it does).
+//!
+//! Every system that sizes an enemy, a boss or the spawn budget reads a [`Scaling`] built
+//! here instead of doing its own arithmetic. Later layers (Ascension Depth — P23, weekly
+//! mutators — P23, co-op per-enemy and boss HP — P18, Farside's elite bump — P07) multiply
+//! into the fields of `Scaling` inside [`Scaling::new`], never at call sites.
+//!
+//! Pure functions of plain numbers so the headless self-check can pin the curve shapes.
+
+use super::RunState;
+use crate::config::*;
+
+/// The four inputs of the §3 formulas plus the party size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScalingInputs {
+    /// Run minutes across the WHOLE chain. The stage clock restarts at each teleporter, and
+    /// a per-stage `t` would hand an evolved build a softer horde on the next world than the
+    /// one it just left; `d` is the per-world step on top.
+    pub t_min: f32,
+    /// Chain depth: 0 on the first world of the chain.
+    pub depth: f32,
+    /// Planet multiplier `T` (`PlanetDef::threat`).
+    pub planet: f32,
+    /// Difficulty points `Δ` (see [`difficulty_points`]).
+    pub delta: f32,
+    /// Astronauts in the run (1–4).
+    pub party: usize,
+}
+
+impl ScalingInputs {
+    pub fn from_run(run: &RunState, party: usize) -> Self {
+        Self {
+            t_min: run.total_elapsed / 60.0,
+            depth: run.stage as f32,
+            planet: run.planet().def().threat,
+            delta: difficulty_points(run),
+            party: party.max(1),
+        }
+    }
+}
+
+/// `Δ`: the sheet's Difficulty stat in points (Cursed Moon Rock, Cursed Tome, Greed
+/// shrines — already folded into `run.difficulty` as the party max) plus a step per Tier.
+/// The Tier comes from the chain length rather than `run.tier` because the chain is what a
+/// co-op client receives from the host.
+pub fn difficulty_points(run: &RunState) -> f32 {
+    let tier = run.chain.len().max(1) as f32;
+    run.difficulty.max(0.0) * DIFFICULTY_POINTS_PER_UNIT + (tier - 1.0) * TIER_DIFFICULTY_POINTS
+}
+
+/// Multipliers for one moment of the run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Scaling {
+    /// Crowd enemy HP multiplier.
+    pub hp: f32,
+    /// Crowd enemy damage multiplier.
+    pub dmg: f32,
+    /// Multiplier on `Rate_base` (includes party scaling).
+    pub spawn: f32,
+    /// Chance that one elite roll (every `ELITE_ROLL_SECS`) promotes the next spawn.
+    pub elite_chance: f32,
+    /// Boss/miniboss HP multiplier. Bosses arrive at fixed stage marks and their `BossDef`
+    /// numbers are authored for that moment, so the run-time term is left out — only the
+    /// depth, planet and Δ terms of the §3 formula apply.
+    pub boss_hp: f32,
+    /// Boss/miniboss contact-damage multiplier (same reasoning as `boss_hp`).
+    pub boss_dmg: f32,
+    /// Party multiplier alone — also sizes the live-enemy cap.
+    pub party_spawn: f32,
+}
+
+impl Scaling {
+    pub fn new(i: ScalingInputs) -> Self {
+        let t = i.t_min.max(0.0);
+        let d = i.depth.max(0.0);
+        let delta = i.delta.max(0.0);
+        let depth_hp = 1.0 + SCALE_HP_D * d;
+        let depth_dmg = 1.0 + SCALE_DMG_D * d;
+        let delta_hp = 1.0 + SCALE_HP_DELTA * delta;
+        let delta_dmg = 1.0 + SCALE_DMG_DELTA * delta;
+        let party_spawn = PARTY_SPAWN_SCALE[i.party.clamp(1, PARTY_SPAWN_SCALE.len()) - 1];
+        Self {
+            hp: SCALE_HP_BASE * (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp,
+            dmg: SCALE_DMG_BASE * (1.0 + SCALE_DMG_T * t) * depth_dmg * i.planet * delta_dmg,
+            spawn: (1.0 + SCALE_RATE_T * t)
+                * (1.0 + SCALE_RATE_D * d)
+                * (1.0 + SCALE_RATE_DELTA * delta)
+                * party_spawn,
+            elite_chance: (ELITE_CHANCE_T * t + ELITE_CHANCE_D * d + ELITE_CHANCE_DELTA * delta)
+                .clamp(0.0, ELITE_CHANCE_CAP),
+            boss_hp: depth_hp * i.planet * delta_hp,
+            boss_dmg: depth_dmg * i.planet * delta_dmg,
+            party_spawn,
+        }
+    }
+
+    pub fn for_run(run: &RunState, party: usize) -> Self {
+        Self::new(ScalingInputs::from_run(run, party))
+    }
+}
+
+/// `Rate_base` in spawns per second: the §3 run-arc beats, interpolated on the stage
+/// countdown, or The Static's ever-growing base once the clock has run out.
+pub fn spawn_rate_base(timer_left: f32, static_active: bool, static_secs: f32) -> f32 {
+    if static_active {
+        return STATIC_RATE_BASE + STATIC_RATE_GROWTH * static_secs.max(0.0);
+    }
+    let beats = &SPAWN_RATE_BEATS;
+    if timer_left >= beats[0].0 {
+        return beats[0].1;
+    }
+    for w in beats.windows(2) {
+        let ((t0, r0), (t1, r1)) = (w[0], w[1]);
+        if timer_left >= t1 {
+            let f = (t0 - timer_left) / (t0 - t1).max(1e-3);
+            return r0 + (r1 - r0) * f;
+        }
+    }
+    beats[beats.len() - 1].1
+}
+
+/// The "tension breathes" beat modifier on top of `Rate_base`: exhale after a boss falls,
+/// hold while a miniboss is up, otherwise full inhale.
+pub fn beat_modifier(miniboss_alive: bool, exhale_left: f32) -> f32 {
+    if exhale_left > 0.0 {
+        SPAWN_EXHALE_MULT
+    } else if miniboss_alive {
+        SPAWN_HOLD_MULT
+    } else {
+        1.0
+    }
+}
+
+/// Headless self-check: the curve SHAPES the GDD asks for. Returns the first violated rule.
+pub fn self_check() -> Result<(), String> {
+    let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1 };
+    let s0 = Scaling::new(base);
+    if (s0.hp - SCALE_HP_BASE).abs() > 1e-4
+        || (s0.dmg - SCALE_DMG_BASE).abs() > 1e-4
+        || (s0.spawn - 1.0).abs() > 1e-4
+    {
+        return Err(format!("scaling at t=0 must be the HP/DMG_base anchors, got {s0:?}"));
+    }
+    if s0.elite_chance != 0.0 {
+        return Err("elite chance must start at 0".into());
+    }
+    // exact formula at a probe point: t=10, d=2, T=1.25, Δ=5
+    let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, party: 1 });
+    let want_hp = SCALE_HP_BASE * 2.1f32.powf(1.35) * 1.4 * 1.25 * 1.3;
+    let want_dmg = SCALE_DMG_BASE * 1.8 * 1.3 * 1.25 * 1.25;
+    let want_spawn = 2.4 * 1.2 * 1.2;
+    let want_elite = (0.2f32 + 0.1 + 0.15).min(0.35);
+    for (name, got, want) in [("hp", p.hp, want_hp), ("dmg", p.dmg, want_dmg), ("spawn", p.spawn, want_spawn), ("elite", p.elite_chance, want_elite)] {
+        if (got - want).abs() > want * 1e-3 {
+            return Err(format!("{name}: got {got}, want {want}"));
+        }
+    }
+    // HP must be super-linear in t (evolutions mandatory), damage linear, elite capped.
+    let hp_at = |t: f32| Scaling::new(ScalingInputs { t_min: t, ..base }).hp;
+    if hp_at(20.0) - hp_at(10.0) <= hp_at(10.0) - hp_at(0.0) {
+        return Err("enemy HP is not super-linear in run time".into());
+    }
+    let mut prev = Scaling::new(base);
+    for step in 1..=120 {
+        let s = Scaling::new(ScalingInputs { t_min: step as f32 * 0.5, ..base });
+        if s.hp < prev.hp || s.dmg < prev.dmg || s.spawn < prev.spawn || s.elite_chance < prev.elite_chance {
+            return Err(format!("scaling decreased at t={}", step as f32 * 0.5));
+        }
+        prev = s;
+    }
+    if Scaling::new(ScalingInputs { t_min: 500.0, depth: 9.0, delta: 99.0, ..base }).elite_chance > ELITE_CHANCE_CAP {
+        return Err("elite chance exceeded its cap".into());
+    }
+    // Rate_base walks the arc beats and never dips outside the breathing modifiers.
+    if (spawn_rate_base(600.0, false, 0.0) - SPAWN_RATE_BEATS[0].1).abs() > 1e-4
+        || spawn_rate_base(300.0, false, 0.0) <= spawn_rate_base(500.0, false, 0.0)
+        || spawn_rate_base(10.0, false, 0.0) < spawn_rate_base(300.0, false, 0.0)
+        || spawn_rate_base(0.0, true, 120.0) <= spawn_rate_base(0.0, true, 0.0)
+    {
+        return Err("Rate_base does not follow the run arc".into());
+    }
+    Ok(())
+}

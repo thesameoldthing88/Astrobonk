@@ -233,11 +233,3 @@ impl EliteMods {
     pub const SCALE: f32 = 1.65;
     pub const XP: f32 = 8.0;
 }
-
-/// Global time scaling of enemy stats (the swarm gets meaner as the clock runs).
-pub fn time_scaling(elapsed: f32, difficulty: f32) -> (f32, f32) {
-    let t = elapsed / 60.0;
-    let hp_mult = (1.0 + 0.22 * t * t.sqrt().max(1.0) * 0.5 + 0.35 * t) * (1.0 + difficulty);
-    let dmg_mult = (1.0 + 0.12 * t) * (1.0 + difficulty * 0.5);
-    (hp_mult, dmg_mult)
-}

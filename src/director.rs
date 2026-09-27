@@ -3,12 +3,15 @@
 
 use crate::config::*;
 use crate::content::enemies::BossKind;
+use crate::content::items::ItemKind;
 use crate::content::planets::PlanetKind;
-use crate::enemies::{self, Boss, Director, EnemyAssets};
+use crate::content::tomes::TomeKind;
+use crate::enemies::{self, Boss, Director, EnemyAssets, MinibossSlot};
 use crate::interact;
 use crate::messages::*;
 use crate::planet::{self, CurrentPlanet, StageScoped};
 use crate::player::{self, Player};
+use crate::run::scaling::Scaling;
 use crate::run::{self, ChoicePanel, PlayerState, RunPhase, RunResult, RunState};
 use crate::save::MetaSave;
 use crate::AppState;
@@ -26,6 +29,9 @@ pub struct ResultsData {
     pub level: u32,
     pub gold: u64,
     pub silver_earned: u64,
+    /// The §10 formula term by term, (label, amount) — the results screen shows the math
+    /// so "the next unlock always feels close" is something the player can read.
+    pub silver_lines: Vec<(String, String)>,
     pub time: f32,
     pub quests_completed: Vec<String>,
     pub daily: Option<(String, u64, bool)>, // (world name, best score, is-new-best)
@@ -54,7 +60,8 @@ pub fn run_clock(
 
     if run.static_active {
         run.static_timer += dt;
-        // trickle of silver for surviving
+        // every overtime second is paid at banking (§10 Static_overtime_seconds)
+        run.static_secs_total += dt;
         return;
     }
 
@@ -71,13 +78,18 @@ pub fn run_clock(
         .try_normalize()
         .or_else(|| dirs.first().copied());
 
+    let scaling = Scaling::for_run(&run, dirs.len());
+
     // miniboss marks
     for (i, mark) in MINIBOSS_MARKS.iter().enumerate() {
         let Some(anchor) = anchor else { break };
         if run.timer <= *mark && !run.minibosses_spawned[i] {
             run.minibosses_spawned[i] = true;
             let kind = if i == 0 { BossKind::CraterpillarJr } else { BossKind::RoverGoneWrong };
-            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor, kind, run.difficulty);
+            let e = enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor, kind, &scaling);
+            // Tag WHICH mark this is: the §3 guaranteed chest follows miniboss #1, whatever
+            // kind a world's miniboss table (P20) puts there.
+            commands.entity(e).insert(MinibossSlot(i as u8));
             banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
@@ -90,7 +102,7 @@ pub fn run_clock(
             PlanetKind::Moon => BossKind::Craterpillar,
             _ => BossKind::Anubot,
         };
-        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, run.difficulty);
+        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, &scaling);
         banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
         sfx.write(SfxMsg(Sfx::BossRoar));
     }
@@ -202,6 +214,7 @@ pub fn stage_transition(
     run.static_timer = 0.0;
     run.teleporter_open = false;
     run.microwave_used = false;
+    run.reward_chest = None;
     *director = Director::default();
     let stage_seed = run.run_seed.wrapping_add(run.stage as u64);
     game_rng.reseed(stage_seed);
@@ -293,9 +306,14 @@ pub fn bank_results(
         save.counters.runs_won += 1;
     }
 
-    // silver payout: pickups + performance
-    let performance = (run.kills / 40) as u64 + p_level as u64 + if victory { 30 * run.tier as u64 } else { 0 };
-    let payout = run.silver_run + (performance as f32 * q_ps.single().map(|p| p.stats.silver_gain).unwrap_or(1.0)) as u64;
+    // silver payout: the §10 formula plus the Silver physically picked up this run
+    let golden_tome = if save.tome_loadout.contains(&TomeKind::Golden) { save.tome_level(TomeKind::Golden) } else { 0 };
+    let (cursed_rocks, silver_gain) = q_ps
+        .single()
+        .map(|p| (p.item_count(ItemKind::CursedMoonRock), p.stats.silver_gain))
+        .unwrap_or((0, 1.0));
+    let silver = silver_payout(&run, victory, golden_tome, cursed_rocks, silver_gain);
+    let payout = silver.total;
     save.silver += payout;
 
     // daily challenge: track today's best score
@@ -320,6 +338,21 @@ pub fn bank_results(
     }
 
     let newly = save.check_quests();
+    // Quest Silver is paid into the save by check_quests; list it under the formula so the
+    // screen accounts for every Silver the run moved (kept out of `payout`, which is also
+    // the daily score and must not reward first-time quest clears).
+    let quest_silver: u64 = newly
+        .iter()
+        .flat_map(|q| q.def().rewards.iter())
+        .map(|r| match r {
+            crate::content::quests::Reward::Silver(s) => *s,
+            _ => 0,
+        })
+        .sum();
+    let mut silver_lines = silver.lines;
+    if quest_silver > 0 {
+        silver_lines.push(("Quest rewards".into(), format!("+{quest_silver}")));
+    }
     let quests_completed: Vec<String> = newly
         .iter()
         .map(|q| {
@@ -336,6 +369,7 @@ pub fn bank_results(
         level: p_level,
         gold: p_gold,
         silver_earned: payout,
+        silver_lines,
         time: run.total_elapsed,
         quests_completed,
         daily,
@@ -343,4 +377,94 @@ pub fn bank_results(
 
     *phase = RunPhase::Playing; // reset for next run
     run.result = None;
+}
+
+/// The §10 Silver payout, itemised.
+pub struct SilverPayout {
+    /// (label, amount) rows for the results screen, in formula order.
+    pub lines: Vec<(String, String)>,
+    pub total: u64,
+}
+
+/// ```text
+/// Silver = (survival_seconds / 6) + (kills / 4) + (boss_kills × 150)
+///        + (tier_bonus × 50) + Static_overtime_seconds
+///        × (1 + GoldenTome×0.05) × (1 + CursedMoonRock×0.15)
+/// ```
+/// The two multipliers scale the WHOLE sum: read literally they would bind to the Static
+/// term alone, which would make a Golden Tome worthless to anyone who takes the teleporter.
+/// Added on top: the Silver picked up in the run (pots, The Static's ghosts), already
+/// multiplied by Silver gain when it was collected. `tier_bonus` is the Tier on a chain
+/// clear and 0 otherwise — a death still banks every other term (§3: death is never a zero).
+pub fn silver_payout(run: &RunState, victory: bool, golden_tome: u32, cursed_rocks: u32, silver_gain: f32) -> SilverPayout {
+    let clock = |secs: f32| format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32);
+    let survival = (run.total_elapsed.max(0.0) / SILVER_SURVIVAL_SECS_PER) as u64;
+    let kills = (run.kills as f32 / SILVER_KILLS_PER) as u64;
+    let bosses = run.boss_kills * SILVER_PER_BOSS;
+    let tier = if victory { run.tier as u64 * SILVER_PER_TIER } else { 0 };
+    let overtime = (run.static_secs_total.max(0.0) * SILVER_PER_STATIC_SEC) as u64;
+    let base = survival + kills + bosses + tier + overtime;
+
+    let mut lines = vec![
+        (format!("Survived {}", clock(run.total_elapsed)), format!("+{survival}")),
+        (format!("Bonks {}", run.kills), format!("+{kills}")),
+    ];
+    if run.boss_kills > 0 {
+        lines.push((format!("Bosses {} x {SILVER_PER_BOSS}", run.boss_kills), format!("+{bosses}")));
+    }
+    if tier > 0 {
+        lines.push((format!("Tier {} clear", run.tier), format!("+{tier}")));
+    }
+    if overtime > 0 {
+        lines.push((format!("Static overtime {}", clock(run.static_secs_total)), format!("+{overtime}")));
+    }
+    let golden = 1.0 + SILVER_GOLDEN_TOME_PER_LEVEL * golden_tome as f32;
+    let cursed = 1.0 + SILVER_CURSED_ROCK_EACH * cursed_rocks as f32;
+    if golden_tome > 0 {
+        lines.push((format!("Golden Tome Lv{golden_tome}"), format!("x{golden:.2}")));
+    }
+    if cursed_rocks > 0 {
+        lines.push((format!("Cursed Moon Rock x{cursed_rocks}"), format!("x{cursed:.2}")));
+    }
+    if (silver_gain - 1.0).abs() > 1e-3 {
+        lines.push(("Silver gain".into(), format!("x{silver_gain:.2}")));
+    }
+    let performance = (base as f32 * golden * cursed * silver_gain.max(0.0)).round() as u64;
+    if run.silver_run > 0 {
+        lines.push(("Silver found".into(), format!("+{}", run.silver_run)));
+    }
+    SilverPayout { lines, total: performance + run.silver_run }
+}
+
+/// `--minibossnow` (test harness; the windowed game also needs `--dev`): wind the clock to
+/// just before the 7:00 mark, then — once miniboss #1 has stood a few seconds — finish it
+/// through the REAL HitMsg → apply_hits path, so the guaranteed-cache pipeline (kill →
+/// RunState → sync_reward_cache → RunSnapMsg) runs end to end without a 3-minute fight.
+/// Host/solo only.
+pub fn dev_miniboss_now(
+    time: Res<Time>,
+    mut run: ResMut<RunState>,
+    mut wound: Local<bool>,
+    mut alive_for: Local<f32>,
+    q: Query<(Entity, &enemies::Enemy, &MinibossSlot)>,
+    mut hits: MessageWriter<HitMsg>,
+) {
+    if !*wound {
+        *wound = true;
+        run.timer = MINIBOSS_MARKS[0] + 3.0;
+        // keep the spawn mix and the §3 run-time term consistent with the wound clock
+        run.elapsed = STAGE_SECONDS[0] - run.timer;
+        run.total_elapsed = run.total_elapsed.max(run.elapsed);
+        info!("DEV --minibossnow: clock wound to {:.0}s", run.timer);
+        return;
+    }
+    for (e, enemy, slot) in &q {
+        if slot.0 != 0 || enemy.hp <= 0.0 {
+            continue;
+        }
+        *alive_for += time.delta_secs();
+        if *alive_for > 6.0 {
+            hits.write(HitMsg { source: None, target: e, amount: enemy.hp + 1.0, crit: false, knock: Vec3::ZERO });
+        }
+    }
 }

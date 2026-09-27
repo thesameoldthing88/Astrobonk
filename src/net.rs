@@ -33,7 +33,7 @@ use std::time::{Duration, SystemTime};
 
 /// Bumped whenever the wire format changes — mismatched builds refuse to connect
 /// instead of desyncing in confusing ways.
-pub const PROTOCOL_ID: u64 = 0xA570B0_2; // bumped: enemy streaming changed the wire
+pub const PROTOCOL_ID: u64 = 0xA570B0_3; // bumped: RunSnapMsg carries the miniboss cache
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -116,6 +116,9 @@ pub struct RunSnapMsg {
     pub boss_spawned: bool,
     pub boss_dead: bool,
     pub teleporter_open: bool,
+    /// The guaranteed miniboss-#1 cache (§3): where it stands while unopened. A client
+    /// spawns/pops its copy from this alone (`interact::sync_reward_cache`).
+    pub reward_chest: Option<[f32; 3]>,
 }
 
 /// Client-side: has the authoritative run arrived yet? A joiner must NOT build its world
@@ -512,6 +515,7 @@ fn push_run_snapshot(run: Res<crate::run::RunState>, mut out: MessageWriter<ToCl
             boss_spawned: run.boss_spawned,
             boss_dead: run.boss_dead,
             teleporter_open: run.teleporter_open,
+            reward_chest: run.reward_chest.map(|d| d.to_array()),
         },
     });
 }
@@ -547,6 +551,7 @@ fn apply_run_snapshot(
         run.boss_spawned = m.boss_spawned;
         run.boss_dead = m.boss_dead;
         run.teleporter_open = m.teleporter_open;
+        run.reward_chest = m.reward_chest.map(Vec3::from_array);
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);

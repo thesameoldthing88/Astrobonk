@@ -42,6 +42,9 @@ pub struct PlanetDef {
     pub flora_style: FloraStyle,
     pub has_earthrise: bool,
     pub meteor_showers: bool,
+    /// The §3 planet multiplier `T` on enemy HP and damage — "hotter/weirder deeper" (§8),
+    /// so a world's bite matches where it sits in the campaign map.
+    pub threat: f32,
 }
 
 impl PlanetKind {
@@ -73,6 +76,7 @@ impl PlanetKind {
                 flora_style: FloraStyle::Spires,
                 has_earthrise: true,
                 meteor_showers: true,
+                threat: 1.0,
             },
             Mars => PlanetDef {
                 kind: *self,
@@ -97,6 +101,7 @@ impl PlanetKind {
                 flora_style: FloraStyle::Thorns,
                 has_earthrise: false,
                 meteor_showers: true,
+                threat: 1.1,
             },
             DarkMoon => PlanetDef {
                 kind: *self,
@@ -121,6 +126,7 @@ impl PlanetKind {
                 flora_style: FloraStyle::GlowShrooms,
                 has_earthrise: false,
                 meteor_showers: false,
+                threat: 1.25,
             },
         }
     }

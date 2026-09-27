@@ -48,6 +48,13 @@ pub fn playing(phase: Res<run::RunPhase>) -> bool {
     *phase == run::RunPhase::Playing
 }
 
+/// A test-harness flag that bends a run (winds the clock, hands out loot) counts only when
+/// `--dev` is passed with it, so a shipped binary can't be talked into it (CLAUDE.md rule
+/// 10). P28 routes the older harness flags (`--bossnow`, `--stagenow`, …) through here too.
+pub fn dev_flag(name: &str) -> bool {
+    std::env::args().any(|a| a == "--dev") && std::env::args().any(|a| a == name)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--headless") {
@@ -159,9 +166,22 @@ fn main() {
         .add_systems(Update, dev_fast_boss.run_if(in_state(AppState::InRun)))
         .add_systems(
             Update,
+            dev_levelup_now
+                .run_if(in_state(AppState::InRun))
+                .run_if(|| dev_flag("--levelupnow")),
+        )
+        .add_systems(
+            Update,
             dev_stage_now
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| std::env::args().any(|a| a == "--stagenow")),
+        )
+        .add_systems(
+            Update,
+            director::dev_miniboss_now
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--minibossnow")),
         )
         .add_systems(
             Update,
@@ -279,6 +299,9 @@ fn main() {
                 player::player_upkeep.run_if(net::is_simulating),
                 fx::update_particles,
                 director::stage_transition,
+                // Host AND client: spawns/pops the miniboss cache from RunState, which a
+                // client adopts from RunSnapMsg.
+                interact::sync_reward_cache.before(director::stage_transition),
                 // Run-end is the host's call. On a client `all(dead)` is a one-element
                 // check over its own sheet and fires while the host plays on.
                 director::downed_watch.run_if(net::is_simulating),
@@ -517,6 +540,34 @@ fn dev_fast_boss(
         info!("DEV --bossnow: clock wound to {:.0}s (minibosses skipped)", run.timer);
     }
     *done = true;
+}
+
+/// `--dev --levelupnow`: queue three level-ups and 60 Gold on the local astronaut a few
+/// seconds in, so the level-up panel's Refresh (free, then paid) / Banish / Skip row can be
+/// driven and screenshot in a windowed test without farming gems first.
+fn dev_levelup_now(
+    time: Res<Time>,
+    mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
+    mut waited: Local<f32>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *waited += time.delta_secs();
+    if *waited < 3.0 {
+        return;
+    }
+    let Ok(mut ps) = q.single_mut() else { return };
+    let target = ps.level + 3;
+    while ps.level < target {
+        let need = ps.xp_needed - ps.xp;
+        ps.xp += need;
+        ps.gain_xp(0.0);
+    }
+    ps.gold += 60;
+    *done = true;
+    info!("DEV --levelupnow: {} level-ups queued", ps.pending_levelups);
 }
 
 /// Close any leftover modal state when leaving a run.

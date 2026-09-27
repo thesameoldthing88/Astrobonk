@@ -149,3 +149,18 @@ replication/input routing (+ NETCODE NOTES running log) · `remote.rs` drawing t
 - Charge-shrine loot + Moai + Microwave reuse the level-up ChoicePanel (`is_levelup: false`).
 - Boss is a scaled capsule; per-boss meshes/attacks are v0.2 work.
 - `GlobalZIndex(10/20)` layers panels over HUD; menus rebuild side panel on click.
+- **Silver income vs sinks (since P01).** Banking follows the GDD §10 formula. A T1 run that
+  clears and then farms ~1:30 of The Static now banks about 4,700 Silver (about 2,300 from
+  the formula, mostly `kills / 4`, plus about 2,400 picked up). The v0.1 formula paid about
+  2,650 for the same run, and its performance part was about 250. The sinks are still v0.1
+  prices: tomes cost `8·l^1.5` over 20 ranks and quests pay 20-250 Silver. P05 moves tomes
+  to the §7 price (`100 × 1.6^level`, 10 ranks), P21 re-prices quests and P26 adds the
+  Unlock Web (1,200-15,000 per node). Until they land, meta progress runs fast.
+- **Enemy HP curve (since P01).** HP follows GDD §3, `(1 + 0.11·t)^1.35`, with `t` counted
+  across the whole chain, and is anchored so the cold-open Shambler still dies to one
+  starter hit (`config::SCALE_HP_BASE`). Late T1 is softer than the v0.1 curve (x2.7 at
+  10:00 vs x8). Chained worlds start far harder, because v0.1 reset to x1 at every
+  teleporter; a T3 finale now reaches about x11. Tune against `--headless 21000 --balance`,
+  which keeps the bot alive and prints spawns/s against kills/s and the live count every
+  30 s. Don't tune against bot deaths: the bot dies to contact damage around minute 3-4
+  whatever the curve.
