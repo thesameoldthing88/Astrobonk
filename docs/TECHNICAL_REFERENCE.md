@@ -244,6 +244,7 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `--headless 2400 --coop2` | Host correctness with two `Player`/`PlayerState` astronauts: shared XP, per-player targeting, run continues while one player is alive. Before Stage 3 this path showed a frozen clock and 0 kills | Anything on the wire; the second astronaut is not driven by `InputIntent` | Pass (last run as `--headless --coop2`, i.e. 1500 ticks) |
 | `--headless 1200 --fast-boss` | The boss spawns at the boss mark and the late-game mix (Beamer, Lobber, UFO, Burrower) runs without panicking | That the bot can fight: today it dies at level 1 with 0 kills and still passes, because the kill check is skipped | Pass (weak) |
 | `--headless 1200 --fast-boss --coop2` | Same, with two astronauts | | Flaky, 1 of 3 passed, because of the summary-query bug above |
+| `--headless 1200 --bestiary [all\|rollo,trencher,aegis,skimmer,tick,mimic,prime] [--coop2] [--planet …]` (P08) | The §9 batch-1 kinds through the real systems, with the bot pinned and disarmed: Aegis blocks a frontal hit and takes a flank one; Rollo bonks into a rock and never out-turns its cap; a Trencher tunnels out of the hash under a ridge and launches a grounded astronaut, spares an airborne one, and its ring dies with it; a Sunskimmer at altitude sits in the hash at weapon height and blasts its mark; a Beacon Tick tracks and runs out; a Mimic eats the price, shockwaves, flees, refunds its payer (with `--coop2`, a PEER's purse and grant) or digs out; a Beamer Prime leads a running mark. RULES adds the spawn tables and the enemy-state lane round-trip | Client drawing (use coop.sh with `--dev --enemies all`) | Pass (new) |
 | `--headless ... --planet mars` | Dust storm spawns and blows (the first storm comes 10 s in); with `--fast-boss` added, Anubot and the Verdict Beam run (a plain 2400-tick run ends about 79 s into a 600 s stage, long before the 90 s boss mark) | | Not re-run for this document |
 
 ### 4.6 Limitations
@@ -1070,18 +1071,26 @@ spawn_bank += rate · dt ; every 0.25 s spawn floor(spawn_bank), limited to room
 
 - The cap counts every `Enemy`, so pots (60 on the Moon) and bosses use cap slots. Overflow is discarded, not banked.
 - Each spawn round-robins over the anchors, picks a uniform heading, and places the enemy 42-58 m of arc out (over the horizon). Burrowers instead appear 9-16 m away.
-- The kind is uniform over `EnemyKind::mix(elapsed)` (`src/content/enemies.rs:155-167`):
+- The kind is picked from the **world's spawn table** (`content::enemies::spawn_table`, P08): each row is `(kind, join, weight, cap, can_elite)`. `pick_spawn` draws once per spawn over the rows that have joined by `elapsed` (stage seconds) and are under their live cap (`cap × PARTY_SPAWN_SCALE[P]`, counted over the live horde by kind), weighted. The built eight share one arc on every world at weight 1; each world adds its GDD §9 kinds:
 
-| `elapsed` (s) | Mix |
-|---|---|
-| 0-89 | Shambler |
-| 90-179 | + Sprinter |
-| 180-269 | + Spitter |
-| 270-359 | + Bruiser |
-| 360-449 | + UFO, Beamer |
-| 450-539 | + Burrower |
-| 540+ | + Lobber |
+| `elapsed` (s) | Every world | Moon | Mars | Dark Moon |
+|---|---|---|---|---|
+| 0 | Shambler | | | |
+| 90 | + Sprinter | | | |
+| 120 | | | | + Beacon Tick (0.25, cap 3) |
+| 150 | | + Rollo (0.55, cap 8) | | |
+| 180 | + Spitter | | | |
+| 200 | | | + Aegis Drone (0.55, cap 10) | |
+| 240 | | + Beacon Tick (0.22, cap 3) | + Beacon Tick (0.22, cap 3) | |
+| 270 | + Bruiser | | | |
+| 280 | | | + Sunskimmer (0.40, cap 5, never elite) | |
+| 320 | | + Trencher (0.40, cap 6) | | |
+| 360 | + UFO, Beamer | | | |
+| 420 | | | + Longshot Beamer Prime (0.14, cap 2, never elite) | |
+| 450 | + Burrower | | | |
+| 540 | + Lobber | | | |
 
+  The Mimic Chest is in no table: it is laid out with the chests. A pending elite waits for a row with `can_elite`. The boss phase add rings draw from the same table (at `max(elapsed, 300)`) and respect the per-kind caps.
 - Elites: from `elapsed > 150` each spawn has a 1.2% chance, and a guaranteed elite whenever `elite_timer` (45 s, then every 40 s) expires (`src/enemies.rs:612-616`).
 - All spawn-side randomness here comes from `GameRng` (section 12).
 
@@ -1111,6 +1120,13 @@ Party size scales spawn count only; per-enemy and boss HP do not scale with play
 | Burrower | Spawns buried near the player, rumbles for 1.3 s, erupts | Eruption hits within 2.6 m | `src/enemies.rs:1196-1234` |
 | Enemy projectile | Travels over the sphere; the first astronaut within √1.1 m takes it | | `src/enemies.rs:1522-1558` |
 | Telegraph | Grows over its timer, then detonates | Ring: hits `0.35·r < d < r + 1`; disc: `d < r + 0.6` | `src/enemies.rs:1608-1647` |
+| Rollo (P08) | Rolls a great circle at the nearest astronaut: eases to 7 m/s on the flat, ±16 m/s² per unit of grade, 2-12.5 m/s, turns ≤ 0.9 rad/s; bite scales with speed and it rolls through. Into a crater wall (uphill grade > 0.42) or a rock above 5.5 m/s it bonks: stunned 1.8 s, loses 35% max HP | `ROLLO_*` | `src/bestiary.rs` `rollo_roll` |
+| Trencher (P08) | Surfaced it walks; with a mark 4-20 m off it sinks (0.45 s, `Buried`, out of the hash), tunnels at 8 m/s under a ridge of mounds (≤ 4 s), marks the spot (owned disc, 0.75 s), then uppercuts every GROUNDED astronaut within 3 m for 1.4× its bite and launches them (vel_r 13); airborne ones are spared. 6 s cooldown | `TRENCH_*` | `trencher_update` |
+| Aegis Drone (P08) | Walks in like a melee kind; its shield facing turns toward the nearest astronaut at 1.4 rad/s. Hits whose line (knockback, else the shooter's position) comes from inside its ±66° cone land 10% and show BLOCK | `AEGIS_*` | `aegis_turn`, `combat::apply_hits` |
+| Sunskimmer (P08) | Cruises at 12 m altitude at 11 m/s; within 15 m it commits (owned disc at the mark, led by half the dive), dives 1.3 s and blasts 3.2 m (astronauts over 2.5 m up ride it out), dying with it. Hitbox: the column under it (hash at 1 m), shadow drawn under it, whine for a local astronaut within 38 m | `SKIM_*` | `skimmer_update` |
+| Beacon Tick (P08) | No bite; its touch spends it and tracks the astronaut 6 s: the horde reads them at 0.35× their distance and anything over 30 m from its mark moves 1.35× faster; a blinking beacon over them | `TRACKER_*` | `tick_latch`, `enemies::horde_lure` |
+| Mimic Chest (P08) | 14% of stage chests (layout stream). E with enough gold pays the price into it: it springs, 360° disc shockwave (5 m, 0.45 s, 1.5× bite), flees at 6.8 m/s zig-zagging for 12 s then digs out. Killed: `RefundMsg` pays the price back to the PAYER's purse (a joiner's by `GrantOut::Loot`), plus elite loot | `MIMIC_*` | `mimic_spring`, `mimic_flee`, `pay_refunds` |
+| Longshot Beamer Prime (P08) | Holds 38 m off; paints the nearest visible astronaut within 62 m for 1.6 s (last 0.35 s locked), LEADING them by the bolt's flight; fires a 46 m/s railbolt on a line of fire from its muzzle to the led mark's chest height (`CurveShot`) that any terrain rising above the line stops. Elite loot | `PRIME_*` | `prime_attack`, `enemies::enemy_projectiles` |
 | Dust storm | Spitters, UFOs, Beamers and Lobbers do nothing while the local player is inside a storm (Beamers also drop their aim lines) | | `src/enemies.rs:1284,1342-1350,1456` |
 
 ### 11.6 Bosses
@@ -2144,11 +2160,11 @@ General rules for every change: never rename or reorder an enum variant that is 
 
 ### 21.4 Add an enemy
 
-1. `src/content/enemies.rs`: add an `EnemyKind` variant (`:4-14`), its `EnemyDef` arm (`:40-152`: `hp`, `speed`, contact `damage`, `xp`, `scale`, `color`, `hover` (> 0 makes a flier), `standoff` (> 0 makes it hold that arc and strafe)), and add it to the `mix()` windows (`:155-167`).
+1. `src/content/enemies.rs`: add an `EnemyKind` variant (append), its `EnemyDef` arm (`hp`, `speed`, contact `damage`, `xp`, `scale`, `color`, `hover` (> 0 makes a flier), `standoff` (> 0 makes it hold that arc and strafe)), add it to `EnemyKind::ALL` (wire-code order), give it an `accent()` colour if its mesh has a `set_glow` part, and a row in each world's spawn table (`MOON_TABLE`…) it lives on — `table_self_check` fails a world that lacks its §9 kinds. Behaviour for a kind that needs more than steering goes in `src/bestiary.rs`: `attach` gives it its components (every spawn path calls it), a host system acts, `EnemyVis` carries what a client must see, `bestiary_pose` draws it; spawn through `enemies::spawn_enemy_at` from anywhere else.
 2. `src/enemies.rs`: add a mesh arm in `enemy_mesh` (`:226-298`, exhaustive) and add the kind to the list in `setup_enemy_assets` (`:373-383`). This is required: `spawn_enemy` indexes `assets.meshes[&kind]` and `mats[&kind]`. Add per-kind attack components in `spawn_enemy` (`:524-535`).
 3. A special attack is a new component plus a system that snapshots living astronauts first (`AstronautSnap`), targets with `nearest_astronaut`, writes `PlayerHitMsg { victim, .. }`, and spawns hazards with the existing `EnemyProjectile`, `Telegraph` or `MortarShell` components (then they stream to clients with no extra code). Register it in chain D (`src/main.rs:185-214`) with `.run_if(net::is_simulating)` and in `src/headless.rs:246-267`. A ranged attack should respect `DustStorm.player_inside`.
 4. Optional: a per-kind bob and waddle in `animate_crowd` (`src/enemies.rs:1153-1177`).
-5. Co-op: add it to `kind_code` (exhaustive, so the compiler reminds you) **and** `kind_from_code`, which silently falls back to Shambler (`src/netenemy.rs:1039-1064`). Keep `scale × 1.65 × 1.1 ≤ 3.25`, the range of the spawn descriptor's scale byte (`src/netenemy.rs:351,1119`). A new hazard type needs a `HazardEvent` variant plus `stream_hazards` and `receive_hazards` arms. Bump `PROTOCOL_ID`.
+5. Co-op: add it to `kind_code` (exhaustive, so the compiler reminds you) **and** `kind_from_code` (the headless `state_lane_self_check` fails a code that does not round-trip in `ALL` order), which silently falls back to Shambler (`src/netenemy.rs:1039-1064`). Keep `scale × 1.65 × 1.1 ≤ 3.25`, the range of the spawn descriptor's scale byte (`src/netenemy.rs:351,1119`). A new hazard type needs a `HazardEvent` variant plus `stream_hazards` and `receive_hazards` arms. Bump `PROTOCOL_ID`.
 6. Verify: `--headless 1200 --fast-boss` (the full late-game mix) and `--headless 2400`.
 
 ### 21.5 Add a planet

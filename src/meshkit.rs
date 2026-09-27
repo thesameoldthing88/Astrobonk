@@ -15,12 +15,42 @@ pub struct MeshData {
     pos: Vec<[f32; 3]>,
     nrm: Vec<[f32; 3]>,
     col: Vec<[f32; 4]>,
+    /// Emissive mask coordinate per vertex: `GLOW_UV` for accent parts, `BODY_UV` otherwise.
+    uv: Vec<[f32; 2]>,
     idx: Vec<u32>,
+    glow: bool,
+}
+
+/// UVs into `glow_mask_image`, a 2×1 texture: left texel black, right texel white. A
+/// material that uses it as its `emissive_texture` lights only the accent parts, so one
+/// material (one draw call per kind) can carry one glowing detail.
+pub const BODY_UV: [f32; 2] = [0.25, 0.5];
+pub const GLOW_UV: [f32; 2] = [0.75, 0.5];
+
+/// The 2×1 emissive mask the `GLOW_UV`/`BODY_UV` coordinates sample (nearest filtering, so
+/// the two texels never bleed into each other).
+pub fn glow_mask_image() -> Image {
+    use bevy::image::ImageSampler;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut img = Image::new(
+        Extent3d { width: 2, height: 1, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        vec![0, 0, 0, 255, 255, 255, 255, 255],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    img.sampler = ImageSampler::nearest();
+    img
 }
 
 impl MeshData {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Shapes added while this is on are the model's emissive accent (see `GLOW_UV`).
+    pub fn set_glow(&mut self, on: bool) {
+        self.glow = on;
     }
 
     fn push(&mut self, verts: &[Vec3], normals: &[Vec3], tris: &[u32], tf: Transform, color: Color) {
@@ -33,6 +63,7 @@ impl MeshData {
             self.pos.push([p.x, p.y, p.z]);
             self.nrm.push([nn.x, nn.y, nn.z]);
             self.col.push(ca);
+            self.uv.push(if self.glow { GLOW_UV } else { BODY_UV });
         }
         self.idx.extend(tris.iter().map(|i| base + i));
     }
@@ -180,6 +211,7 @@ impl MeshData {
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.pos);
         mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.nrm);
         mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.col);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uv);
         mesh.insert_indices(Indices::U32(self.idx));
         mesh
     }
