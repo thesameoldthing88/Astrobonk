@@ -50,7 +50,10 @@ impl MeshData {
             (Vec3::NEG_Z, [Vec3::new(hx, -hy, -hz), Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, hy, -hz), Vec3::new(hx, hy, -hz)]),
         ];
         for (n, v) in faces {
-            self.push(&v, &[n; 4], &[0, 1, 2, 0, 2, 3], tf, color);
+            // the ±Z quads above are listed counter-clockwise seen from outside, the ±X/±Y
+            // ones clockwise — wind each so its front face is its outside (KNOWN_ISSUES M12)
+            let tris = if n.z != 0.0 { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] };
+            self.push(&v, &[n; 4], &tris, tf, color);
         }
     }
 
@@ -91,7 +94,7 @@ impl MeshData {
             norms.push(n);
             let nb = ((i + 1) % seg) as u32 * 2;
             let b0 = i as u32 * 2;
-            tris.extend([b0, nb, b0 + 1, nb, nb + 1, b0 + 1]);
+            tris.extend([b0, b0 + 1, nb, nb, b0 + 1, nb + 1]);
             let _ = b;
         }
         // caps
@@ -108,9 +111,9 @@ impl MeshData {
             for i in 0..seg as u32 {
                 let n = (i + 1) % seg as u32;
                 if flip {
-                    tris.extend([center, ring + n, ring + i]);
-                } else {
                     tris.extend([center, ring + i, ring + n]);
+                } else {
+                    tris.extend([center, ring + n, ring + i]);
                 }
             }
         }
@@ -135,7 +138,7 @@ impl MeshData {
             let b = verts.len() as u32;
             verts.extend([apex, p0, p1]);
             norms.extend([n, n, n]);
-            tris.extend([b, b + 1, b + 2]);
+            tris.extend([b, b + 2, b + 1]);
         }
         // base cap
         let center = verts.len() as u32;
@@ -149,7 +152,7 @@ impl MeshData {
         }
         for i in 0..seg as u32 {
             let n = (i + 1) % seg as u32;
-            tris.extend([center, ring + n, ring + i]);
+            tris.extend([center, ring + i, ring + n]);
         }
         self.push(&verts, &norms, &tris, tf, color);
     }
@@ -162,16 +165,12 @@ impl MeshData {
         self.add_sphere(r, 1, tf.with_translation(tf.translation - up), color);
     }
 
-    /// `build`, with every triangle wound counter-clockwise seen from outside, which is what
-    /// Bevy treats as the front face. The shape helpers above wind clockwise; under default
-    /// back-face culling a model built with `build` shows its far walls instead of its near
-    /// ones — the silhouette is identical, which is why the crowd has always looked right.
-    /// Anything that relies on WHICH faces get culled (the §13 inverted-hull outlines) must
-    /// build with this.
-    pub fn build_ccw(mut self) -> Mesh {
-        for tri in self.idx.chunks_mut(3) {
-            tri.swap(1, 2);
-        }
+    /// Every shape helper winds counter-clockwise seen from outside — Bevy's front face —
+    /// since KNOWN_ISSUES M12 was fixed (they used to wind clockwise, so back-face culling
+    /// showed a model's far walls, lit from behind; the toon cel bands made that glaring).
+    /// Kept as the name the §13 inverted-hull outlines were written against: those rely on
+    /// WHICH faces get culled, and now get the same CCW mesh as `build`.
+    pub fn build_ccw(self) -> Mesh {
         self.build()
     }
 
@@ -234,4 +233,29 @@ pub fn icosphere(subdiv: u32) -> (Vec<Vec3>, Vec<u32>) {
         faces = next;
     }
     (verts, faces.into_iter().flatten().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// KNOWN_ISSUES M12: every helper's triangles must face the way their normals do
+    /// (counter-clockwise seen from outside), or back-face culling shows the far walls.
+    #[test]
+    fn every_shape_winds_outward() {
+        let tf = Transform::from_xyz(0.3, -0.2, 0.1).with_rotation(Quat::from_rotation_z(0.4));
+        let mut m = MeshData::new();
+        m.add_box(Vec3::new(1.0, 2.0, 0.5), tf, Color::WHITE);
+        m.add_sphere(0.7, 1, tf, Color::WHITE);
+        m.add_ellipsoid(Vec3::new(1.0, 0.5, 0.8), 1, tf, Color::WHITE);
+        m.add_cylinder(0.4, 1.2, 8, tf, Color::WHITE);
+        m.add_cone(0.5, 1.0, 6, tf, Color::WHITE);
+        m.add_capsule(0.3, 0.8, tf, Color::WHITE);
+        for tri in m.idx.chunks(3) {
+            let p = |i: u32| Vec3::from(m.pos[i as usize]);
+            let face = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
+            let n = Vec3::from(m.nrm[tri[0] as usize]) + Vec3::from(m.nrm[tri[1] as usize]) + Vec3::from(m.nrm[tri[2] as usize]);
+            assert!(face.dot(n) > 0.0, "triangle {tri:?} winds against its normals");
+        }
+    }
 }
