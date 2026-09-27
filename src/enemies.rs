@@ -472,7 +472,7 @@ fn aim_dash_mesh(pad: f32) -> Mesh {
         let z = -(i as f32 * period + dash * 0.5);
         m.add_box(Vec3::new(1.0 + pad, 1.0 + pad, dash + pad * 0.02), crate::meshkit::at(Vec3::new(0.0, 0.0, z)), Color::WHITE);
     }
-    m.build_ccw()
+    m.build()
 }
 
 /// The Burrower's crack decal: seven jagged three-segment cracks radiating from a small
@@ -508,7 +508,7 @@ fn crack_mesh(width: f32) -> Mesh {
         }
     }
     m.add_cylinder(0.12 + width, 0.03 + width * 0.2, 7, crate::meshkit::at(Vec3::ZERO), Color::WHITE);
-    m.build_ccw()
+    m.build()
 }
 
 /// Danger material colors in a palette: ring, ring fill, shot, beam charge, beam fire. The
