@@ -165,7 +165,10 @@ pub fn ghost_anchor(body: &Transform, t: f32) -> Vec3 {
 /// Weapons the ghost can mirror: the ones that FIRE. An orbit or aura is a field around its
 /// owner — a ghost copy would just be a second one around the same astronaut.
 pub fn ghost_can_mirror(w: WeaponKind) -> bool {
-    !matches!(w.def().behavior, Behavior::Orbit { .. } | Behavior::Aura { .. })
+    !matches!(
+        w.def().behavior,
+        Behavior::Orbit { .. } | Behavior::Aura { .. } | Behavior::Hug { .. } | Behavior::Tether { .. }
+    )
 }
 
 // ─── the death-save resolver (§7 stacking rule, §15) ─────────────────────────
@@ -687,6 +690,7 @@ pub fn orbit_chunks(
                 amount: c.damage * cm * elite,
                 crit,
                 knock: offset.normalize_or_zero() * 6.0,
+                weapon: None,
             });
             c.hit.push(te);
             telemetry.yoyo_hits += 1;
@@ -784,7 +788,7 @@ pub fn comet_tail(
                 if en.speed <= 0.0 || tpos.distance(c) > r + en.scale * 0.5 || !struck.insert(te) {
                     continue;
                 }
-                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO, weapon: None });
                 telemetry.trail_hits += 1;
             }
         }
@@ -832,7 +836,7 @@ pub fn trail_patches(
             if en.speed <= 0.0 || tpos.distance(pos) > COMET_TAIL_RADIUS + en.scale * 0.5 {
                 continue;
             }
-            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO, weapon: None });
             telemetry.trail_hits += 1;
         }
     }

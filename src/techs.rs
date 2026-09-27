@@ -511,6 +511,7 @@ pub fn slam_shockwave(
                 amount: damage * falloff * cm * elite,
                 crit,
                 knock: away * SLAM_KNOCK * reach.t * falloff,
+                weapon: None,
             });
             tech.slam_hits += 1;
             telemetry.slam_hits += 1;

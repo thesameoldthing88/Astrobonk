@@ -171,11 +171,15 @@ pub struct CamRig {
     /// A teleport glide in flight: the focus it left from, seconds into it, and the axis
     /// of the great circle it sweeps along (fixed at the start — see `glide_axis`).
     pub glide: Option<(Vec3, f32, Vec3)>,
+    /// Where the camera stands WITHOUT shake — what the easing follows and what it aims
+    /// from. Easing from the shaken transform would feed each frame's shake into the next
+    /// aim: rotational jitter, the thing the camera law forbids.
+    pub unshaken: Option<Vec3>,
 }
 
 impl Default for CamRig {
     fn default() -> Self {
-        Self { forward: Vec3::NEG_Z, pitch: 0.55, last_body: None, focus: Vec3::ZERO, glide: None }
+        Self { forward: Vec3::NEG_Z, pitch: 0.55, last_body: None, focus: Vec3::ZERO, glide: None, unshaken: None }
     }
 }
 
@@ -273,6 +277,7 @@ pub fn spawn_player(
             crate::comet::CometState::default(),
             crate::items::ItemProcs::default(),
             crate::techs::MoveTech::default(),
+            crate::arsenal::WeaponProcs::default(),
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
@@ -280,6 +285,7 @@ pub fn spawn_player(
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 crate::net::NetItemVis::default(),
+                crate::arsenal::NetWeaponVis::default(),
                 bevy_replicon::prelude::Replicated,
             ),
             Transform::from_translation(pos),
@@ -1215,9 +1221,11 @@ pub fn camera_rig(
             }
         }
         _ => {
-            // a new body (stage start): take it where it stands
+            // a new body (stage start): take it where it stands, easing from wherever the
+            // (possibly new) camera is
             rig.focus = body;
             rig.glide = None;
+            rig.unshaken = None;
         }
     }
     rig.last_body = Some((pe, body));
@@ -1275,7 +1283,8 @@ pub fn camera_rig(
     }
 
     let k = 1.0 - (-CAM_STIFFNESS * dt).exp();
-    let pos = cam.translation.lerp(target_pos, k);
+    let pos = rig.unshaken.unwrap_or(cam.translation).lerp(target_pos, k);
+    rig.unshaken = Some(pos);
 
     // Aim from the UNSHAKEN position so shake never becomes rotational jitter,
     // and never re-aim across a degenerate (near-zero) look vector.
@@ -1285,13 +1294,12 @@ pub fn camera_rig(
         cam.look_at(look_at, up);
     }
 
-    // positional-only screenshake, applied after aiming (scaled by the settings slider)
-    let tr = shake.trauma * shake.trauma * save.shake_scale;
-    if tr > 0.001 {
-        let t = (time.elapsed_secs() % 60.0) * 33.0;
-        cam.translation += (t.sin() * 0.12 + (t * 1.7).cos() * 0.09) * tr * fwd.cross(up)
-            + ((t * 1.3).cos() * 0.10) * tr * up;
-    }
+    // positional-only screenshake, applied after aiming (scaled by the settings slider) and
+    // hard-clamped at the camera: the offset never subtends more than SHAKE_MAX_DEG about
+    // the point we look at (§13), however much trauma the sources pile up
+    let t = (time.elapsed_secs() % 60.0) * 33.0;
+    let (right, cam_up) = (cam.right().as_vec3(), cam.up().as_vec3());
+    cam.translation += crate::fx::shake_offset(shake.trauma, save.shake_scale, t, right, cam_up, (look_at - pos).length());
 }
 
 /// Lock the cursor while playing, free it for menus/panels.

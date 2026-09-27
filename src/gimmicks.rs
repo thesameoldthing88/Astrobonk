@@ -165,7 +165,7 @@ pub fn spore_sim(
                 let off = pos - at;
                 if off.length() < SPORE_RADIUS {
                     let out = (off - b.dir * off.dot(b.dir)).normalize_or_zero();
-                    hits.write(HitMsg { source: None, target: e, amount: SPORE_ENEMY_DAMAGE * sc.hp, crit: false, knock: out * 14.0 });
+                    hits.write(HitMsg { source: None, target: e, amount: SPORE_ENEMY_DAMAGE * sc.hp, crit: false, knock: out * 14.0, weapon: None });
                     telemetry.spore_enemy_hits += 1;
                 }
             }

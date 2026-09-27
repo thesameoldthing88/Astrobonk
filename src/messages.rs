@@ -1,6 +1,7 @@
 //! Cross-module messages (Bevy 0.18 Message API).
 
 use crate::content::enemies::EnemyKind;
+use crate::content::weapons::WeaponKind;
 use bevy::prelude::*;
 
 /// Damage dealt to an enemy-side entity (enemies, bosses, pots). `amount` is final.
@@ -14,16 +15,10 @@ pub struct HitMsg {
     pub amount: f32,
     pub crit: bool,
     pub knock: Vec3,
-}
-
-/// A cryo field's chill on one enemy it just pulsed (`WeaponDef` `Aura { slow }`): the
-/// enemy's slow is raised to at least `slow`, then thaws on its own (`enemy_move`). Carried
-/// apart from `HitMsg` so the slow belongs to the aura that produced it — every hit of a
-/// cryo owner used to chill by a flat 0.25, whatever weapon landed it (L14).
-#[derive(Message)]
-pub struct SlowMsg {
-    pub target: Entity,
-    pub slow: f32,
+    /// The weapon that dealt it (`None` for items, techs, thorns, the world). What a hit
+    /// DOES beyond damage keys off it — a Whoopee's stun, a bell's mark, a cryo vent's own
+    /// slow — and so does the §13 hitstop's evolved-weapon bonus.
+    pub weapon: Option<WeaponKind>,
 }
 
 /// Player took a hit (pre-mitigation).
@@ -100,6 +95,11 @@ pub enum Sfx {
     Thorns,
     Spore,
     SporePop,
+    // ---- §6 Tier-1 weapons ----
+    Toll,
+    Whoopee,
+    Splat,
+    Discharge,
 }
 
 #[derive(Message)]

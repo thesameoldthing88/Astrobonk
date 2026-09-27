@@ -353,13 +353,18 @@ fn init_ink_pipeline(
 
 // ---------------------------------------------------------------- 3. per-world grade
 
+/// The toon grade's section saturations: less in the shadows so the night side reads cold
+/// dark, not muddy. Public so the evolution fanfare (`arsenal`) dips relative to them.
+pub const TOON_SHADOW_SATURATION: f32 = 0.85;
+pub const TOON_MIDTONE_SATURATION: f32 = 1.05;
+
 /// A toon color grade: a little extra saturation overall, and less in the shadows so the
 /// night side reads as cold dark rather than muddy color.
 fn grading(saturation: f32, exposure: f32) -> ColorGrading {
     ColorGrading {
         global: ColorGradingGlobal { post_saturation: saturation, exposure, ..default() },
-        shadows: ColorGradingSection { saturation: 0.85, ..default() },
-        midtones: ColorGradingSection { saturation: 1.05, ..default() },
+        shadows: ColorGradingSection { saturation: TOON_SHADOW_SATURATION, ..default() },
+        midtones: ColorGradingSection { saturation: TOON_MIDTONE_SATURATION, ..default() },
         highlights: ColorGradingSection::default(),
     }
 }

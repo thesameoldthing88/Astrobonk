@@ -525,7 +525,7 @@ pub fn dev_miniboss_now(
         }
         *alive_for += time.delta_secs();
         if *alive_for > 6.0 {
-            hits.write(HitMsg { source: None, target: e, amount: enemy.hp + 1.0, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: None, target: e, amount: enemy.hp + 1.0, crit: false, knock: Vec3::ZERO, weapon: None });
         }
     }
 }

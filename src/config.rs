@@ -509,6 +509,140 @@ pub const MAX_WEAPON_LEVEL: u32 = 7;
 /// one more through `PlayerState::evo_cap`.
 pub const EVOLUTION_CAP: u32 = 1;
 
+// ── The Tier-1 weapons' own behaviours (GDD §6; `arsenal.rs`) ────────────────
+/// Meatball Comet: the arc peaks this high over the ground (m), plus LOB_PEAK_PER_M per
+/// metre of range — a far lob climbs higher, so it reads as going OVER the horizon.
+pub const LOB_PEAK: f32 = 5.0;
+pub const LOB_PEAK_PER_M: f32 = 0.22;
+/// The flight stretches with range: `flight × (LOB_FLIGHT_BASE + range / LOB_FLIGHT_RANGE)`.
+pub const LOB_FLIGHT_BASE: f32 = 0.6;
+pub const LOB_FLIGHT_RANGE: f32 = 45.0;
+/// How many live foes in range a lob weighs as landing spots (spread over the crowd), and
+/// how close two meatballs of one volley may land (in AoE radii).
+pub const LOB_CANDIDATES: usize = 24;
+pub const LOB_TARGET_SEPARATION: f32 = 1.6;
+/// RAGÙ RAIN: the three pieces land this far (arc m) round the target, splitting at this
+/// point of the fall (0.5 = the apex).
+pub const RAGU_SPREAD: f32 = 5.5;
+pub const RAGU_SPLIT_AT: f32 = 0.55;
+/// The sauce splat left where a meatball lands (seconds; cosmetic).
+pub const SPLAT_SECS: f32 = 1.4;
+
+/// Static Cling: damage at the field's edge as a share of damage at contact, and the
+/// extra damage per foe hugging you (capped at HUG_CROWD_CAP of them).
+pub const HUG_EDGE_SHARE: f32 = 0.45;
+pub const HUG_PER_HUGGER: f32 = 0.08;
+pub const HUG_CROWD_CAP: u32 = 10;
+/// At most this many cling zaps drawn per tick (the damage lands on every hugger).
+pub const HUG_ZAPS: usize = 3;
+/// FULL DISCHARGE: seconds of charge per nova (attack speed shortens it), and the nova's
+/// damage as a multiple of one field tick.
+pub const FULL_DISCHARGE_SECS: f32 = 5.0;
+pub const FULL_DISCHARGE_NOVA_MULT: f32 = 6.0;
+pub const FULL_DISCHARGE_KNOCK: f32 = 14.0;
+
+/// Ricochet Disc: each hit re-arms the disc against the same foe after this long, and a
+/// disc out of bounces rolls on round its great circle, cutting through this many more
+/// foes before it shatters (THE OMNIDISC never runs out). A disc lives for one lap of the
+/// planet at its speed, plus DISC_LAP_SLACK — then it has come all the way home.
+pub const DISC_REHIT_SECS: f32 = 0.6;
+pub const DISC_CRUISE_PIERCE: i32 = 6;
+pub const DISC_LAP_SLACK: f32 = 1.04;
+/// A disc steers onto its bounce target this hard (rad/s-ish), and one owner keeps at most
+/// DISC_MAX_LIVE in the air (the oldest shatters) so lapping discs can't pile up forever.
+pub const DISC_TURN: f32 = 22.0;
+pub const DISC_MAX_LIVE: usize = 12;
+
+/// Sonic Whoopee: the shove (m/s knock impulse) and the stun it leaves; with
+/// WHOOPEE_PANIC_CROWD or more foes inside WHOOPEE_PANIC_RADIUS it recharges this many
+/// times faster — the "oh god I'm surrounded" button.
+pub const WHOOPEE_KNOCK: f32 = 22.0;
+pub const WHOOPEE_STUN_SECS: f32 = 1.1;
+pub const WHOOPEE_PANIC_RADIUS: f32 = 4.0;
+pub const WHOOPEE_PANIC_CROWD: usize = 6;
+pub const WHOOPEE_PANIC_RATE: f32 = 2.5;
+/// THE BROWN NOTE: the repulsor ring rolls out at this speed (m/s), shoving and stunning.
+pub const BROWN_NOTE_SPEED: f32 = 24.0;
+pub const BROWN_NOTE_KNOCK: f32 = 30.0;
+pub const BROWN_NOTE_STUN_SECS: f32 = 1.6;
+
+/// Cosmonaut's Bell: a toll marks what it hits for this long (a toll every 4 s keeps a
+/// crowd marked), and any hit on a marked foe gets this much extra crit chance — anyone's
+/// hit, so a teammate's Critshow feeds on your bell.
+pub const BELL_MARK_SECS: f32 = 4.5;
+pub const BELL_MARK_CRIT: f32 = 0.35;
+/// Halos drawn over marked foes at most (the mark itself has no cap).
+pub const BELL_HALO_CAP: usize = 80;
+/// THE ANGELUS: each toll raises up to its projectile count of the foes that died within
+/// ANGELUS_REACH (arc m) of the bell in the last ANGELUS_MEMORY_SECS, as friendly wisps
+/// that hunt for WISP_LIFE s, hitting for WISP_DAMAGE × the toll's damage every
+/// WISP_HIT_SECS. One bell keeps at most ANGELUS_WISP_CAP.
+pub const ANGELUS_REACH: f32 = 24.0;
+pub const ANGELUS_MEMORY_SECS: f32 = 6.0;
+pub const ANGELUS_WISP_CAP: usize = 8;
+pub const WISP_LIFE: f32 = 10.0;
+pub const WISP_SPEED: f32 = 9.0;
+pub const WISP_DAMAGE: f32 = 0.45;
+pub const WISP_HIT_SECS: f32 = 0.4;
+
+/// Yo-Yo of Damocles: one combo stack per YOYO_COMBO_METRES moved without taking a hit, up
+/// to YOYO_COMBO_MAX; standing still bleeds YOYO_COMBO_DECAY stacks/s, and any hit that
+/// lands clears it. Each stack is +YOYO_COMBO_DMG damage and +YOYO_COMBO_REACH reach.
+pub const YOYO_COMBO_METRES: f32 = 5.0;
+pub const YOYO_COMBO_MAX: f32 = 20.0;
+pub const YOYO_COMBO_DECAY: f32 = 2.0;
+pub const YOYO_COMBO_DMG: f32 = 0.06;
+pub const YOYO_COMBO_REACH: f32 = 0.02;
+pub const YOYO_HIT_SECS: f32 = 0.25;
+/// SWORD-YO at max combo: the cord pays out to this radius (m) over SWORDYO_PAYOUT_SECS and
+/// the cord itself cuts, hitting each foe along it at most once per SWORDYO_REHIT_SECS.
+pub const SWORDYO_GARROTE_RADIUS: f32 = 13.0;
+pub const SWORDYO_PAYOUT_SECS: f32 = 0.5;
+pub const SWORDYO_REHIT_SECS: f32 = 0.45;
+pub const SWORDYO_CORD_WIDTH: f32 = 0.9;
+
+/// The evolution fanfare (§12): the gold shockwave ring grows to this radius (m) over
+/// this long; the "assembly" shards fly in from this radius; the world drains to this
+/// saturation (shadows and midtones only — the gold ring and sparks keep their colour)
+/// and comes back over FANFARE_DESAT_SECS.
+pub const FANFARE_RING_RADIUS: f32 = 16.0;
+pub const FANFARE_RING_SECS: f32 = 0.9;
+pub const FANFARE_SHARDS: usize = 12;
+pub const FANFARE_SHARD_RADIUS: f32 = 3.2;
+pub const FANFARE_SHARD_SECS: f32 = 0.34;
+pub const FANFARE_POP_SECS: f32 = 0.3;
+pub const FANFARE_DESAT: f32 = 0.12;
+pub const FANFARE_DESAT_SECS: f32 = 1.1;
+
+// ── Hitstop canon (GDD §13) and the screenshake budget ───────────────────────
+/// Only YOUR killing blows stop time: a crowd kill 50 ms, an elite (or miniboss) 90, the
+/// stage boss 130 and then HITSTOP_DILATE_SECS at HITSTOP_DILATE_SPEED. An evolved
+/// weapon's kill is HITSTOP_EVOLVED_BONUS heavier.
+pub const HITSTOP_KILL_SECS: f32 = 0.05;
+pub const HITSTOP_ELITE_SECS: f32 = 0.09;
+pub const HITSTOP_BOSS_SECS: f32 = 0.13;
+pub const HITSTOP_EVOLVED_BONUS: f32 = 0.02;
+pub const HITSTOP_DILATE_SECS: f32 = 0.15;
+pub const HITSTOP_DILATE_SPEED: f32 = 0.85;
+/// The freeze runs the world at this speed (not 0, so nothing downstream divides by a
+/// zero step).
+pub const HITSTOP_FREEZE_SPEED: f32 = 0.05;
+/// Kept SPARSE: a crowd kill stops time only when nothing has for HITSTOP_KILL_GAP
+/// seconds, an elite when nothing has for HITSTOP_ELITE_GAP. A horde dies at dozens a
+/// second; a freeze per kill is a slideshow, so the stop marks the rhythm, not every body.
+pub const HITSTOP_KILL_GAP: f32 = 2.5;
+pub const HITSTOP_ELITE_GAP: f32 = 0.75;
+/// §13 shake budget: trauma per source (`offset = trauma² × max`, the total clamped).
+pub const SHAKE_PLAYER_HIT: f32 = 0.12;
+pub const SHAKE_ENEMY_SLAM_MIN: f32 = 0.22;
+pub const SHAKE_ENEMY_SLAM_MAX: f32 = 0.35;
+pub const SHAKE_EVOLVE: f32 = 0.25;
+/// A slam further than this from you shakes nothing; nearer, it fades in toward the table.
+pub const SHAKE_ENEMY_SLAM_FALLOFF: f32 = 24.0;
+/// Hard clamp on the camera's shake: the total offset, as an angle about the point it looks
+/// at, never exceeds this (§13: "total camera offset ≤ 1.8° pitch/yaw").
+pub const SHAKE_MAX_DEG: f32 = 1.8;
+
 // ── Level-up choice economy (GDD §3 table, §15 ledger) ───────────────────────
 /// Cards dealt per level-up. The §15 ledger sets no count, so the shipped four stay.
 pub const LEVELUP_CARDS: usize = 4;
@@ -717,3 +851,9 @@ pub const REVIVE_TOKEN_IFRAMES: f32 = 3.0;
 /// the second chance does not open inside the same ring that closed the first.
 pub const REVIVE_NOVA_RADIUS: f32 = 7.0;
 pub const REVIVE_NOVA_KNOCK: f32 = 42.0;
+
+/// Melee swing swoosh (combat::sweep_arc_mesh): the crescent's inner edge as a fraction of the
+/// reach, its alpha, and how far over the ground it floats (clear of the terrain's bumps).
+pub const SWEEP_INNER: f32 = 0.45;
+pub const SWEEP_ALPHA: f32 = 0.42;
+pub const SWEEP_LIFT: f32 = 0.35;

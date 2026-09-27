@@ -50,7 +50,9 @@ use std::time::{Duration, SystemTime};
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
 // P07: the sun's phase and The Crawl's sites in RunSnapMsg, HazardEvent::Spore -> _9.
-pub const PROTOCOL_ID: u64 = 0xA570B0_9;
+// P12 (merged after P07): the replicated `arsenal::NetWeaponVis` (the Yo-Yo combo) and the
+// Evolve / Wisp hazard events -> _A.
+pub const PROTOCOL_ID: u64 = 0xA570B0_A;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -490,6 +492,12 @@ pub enum HazardEvent {
     /// so indexed alike on every machine) runs its fuse → burst → cloud → regrowth. The fuse's
     /// danger disc arrives as its own Telegraph.
     Spore { plant: u16 },
+    // ---- appended (P12): weapon one-shots, see `arsenal::WeaponFx` ----
+    /// `owner` evolved a weapon into `weapon` (`WeaponKind::code`): every machine plays the
+    /// §12 fanfare on them.
+    Evolve { owner: u8, weapon: u8 },
+    /// THE ANGELUS raised a friendly wisp for `owner` at `dir` (`power`: its hit, host-only).
+    Wisp { owner: u8, dir: [f32; 3], power: f32 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -714,6 +722,7 @@ impl Plugin for NetPlugin {
             .replicate::<NetHero>()
             .replicate::<NetComet>()
             .replicate::<NetItemVis>()
+            .replicate::<crate::arsenal::NetWeaponVis>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
@@ -834,7 +843,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
-                crate::daynight::log_sky
+                (crate::arsenal::log_weapon_fx, crate::daynight::log_sky)
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )
