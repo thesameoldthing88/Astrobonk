@@ -41,6 +41,10 @@ pub struct BossBarFill;
 pub struct BossBarName;
 #[derive(Component)]
 pub struct PowerupText;
+/// What the local astronaut's conditional items are doing right now (jammed, hovering,
+/// encircled, the Widow's bonus, the tether, the eaten sun).
+#[derive(Component)]
+pub struct ItemStatusText;
 #[derive(Component)]
 pub struct Vignette;
 #[derive(Component)]
@@ -194,6 +198,7 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((GoldText, txt("GOLD 0", FONT_MED, Color::srgb(1.0, 0.85, 0.3))));
                     c.spawn((SilverText, txt("SILVER +0", FONT_MED, Color::srgb(0.75, 0.85, 1.0))));
                     c.spawn((PowerupText, txt("", FONT_SMALL, Color::srgb(0.85, 0.5, 1.0))));
+                    c.spawn((ItemStatusText, txt("", FONT_SMALL, Color::srgb(1.0, 0.75, 0.45))));
                 });
 
             // banner center
@@ -387,14 +392,19 @@ pub fn update_weapon_row(
     mut commands: Commands,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     mut cache: Local<Vec<(WeaponKind, u32)>>,
+    mut item_cache: Local<Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)>>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {
     let Ok(run) = q_ps.single() else { return };
     let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
-    if *cache == current {
+    // rebuilt on any change to the loadout — a new copy of an item, or a better grade of it
+    let items: Vec<(crate::content::items::ItemKind, u32, crate::content::Rarity)> =
+        run.items.iter().map(|s| (s.kind, s.count(), s.best())).collect();
+    if *cache == current && *item_cache == items {
         return;
     }
     *cache = current.clone();
+    *item_cache = items;
     let Ok(row) = q_row.single() else { return };
     commands.entity(row).despawn_related::<Children>();
     commands.entity(row).with_children(|c| {
@@ -418,9 +428,10 @@ pub fn update_weapon_row(
                 slot.spawn(txt(format!("{} {}", tag.to_uppercase(), level), 13.0, def.color));
             });
         }
-        // item chips
-        for (item, count) in run.items.iter() {
-            let d = item.def();
+        // item chips, coloured by the best grade held of each
+        for stack in run.items.iter() {
+            let d = stack.kind.def();
+            let color = stack.best().color();
             c.spawn((
                 Node {
                     padding: UiRect::axes(Val::Px(5.0), Val::Px(2.0)),
@@ -429,14 +440,60 @@ pub fn update_weapon_row(
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.7)),
-                BorderColor::all(d.rarity.color()),
+                BorderColor::all(color),
             ))
             .with_children(|chip| {
-                let tag: String = d.name.chars().take(2).collect();
-                chip.spawn(txt(format!("{tag}{count}"), 11.0, d.rarity.color()));
+                chip.spawn(txt(format!("{}{}", d.tag, stack.count()), 11.0, color));
             });
         }
     });
+}
+
+/// One line of what the local astronaut's conditional items are doing — the numbers the
+/// §7 items deal damage from, so "+12% from the descent" is something you can read.
+pub fn update_item_status(
+    run: Res<RunState>,
+    q_ps: Query<(&PlayerState, &crate::items::ItemProcs), With<crate::player::LocalPlayer>>,
+    mut q: Query<&mut Text, With<ItemStatusText>>,
+) {
+    use crate::config::*;
+    use crate::content::items::ItemKind;
+    let Ok(mut text) = q.single_mut() else { return };
+    let Ok((ps, procs)) = q_ps.single() else { return };
+    let mut parts: Vec<String> = Vec::new();
+    if procs.jam > 0.0 {
+        parts.push("JAMMED".into());
+    }
+    if ps.has_item(ItemKind::AntiGravBoots) && ps.airborne {
+        parts.push(format!("HOVER {:.1}s", procs.hover_left.max(0.0)));
+    }
+    if ps.has_item(ItemKind::IcarusBoots) {
+        parts.push(if ps.airborne { "ICARUS UP".into() } else { "ICARUS GROUNDED".into() });
+    }
+    let dirs = ps.encircle_dirs.count_ones();
+    if dirs > 0 {
+        let pct = ENCIRCLE_DMG_PER_DIR * dirs as f32 * ps.item_power(ItemKind::EncirclementBonus) * 100.0;
+        parts.push(format!("ENCIRCLED {dirs}/8 +{pct:.0}%"));
+    }
+    let downhill = DOWNHILL_DMG_PER_M * ps.descent_m * ps.item_power(ItemKind::DownhillMomentum) * 100.0;
+    if downhill >= 1.0 {
+        parts.push(format!("DOWNHILL +{downhill:.0}%"));
+    }
+    if ps.widow_active() {
+        parts.push(format!("WIDOW +{:.0}%", WIDOW_STAT_BONUS * 100.0));
+    } else if ps.has_item(ItemKind::WidowsRing) && procs.widow_cd > 0.0 {
+        parts.push(format!("RING {:.0}s", procs.widow_cd));
+    }
+    if ps.has_item(ItemKind::DeadMansTether) {
+        parts.push(if ps.tether_used { "TETHER SPENT".into() } else { "TETHER READY".into() });
+    }
+    if run.sun_shrink > 0.0 {
+        parts.push(format!("SUN -{:.0}%", run.sun_shrink * 100.0));
+    }
+    let line = parts.join("  ");
+    if text.0 != line {
+        text.0 = line;
+    }
 }
 
 /// Point edge markers at important things beyond the screen/horizon: bosses (red),

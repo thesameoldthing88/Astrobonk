@@ -508,6 +508,58 @@ impl WeaponKind {
         self.def().evolves_to.is_none() && self.def().evo_item.is_none() && !Self::BASE.contains(self)
     }
 
+    /// Explicit wire code (Second Astronaut's ghost weapon in `net::NetItemVis`). Never
+    /// renumber, only append.
+    pub fn code(&self) -> u8 {
+        use WeaponKind::*;
+        match self {
+            Wrench => 0,
+            LaserPistol => 1,
+            RivetGun => 2,
+            Kunai => 3,
+            Boomerang => 4,
+            MiningLaser => 5,
+            Drones => 6,
+            Tesla => 7,
+            RocketPod => 8,
+            CryoVent => 9,
+            MeatballComet => 10,
+            StaticCling => 11,
+            RicochetDisc => 12,
+            SonicWhoopee => 13,
+            CosmonautsBell => 14,
+            YoYo => 15,
+            MegaWrench => 16,
+            GatlingLaser => 17,
+            Riveter9000 => 18,
+            BladeStorm => 19,
+            SatelliteArray => 20,
+            DeathRay => 21,
+            DroneSwarm => 22,
+            StormCore => 23,
+            MirvPod => 24,
+            AbsoluteZero => 25,
+            RaguRain => 26,
+            FullDischarge => 27,
+            Omnidisc => 28,
+            BrownNote => 29,
+            Angelus => 30,
+            SwordYo => 31,
+        }
+    }
+    pub fn from_code(c: u8) -> Option<WeaponKind> {
+        use WeaponKind::*;
+        [
+            Wrench, LaserPistol, RivetGun, Kunai, Boomerang, MiningLaser, Drones, Tesla, RocketPod,
+            CryoVent, MeatballComet, StaticCling, RicochetDisc, SonicWhoopee, CosmonautsBell, YoYo,
+            MegaWrench, GatlingLaser, Riveter9000, BladeStorm, SatelliteArray, DeathRay, DroneSwarm,
+            StormCore, MirvPod, AbsoluteZero, RaguRain, FullDischarge, Omnidisc, BrownNote, Angelus,
+            SwordYo,
+        ]
+        .into_iter()
+        .find(|w| w.code() == c)
+    }
+
     /// Which base weapons use `item` as their evolution catalyst (for item-card hints).
     pub fn catalyst_for(item: ItemKind) -> Vec<WeaponKind> {
         Self::BASE

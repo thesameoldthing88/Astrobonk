@@ -11,8 +11,10 @@
 //!   * `PlayerVitals`    — hp / max_hp / level, for teammate HUD + the down-state
 //!   * `NetHero`         — which hero it is, so every machine draws the right suit
 //!   * `NetComet`        — its Comet Combo, for its owner's HUD and everyone's tail sparks
-//! A player's *build* (weapons, items, cards) stays local — each player picks their own
-//! upgrades, so only its visible effects need to cross the wire.
+//!   * `NetItemVis`      — what its items look like (ghost co-pilot, burning trail, hover)
+//! A player's *build* (weapons, items, cards) is picked locally — each player picks their
+//! own upgrades — and synced UP to the host (`PlayerBuildMsg`), which simulates it; only its
+//! visible effects come back down.
 //!
 //! Enemies are NOT replicated per-entity yet; see `NETCODE NOTES` at the bottom.
 
@@ -38,7 +40,7 @@ use std::time::{Duration, SystemTime};
 /// desyncing in confusing ways. The refusal is a netcode handshake that never completes (a
 /// wrong id means the packets do not even decrypt), so `watch_client_connection` is what
 /// turns the resulting timeout into a readable "different version?" line.
-pub const PROTOCOL_ID: u64 = 0xA570B0_4; // bumped: miniboss cache (P01) + hero/slide/comet/storm/aim-line/session-end wire (P02)
+pub const PROTOCOL_ID: u64 = 0xA570B0_5; // bumped: items in the build sync, NetItemVis, item hazard events, jump_held, sun/radio in RunSnapMsg (P03)
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -99,6 +101,27 @@ pub struct NetComet {
     pub fires: u16,
     pub peak: u16,
 }
+
+/// What an astronaut's items look like, for every machine that draws it. HOST-written
+/// (`items::push_net_item_vis`), only on change. Persistent looks ride here; one-shots (a
+/// yo-yo throw, a singularity, a death-save) ride the hazard event lane instead.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetItemVis {
+    /// Second Astronaut's mirrored weapon as `WeaponKind::code() + 1`; 0 = no ghost.
+    pub ghost: u8,
+    /// ITEMVIS_* bits.
+    pub flags: u8,
+}
+
+/// Laying a Comet Tail right now (carrying it and moving).
+pub const ITEMVIS_TRAIL: u8 = 1;
+/// Held up by Anti-Grav Boots.
+pub const ITEMVIS_HOVER: u8 = 2;
+/// Widow's Ring is live (at 1 HP).
+pub const ITEMVIS_WIDOW: u8 = 4;
+/// Dead Man's Tether already spent this run — a client's own HUD reads it from here, since
+/// the rewind happened on the host.
+pub const ITEMVIS_TETHER_SPENT: u8 = 8;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
@@ -165,6 +188,11 @@ pub struct RunSnapMsg {
     pub storm_dir: [f32; 3],
     pub storm_heading: [f32; 3],
     pub storm_radius: f32,
+    /// Devoured Sun Shard: how much of the sun is eaten — both machines light the same sky.
+    pub sun_shrink: f32,
+    /// The Static Radio is in the party (The Static comes early; the pause screen's threat
+    /// line and anything else a joiner derives from `Scaling` must know).
+    pub static_radio: bool,
 }
 
 /// HOST -> CLIENT: the session is over. Sent just before the host drops the connection, so
@@ -255,9 +283,10 @@ pub struct BossSnapMsg {
 /// is no lockstep or derived-hit scheme that would let the host recompute the peer's numbers
 /// itself. The host must be told them.
 ///
-/// Sends the DERIVED Stats rather than the item list: items only reach combat through
-/// `recompute_stats`, so the derived sheet is sufficient and immune to the two machines
-/// disagreeing about how an item is applied.
+/// Sends the DERIVED Stats for everything an item does through `recompute_stats` — immune
+/// to the two machines disagreeing about how a boost is applied — AND the item list itself,
+/// because the §7 items that DO things (a yo-yo, a trail, a death-save) are simulated by the
+/// host for every astronaut, and it has to know who carries what.
 ///
 /// ~130 B on change plus a 2 s heartbeat — the `announce_player_ids` idiom, so a dropped
 /// update self-heals instead of leaving the peer permanently weak.
@@ -273,6 +302,8 @@ pub struct PlayerBuildMsg {
     /// (weapon, level) pairs. Cooldowns are deliberately NOT sent — they are host-side
     /// firing cadence, and overwriting them every heartbeat would stutter the peer's guns.
     pub weapons: Vec<(crate::content::weapons::WeaponKind, u32)>,
+    /// Every copy held, as (`ItemKind::code`, `Rarity::code`) — explicit wire codes.
+    pub items: Vec<(u8, u8)>,
 }
 
 /// LOCAL (never networked): the simulation says "someone earned this". A relay turns it
@@ -362,6 +393,15 @@ pub enum HazardEvent {
     /// or the beamer died. A client also retires a line itself when the charge runs out, so
     /// an End that arrives late (this lane is unordered) never leaves one hanging.
     AimLineEnd { enemy: u16 },
+    // ---- appended (P03): item one-shots, see `items::ItemFx` ----
+    /// An Orbital Yo-Yo throw around astronaut `owner` (PlayerId).
+    ItemOrbit { owner: u8, chunks: u8, radius: f32, dur: f32 },
+    /// A Little Black Hole opened.
+    Singularity { dir: [f32; 3], radius: f32, dur: f32 },
+    /// `owner`'s Comet Tail ignited.
+    TrailIgnite { owner: u8 },
+    /// `owner` survived a lethal hit (`items::DeathSave::code`) and now stands at `dir`.
+    DeathSave { owner: u8, kind: u8, dir: [f32; 3] },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -443,6 +483,8 @@ pub struct PlayerInputMsg {
     pub jump: bool,
     pub slide: bool,
     pub interact: bool,
+    /// Jump is HELD (not just pressed) — Anti-Grav Boots hover while it is.
+    pub jump_held: bool,
 }
 
 /// Host-side: which `PlayerId` we handed to each connected client entity.
@@ -506,6 +548,7 @@ impl Plugin for NetPlugin {
             .replicate::<PlayerVitals>()
             .replicate::<NetHero>()
             .replicate::<NetComet>()
+            .replicate::<NetItemVis>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
@@ -516,7 +559,7 @@ impl Plugin for NetPlugin {
                     .run_if(on_timer(Duration::from_millis(500))),
             )
             .add_systems(Update, apply_player_build.run_if(is_hosting))
-            .add_systems(Update, adopt_my_vitals.run_if(is_client))
+            .add_systems(Update, (adopt_my_vitals, adopt_my_item_vis).run_if(is_client))
             .add_systems(
                 Update,
                 reconcile_own_astronaut
@@ -606,6 +649,12 @@ impl Plugin for NetPlugin {
                     .run_if(|d: Res<NetDebug>| d.bot),
             )
             .add_systems(Update, log_astronauts.run_if(|d: Res<NetDebug>| d.log))
+            .add_systems(
+                Update,
+                crate::items::log_item_fx
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
             .add_systems(
                 Update,
                 crate::netenemy::log_stream_stats.run_if(|d: Res<NetDebug>| d.log),
@@ -737,6 +786,8 @@ fn push_run_snapshot(
             storm_dir: storm.dir.to_array(),
             storm_heading: storm.heading.to_array(),
             storm_radius: storm.radius,
+            sun_shrink: run.sun_shrink,
+            static_radio: run.static_radio,
         },
     });
 }
@@ -787,6 +838,8 @@ fn apply_run_snapshot(
         storm.dir = Vec3::from(m.storm_dir);
         storm.heading = Vec3::from(m.storm_heading);
         storm.radius = m.storm_radius;
+        run.sun_shrink = m.sun_shrink;
+        run.static_radio = m.static_radio;
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
@@ -895,6 +948,33 @@ fn adopt_my_vitals(
     }
 }
 
+/// CLIENT: take our own item looks and host-owned item state from the server's copy of us.
+///
+/// The host decides the ghost co-pilot's weapon and spends Dead Man's Tether; our local
+/// sheet never simulates either. Mirroring them here keeps our cosmetic ghost volley on the
+/// host's weapon, our HUD's tether line honest, and our own body's `NetItemVis` — which the
+/// shared item visuals read for every drawn body — the host's.
+fn adopt_my_item_vis(
+    mine: Res<MyPlayerId>,
+    server: Query<(&PlayerId, &NetItemVis), Without<crate::player::Player>>,
+    mut q: Query<(&mut crate::run::PlayerState, &mut NetItemVis), (With<LocalPlayer>, With<crate::player::Player>)>,
+) {
+    let Some(my_id) = mine.0 else { return };
+    let Ok((mut ps, mut vis)) = q.single_mut() else { return };
+    let Some((_, host)) = server.iter().find(|(pid, _)| pid.0 == my_id) else { return };
+    if *vis != *host {
+        *vis = *host;
+    }
+    let ghost = host.ghost.checked_sub(1).and_then(crate::content::weapons::WeaponKind::from_code);
+    if ps.ghost_weapon != ghost {
+        ps.ghost_weapon = ghost;
+    }
+    let spent = host.flags & ITEMVIS_TETHER_SPENT != 0;
+    if ps.tether_used != spent {
+        ps.tether_used = spent;
+    }
+}
+
 /// CLIENT: pull our predicted astronaut toward the host's authoritative copy of it.
 ///
 /// We move ourselves locally for crisp controls (GDD §11), but the HOST decides where we
@@ -957,6 +1037,11 @@ fn send_player_build(
         level: ps.level,
         stats: ps.stats.clone(),
         weapons: ps.weapons.iter().map(|w| (w.kind, w.level)).collect(),
+        items: ps
+            .items
+            .iter()
+            .flat_map(|s| s.grades.iter().map(move |g| (s.kind.code(), g.code())))
+            .collect(),
     });
 }
 
@@ -993,10 +1078,16 @@ fn apply_player_build(
                 ps.hp += d;
             }
             ps.hp = ps.hp.min(ps.stats.max_hp);
-            // NOTE: the host's copy of `items` is deliberately left stale and no longer
-            // matches `stats`. That is intended — nothing in the host's combat path reads
-            // items, and recompute_stats is CLIENT-ONLY for a peer sheet (it would fold in
-            // the HOST's meta tomes and save, producing numbers the peer never had).
+            // Items too: the host simulates what they DO (procs, death-saves) for this peer.
+            // Their STAT effect is already in `stats`, and recompute_stats stays CLIENT-ONLY
+            // for a peer sheet (it would fold in the HOST's meta tomes and save, producing
+            // numbers the peer never had).
+            ps.items.clear();
+            for (code, grade) in &message.items {
+                if let Some(kind) = crate::content::items::ItemKind::from_code(*code) {
+                    ps.add_item(kind, crate::content::Rarity::from_code(*grade));
+                }
+            }
             // Keep each weapon's existing cooldown so the heartbeat does not reset firing
             // cadence; only levels and membership come from the client.
             let mut next: Vec<crate::run::WeaponInstance> = Vec::new();
@@ -1120,6 +1211,7 @@ fn send_local_input(
             jump: false,
             slide: false,
             interact: false,
+            jump_held: false,
         });
         return;
     }
@@ -1135,6 +1227,7 @@ fn send_local_input(
         jump: intent.jump,
         slide: intent.slide,
         interact: intent.interact,
+        jump_held: intent.jump_held,
     });
 }
 
@@ -1390,6 +1483,8 @@ fn apply_remote_input(
                 intent.jump |= message.jump;
                 intent.slide |= message.slide;
                 intent.interact |= message.interact;
+                // a HELD state, not an edge: the latest packet is the truth
+                intent.jump_held = message.jump_held;
             }
         }
     }
@@ -1954,6 +2049,17 @@ fn reset_after_session(
 //    Client prediction now reconciles softly against the host's copy of us
 //    (`reconcile_own_astronaut`); a proper rewind-and-replay of unacknowledged inputs is
 //    still open, and is only worth it once latency beyond a LAN matters.
+//
+// 2f. ITEMS (P03) — the host simulates what every astronaut's §7 items DO; a joiner's
+//    items reach it in PlayerBuildMsg (explicit item/grade codes). What a client must see
+//    comes back on existing lanes: persistent looks on the replicated NetItemVis (ghost
+//    co-pilot + its weapon, a burning trail being laid, a hover, tether spent), one-shots
+//    (yo-yo throw, singularity, ignition, death-save) as hazard-lane events that a client
+//    turns back into the same local `items::ItemFxMsg` the host's systems write. A client
+//    snaps its own predicted body on a Tether rewind. Repro / evidence:
+//        headless: --items new [--coop2] | --deathsave [--coop2]
+//        windowed: coop.sh … --dev --items orbitalyoyo,comettail,secondastronaut,littleblackhole
+//                  and compare the two sides' ITEMFX lines (a joiner's `wire=` counts events).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

@@ -9,7 +9,7 @@ use crate::interact::Pot;
 use crate::messages::*;
 use crate::planet::{CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{PlayerState, RunPhase, RunState};
+use crate::run::{PlayerState, RunState};
 use crate::sphere;
 use bevy::prelude::*;
 use rand::Rng;
@@ -156,6 +156,8 @@ pub struct Beam {
     pub damage: f32,
     pub ticks_left: u32,
     pub tick_cd: f32,
+    /// Fired by Second Astronaut's ghost: it streams from where the ghost floats.
+    pub ghost: bool,
 }
 
 #[derive(Component)]
@@ -193,7 +195,7 @@ fn nearest_enemy(
     best.map(|(e, p, _)| (e, p))
 }
 
-fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32, bool) {
+pub fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32, bool) {
     let mut chance = crit_chance;
     let mut mult = 1.0;
     let mut crit = false;
@@ -207,14 +209,311 @@ fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32, bo
     (mult, crit)
 }
 
+/// One volley of one weapon: who fires it, from where, at what, and how hard.
+struct Volley {
+    owner: Entity,
+    kind: WeaponKind,
+    dmg: f32,
+    count: u32,
+    size: f32,
+    /// Where the shooter stands (melee reach and chain hops measure from here) and where
+    /// its shots leave from (a little above that).
+    center: Vec3,
+    origin: Vec3,
+    up: Vec3,
+    aim: Vec3,
+    /// Anti-Grav Boots, airborne: every directional weapon fires a full 360° ring.
+    ring: bool,
+    /// Second Astronaut's ghost fired this (its beams track the ghost, not the owner).
+    ghost: bool,
+    crit_ch: f32,
+}
+
+/// Evenly spaced headings all the way round `up`, starting at `aim` (a 360° ring).
+fn ring_headings(up: Vec3, aim: Vec3, n: u32) -> impl Iterator<Item = Vec3> {
+    (0..n).map(move |i| Quat::from_axis_angle(up, i as f32 / n as f32 * std::f32::consts::TAU) * aim)
+}
+
+/// Fire one volley (every behavior except the always-on Orbit and Aura).
+#[allow(clippy::too_many_arguments)]
+fn fire_volley(
+    v: &Volley,
+    stats: &crate::stats::Stats,
+    assets: &WeaponAssets,
+    enemies: &Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    pots: &Query<(), With<Pot>>,
+    commands: &mut Commands,
+    hits: &mut MessageWriter<HitMsg>,
+    sfx: &mut MessageWriter<SfxMsg>,
+    rng: &mut impl Rng,
+) {
+    let def = v.kind.def();
+    let (up, aim, origin, size, count, dmg) = (v.up, v.aim, v.origin, v.size, v.count, v.dmg);
+    let start_dir = v.center.normalize_or_zero();
+    match def.behavior {
+        Behavior::MeleeArc { arc_deg, range } => {
+            let arc_deg = if v.ring { 360.0 } else { arc_deg };
+            let r = range * size;
+            let cos_half = (arc_deg.to_radians() / 2.0).cos();
+            for (e, tf, en) in enemies.iter() {
+                let d = tf.translation - v.center;
+                if d.length_squared() > r * r {
+                    continue;
+                }
+                let vt = (d - up * d.dot(up)).normalize_or_zero();
+                if arc_deg >= 360.0 || vt.dot(aim) > cos_half {
+                    let (cm, crit) = roll_crit(v.crit_ch, stats.crit_damage, rng);
+                    let elite = if en.elite { stats.elite_damage } else { 1.0 };
+                    hits.write(HitMsg {
+                        source: Some(v.owner),
+                        target: e,
+                        amount: dmg * cm * elite,
+                        crit,
+                        knock: vt * 9.0 * stats.knockback,
+                    });
+                }
+            }
+            // sweep visual
+            commands.spawn((
+                Mesh3d(assets.sweep_mesh.clone()),
+                MeshMaterial3d(assets.mats[&v.kind].clone()),
+                Transform::from_translation(if v.ring { origin } else { origin + aim * r * 0.5 })
+                    .with_rotation(sphere::frame_quat(up, aim))
+                    .with_scale(if v.ring {
+                        Vec3::new(r * 2.0, 0.1, r * 2.0)
+                    } else {
+                        Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)
+                    }),
+                Fader { life: 0.14, max: 0.14 },
+                StageScoped,
+            ));
+            sfx.write(SfxMsg(Sfx::Hit));
+        }
+        Behavior::Shot { speed, pierce, spread_deg } => {
+            let headings: Vec<Vec3> = if v.ring {
+                ring_headings(up, aim, count.max(ANTIGRAV_RING_SHOTS)).collect()
+            } else {
+                (0..count)
+                    .map(|i| {
+                        let ang = if count > 1 {
+                            (i as f32 / (count - 1) as f32 - 0.5) * spread_deg.to_radians()
+                        } else {
+                            rng.gen_range(-0.04..0.04)
+                        };
+                        Quat::from_axis_angle(up, ang) * aim
+                    })
+                    .collect()
+            };
+            for h in headings {
+                commands.spawn((
+                    Projectile {
+                        owner: v.owner,
+                        dir: start_dir,
+                        heading: h,
+                        speed: speed * stats.proj_speed,
+                        damage: dmg,
+                        pierce: pierce as i32,
+                        life: 2.2 * stats.duration,
+                        size,
+                        kind: ProjKind::Straight,
+                        hit_cd: HashMap::new(),
+                    },
+                    Mesh3d(assets.proj_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(origin).with_scale(Vec3::splat(size)),
+                    StageScoped,
+                ));
+            }
+        }
+        Behavior::Seek { speed, pierce } => {
+            let headings: Vec<Vec3> = if v.ring {
+                ring_headings(up, aim, count.max(ANTIGRAV_RING_SHOTS)).collect()
+            } else {
+                (0..count)
+                    .map(|i| Quat::from_axis_angle(up, i as f32 * 0.35 - (count as f32 - 1.0) * 0.175) * aim)
+                    .collect()
+            };
+            for h in headings {
+                commands.spawn((
+                    Projectile {
+                        owner: v.owner,
+                        dir: start_dir,
+                        heading: h,
+                        speed: speed * stats.proj_speed,
+                        damage: dmg,
+                        pierce: pierce as i32,
+                        life: 2.6 * stats.duration,
+                        size,
+                        kind: ProjKind::Seek,
+                        hit_cd: HashMap::new(),
+                    },
+                    Mesh3d(assets.proj_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(origin).with_scale(Vec3::splat(size * 0.9)),
+                    StageScoped,
+                ));
+            }
+        }
+        Behavior::Boomerang { speed, range } => {
+            let headings: Vec<Vec3> = if v.ring {
+                ring_headings(up, aim, count.max(ANTIGRAV_RING_SHOTS)).collect()
+            } else {
+                (0..count)
+                    .map(|i| Quat::from_axis_angle(up, i as f32 * 0.5 - (count as f32 - 1.0) * 0.25) * aim)
+                    .collect()
+            };
+            for h in headings {
+                let out_time = range / speed;
+                commands.spawn((
+                    Projectile {
+                        owner: v.owner,
+                        dir: start_dir,
+                        heading: h,
+                        speed: speed * stats.proj_speed,
+                        damage: dmg,
+                        pierce: 999,
+                        life: out_time * 2.4 * stats.duration,
+                        size,
+                        kind: ProjKind::Boomerang { age: 0.0, out_time },
+                        hit_cd: HashMap::new(),
+                    },
+                    Mesh3d(assets.drone_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(origin).with_scale(Vec3::splat(size)),
+                    StageScoped,
+                ));
+            }
+        }
+        Behavior::Beam { range, width } => {
+            let headings: Vec<Vec3> =
+                if v.ring { ring_headings(up, aim, count.max(ANTIGRAV_RING_BEAMS)).collect() } else { vec![aim] };
+            for h in headings {
+                commands.spawn((
+                    Beam {
+                        owner: v.owner,
+                        heading: h,
+                        range: range * size,
+                        width: width * size,
+                        damage: dmg,
+                        ticks_left: (5.0 * stats.duration) as u32 + 1,
+                        tick_cd: 0.0,
+                        ghost: v.ghost,
+                    },
+                    Mesh3d(assets.beam_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(origin),
+                    StageScoped,
+                ));
+            }
+        }
+        Behavior::Chain { jumps, range, link_range } => {
+            let mut chain: Vec<(Entity, Vec3)> = Vec::new();
+            let mut from = v.center;
+            let mut max_d = range;
+            for _ in 0..=(jumps + count - 1) {
+                let mut best: Option<(Entity, Vec3, f32)> = None;
+                for (e, tf, _) in enemies.iter() {
+                    if chain.iter().any(|(ce, _)| *ce == e) || pots.get(e).is_ok() {
+                        continue;
+                    }
+                    let d = tf.translation.distance_squared(from);
+                    if d < max_d * max_d && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
+                        best = Some((e, tf.translation, d));
+                    }
+                }
+                let Some((e, pos, _)) = best else { break };
+                chain.push((e, pos));
+                from = pos;
+                max_d = link_range;
+            }
+            let mut prev = origin;
+            for (e, pos) in &chain {
+                let (cm, crit) = roll_crit(v.crit_ch, stats.crit_damage, rng);
+                let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
+                hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
+                // zap segment visual
+                let mid = (prev + *pos) / 2.0;
+                let len = prev.distance(*pos);
+                let dirv = (*pos - prev).normalize_or_zero();
+                commands.spawn((
+                    Mesh3d(assets.beam_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(mid)
+                        .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
+                        .with_scale(Vec3::new(0.12, 0.12, len)),
+                    Fader { life: 0.12, max: 0.12 },
+                    StageScoped,
+                ));
+                prev = *pos;
+            }
+            if !chain.is_empty() {
+                sfx.write(SfxMsg(Sfx::Hit));
+            }
+        }
+        Behavior::Rocket { speed, aoe } => {
+            let headings: Vec<Vec3> = if v.ring {
+                ring_headings(up, aim, count.max(ANTIGRAV_RING_SHOTS)).collect()
+            } else {
+                (0..count).map(|_| Quat::from_axis_angle(up, rng.gen_range(-0.6..0.6)) * aim).collect()
+            };
+            for h in headings {
+                commands.spawn((
+                    Projectile {
+                        owner: v.owner,
+                        dir: start_dir,
+                        heading: h,
+                        speed: speed * stats.proj_speed,
+                        damage: dmg,
+                        pierce: 0,
+                        life: 4.0 * stats.duration,
+                        size,
+                        kind: ProjKind::Rocket { aoe: aoe * size },
+                        hit_cd: HashMap::new(),
+                    },
+                    Mesh3d(assets.proj_mesh.clone()),
+                    MeshMaterial3d(assets.mats[&v.kind].clone()),
+                    Transform::from_translation(origin).with_scale(Vec3::splat(size * 1.3)),
+                    StageScoped,
+                ));
+            }
+        }
+        Behavior::Orbit { .. } | Behavior::Aura { .. } => {}
+    }
+}
+
+/// Where a volley from `center` aims: the nearest enemy in range, flattened onto the local
+/// horizontal, else straight ahead.
+fn aim_from(
+    center: Vec3,
+    up: Vec3,
+    facing: Vec3,
+    enemies: &Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
+    pots: &Query<(), With<Pot>>,
+) -> Vec3 {
+    let aim = match nearest_enemy(center, 40.0, enemies, pots) {
+        Some((_, tpos)) => {
+            let v = tpos - center;
+            (v - up * v.dot(up)).normalize_or_zero()
+        }
+        None => facing,
+    };
+    if aim == Vec3::ZERO { facing } else { aim }
+}
+
 /// Tick weapon cooldowns and fire.
+///
+/// Runs on every machine for every astronaut it has a sheet for — authoritative on the
+/// host, the owner's cosmetic prediction on a client — so the §7 firing rules live here
+/// too: The Overheat's jam, Anti-Grav Boots' airborne 360° ring, and Second Astronaut's
+/// ghost volley.
 #[allow(clippy::too_many_arguments)]
 pub fn weapon_fire(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<WeaponAssets>,
-    _planet: Res<CurrentPlanet>,
-    mut q_player: Query<(Entity, &Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>)>,
+    particles: Option<Res<ParticleAssets>>,
+    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    mut q_player: Query<(Entity, &Player, &mut PlayerState, &mut crate::items::ItemProcs, &Transform)>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
     q_pots: Query<(), With<Pot>>,
     q_drones: Query<(Entity, &Drone)>,
@@ -222,27 +521,35 @@ pub fn weapon_fire(
     mut hits: MessageWriter<HitMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
+    use crate::content::items::ItemKind;
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
     let mut rng = rand::thread_rng();
+    let t_now = time.elapsed_secs();
 
     // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
     let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32)> = HashMap::new();
     let mut want_auras: Vec<(Entity, WeaponKind)> = Vec::new();
     let mut player_pos: Vec<(Entity, Vec3)> = Vec::new();
 
-    for (pe, player, mut run, ptf, is_local) in &mut q_player {
+    for (pe, player, mut run, mut procs, ptf) in &mut q_player {
     if run.dead {
         continue; // a downed astronaut stops firing
     }
     player_pos.push((pe, ptf.translation));
     let atk_speed = run.attack_speed();
     let dmg_mult = run.damage_mult();
-    let stats = run.stats.clone();
+    let stats = run.live_stats();
     let crit_ch = run.crit_chance(); // captured before the &mut weapons loop (Reticle pulse)
     let aura_sc = run.aura_scale(); // Aurora's fields swell while sprinting
+    let overheat = run.has_item(ItemKind::TheOverheat);
+    let ring = run.airborne && run.has_item(ItemKind::AntiGravBoots);
+    procs.jam = (procs.jam - dt).max(0.0);
+    let jammed = procs.jam > 0.0;
+    let up = player.dir;
+    let origin = ptf.translation + up * 0.4;
 
     for wi in run.weapons.iter_mut() {
         let def = wi.kind.def();
@@ -259,6 +566,9 @@ pub fn weapon_fire(
             Behavior::Aura { radius, slow } => {
                 let radius = radius * aura_sc;
                 want_auras.push((pe, wi.kind));
+                if jammed {
+                    continue; // The Overheat: a jammed suit's fields stop pulsing too
+                }
                 wi.cd -= dt * atk_speed;
                 if wi.cd <= 0.0 {
                     wi.cd = def.cooldown;
@@ -283,223 +593,76 @@ pub fn weapon_fire(
             _ => {}
         }
 
+        if jammed {
+            continue;
+        }
         wi.cd -= dt * atk_speed;
         if wi.cd > 0.0 {
             continue;
         }
         wi.cd = def.cooldown;
 
-        let target = nearest_enemy(ptf.translation, 40.0, &enemies, &q_pots);
-        let up = player.dir;
-        let aim = match target {
-            Some((_, tpos)) => {
-                let v = tpos - ptf.translation;
-                (v - up * v.dot(up)).normalize_or_zero()
-            }
-            None => player.facing,
+        let aim = aim_from(ptf.translation, up, player.facing, &enemies, &q_pots);
+        let v = Volley {
+            owner: pe,
+            kind: wi.kind,
+            dmg,
+            count,
+            size,
+            center: ptf.translation,
+            origin,
+            up,
+            aim,
+            ring,
+            ghost: false,
+            crit_ch,
         };
-        let aim = if aim == Vec3::ZERO { player.facing } else { aim };
-        let origin = ptf.translation + up * 0.4;
-
-        match def.behavior {
-            Behavior::MeleeArc { arc_deg, range } => {
-                let r = range * size;
-                let cos_half = (arc_deg.to_radians() / 2.0).cos();
-                for (e, tf, en) in enemies.iter() {
-                    let v = tf.translation - ptf.translation;
-                    if v.length_squared() > r * r {
-                        continue;
-                    }
-                    let vt = (v - up * v.dot(up)).normalize_or_zero();
-                    if arc_deg >= 360.0 || vt.dot(aim) > cos_half {
-                        let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
-                        let elite = if en.elite { stats.elite_damage } else { 1.0 };
-                        hits.write(HitMsg {
-                            source: Some(pe),
-                            target: e,
-                            amount: dmg * cm * elite,
-                            crit,
-                            knock: vt * 9.0 * stats.knockback,
-                        });
-                    }
-                }
-                // sweep visual
-                commands.spawn((
-                    Mesh3d(assets.sweep_mesh.clone()),
-                    MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                    Transform::from_translation(origin + aim * r * 0.5)
-                        .with_rotation(sphere::frame_quat(up, aim))
-                        .with_scale(Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)),
-                    Fader { life: 0.14, max: 0.14 },
-                    StageScoped,
-                ));
-                sfx.write(SfxMsg(Sfx::Hit));
+        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut rng);
+        if ring {
+            telemetry.ring_volleys += 1;
+        }
+        // The Overheat: every Nth volley jams every gun for a beat.
+        procs.volleys += 1;
+        if overheat && procs.volleys % OVERHEAT_JAM_EVERY == 0 {
+            procs.jam = OVERHEAT_JAM_SECS;
+            telemetry.jams += 1;
+            if let Some(pa) = &particles {
+                fx::burst(&mut commands, pa, origin, up, Pcolor::White, 10, 3.5);
             }
-            Behavior::Shot { speed, pierce, spread_deg } => {
-                for i in 0..count {
-                    let ang = if count > 1 {
-                        (i as f32 / (count - 1) as f32 - 0.5) * spread_deg.to_radians()
-                    } else {
-                        rng.gen_range(-0.04..0.04)
-                    };
-                    let h = Quat::from_axis_angle(up, ang) * aim;
-                    commands.spawn((
-                        Projectile {
-                            owner: pe,
-                            dir: player.dir,
-                            heading: h,
-                            speed: speed * stats.proj_speed,
-                            damage: dmg,
-                            pierce: pierce as i32,
-                            life: 2.2 * stats.duration,
-                            size,
-                            kind: ProjKind::Straight,
-                            hit_cd: HashMap::new(),
-                        },
-                        Mesh3d(assets.proj_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(origin).with_scale(Vec3::splat(size)),
-                        StageScoped,
-                    ));
-                }
-            }
-            Behavior::Seek { speed, pierce } => {
-                for i in 0..count {
-                    let ang = i as f32 * 0.35 - (count as f32 - 1.0) * 0.175;
-                    let h = Quat::from_axis_angle(up, ang) * aim;
-                    commands.spawn((
-                        Projectile {
-                            owner: pe,
-                            dir: player.dir,
-                            heading: h,
-                            speed: speed * stats.proj_speed,
-                            damage: dmg,
-                            pierce: pierce as i32,
-                            life: 2.6 * stats.duration,
-                            size,
-                            kind: ProjKind::Seek,
-                            hit_cd: HashMap::new(),
-                        },
-                        Mesh3d(assets.proj_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(origin).with_scale(Vec3::splat(size * 0.9)),
-                        StageScoped,
-                    ));
-                }
-            }
-            Behavior::Boomerang { speed, range } => {
-                for i in 0..count {
-                    let ang = i as f32 * 0.5 - (count as f32 - 1.0) * 0.25;
-                    let h = Quat::from_axis_angle(up, ang) * aim;
-                    let out_time = range / speed;
-                    commands.spawn((
-                        Projectile {
-                            owner: pe,
-                            dir: player.dir,
-                            heading: h,
-                            speed: speed * stats.proj_speed,
-                            damage: dmg,
-                            pierce: 999,
-                            life: out_time * 2.4 * stats.duration,
-                            size,
-                            kind: ProjKind::Boomerang { age: 0.0, out_time },
-                            hit_cd: HashMap::new(),
-                        },
-                        Mesh3d(assets.drone_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(origin).with_scale(Vec3::splat(size)),
-                        StageScoped,
-                    ));
-                }
-            }
-            Behavior::Beam { range, width } => {
-                commands.spawn((
-                    Beam {
-                        owner: pe,
-                        heading: aim,
-                        range: range * size,
-                        width: width * size,
-                        damage: dmg,
-                        ticks_left: (5.0 * stats.duration) as u32 + 1,
-                        tick_cd: 0.0,
-                    },
-                    Mesh3d(assets.beam_mesh.clone()),
-                    MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                    Transform::from_translation(origin),
-                    StageScoped,
-                ));
-            }
-            Behavior::Chain { jumps, range, link_range } => {
-                let mut chain: Vec<(Entity, Vec3)> = Vec::new();
-                let mut from = ptf.translation;
-                let mut max_d = range;
-                for _ in 0..=(jumps + count - 1) {
-                    let mut best: Option<(Entity, Vec3, f32)> = None;
-                    for (e, tf, _) in enemies.iter() {
-                        if chain.iter().any(|(ce, _)| *ce == e) || q_pots.get(e).is_ok() {
-                            continue;
-                        }
-                        let d = tf.translation.distance_squared(from);
-                        if d < max_d * max_d && best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
-                            best = Some((e, tf.translation, d));
-                        }
-                    }
-                    let Some((e, pos, _)) = best else { break };
-                    chain.push((e, pos));
-                    from = pos;
-                    max_d = link_range;
-                }
-                let mut prev = origin;
-                for (e, pos) in &chain {
-                    let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
-                    let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
-                    hits.write(HitMsg { source: Some(pe), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
-                    // zap segment visual
-                    let mid = (prev + *pos) / 2.0;
-                    let len = prev.distance(*pos);
-                    let dirv = (*pos - prev).normalize_or_zero();
-                    commands.spawn((
-                        Mesh3d(assets.beam_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(mid)
-                            .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
-                            .with_scale(Vec3::new(0.12, 0.12, len)),
-                        Fader { life: 0.12, max: 0.12 },
-                        StageScoped,
-                    ));
-                    prev = *pos;
-                }
-                if !chain.is_empty() {
-                    sfx.write(SfxMsg(Sfx::Hit));
-                }
-            }
-            Behavior::Rocket { speed, aoe } => {
-                for _ in 0..count {
-                    let h = Quat::from_axis_angle(up, rng.gen_range(-0.6..0.6)) * aim;
-                    commands.spawn((
-                        Projectile {
-                            owner: pe,
-                            dir: player.dir,
-                            heading: h,
-                            speed: speed * stats.proj_speed,
-                            damage: dmg,
-                            pierce: 0,
-                            life: 4.0 * stats.duration,
-                            size,
-                            kind: ProjKind::Rocket { aoe: aoe * size },
-                            hit_cd: HashMap::new(),
-                        },
-                        Mesh3d(assets.proj_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(origin).with_scale(Vec3::splat(size * 1.3)),
-                        StageScoped,
-                    ));
-                }
-            }
-            Behavior::Orbit { .. } | Behavior::Aura { .. } => unreachable!(),
+            break;
         }
     }
-    let _ = is_local;
+
+    // Second Astronaut: the ghost co-pilot fires its mirrored weapon on its own cadence,
+    // from where it floats, at a share of the weapon's damage.
+    let ghost_power = run.item_power(ItemKind::SecondAstronaut);
+    let mirrored = run.ghost_weapon.and_then(|g| run.weapons.iter().find(|w| w.kind == g).map(|w| (w.kind, w.level)));
+    if let (true, Some((kind, level))) = (ghost_power > 0.0, mirrored) {
+        procs.ghost_cd -= dt * atk_speed;
+        if procs.ghost_cd <= 0.0 {
+            let def = kind.def();
+            procs.ghost_cd = def.cooldown;
+            let (lvl_dmg, lvl_extra, lvl_size) = kind.level_scaling(level);
+            let gpos = crate::items::ghost_anchor(ptf, t_now);
+            let gup = gpos.normalize_or_zero();
+            let v = Volley {
+                owner: pe,
+                kind,
+                dmg: def.damage * lvl_dmg * dmg_mult * GHOST_MIRROR * ghost_power,
+                count: (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1),
+                size: lvl_size * stats.size,
+                center: gpos,
+                origin: gpos,
+                up: gup,
+                aim: aim_from(gpos, gup, player.facing, &enemies, &q_pots),
+                ring: false,
+                ghost: true,
+                crit_ch,
+            };
+            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut rng);
+            telemetry.ghost_volleys += 1;
+        }
+    }
     }
 
     // ------ drone reconciliation
@@ -681,7 +844,7 @@ pub fn projectile_move(
                     exploded = true;
                     break;
                 }
-                let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
+                let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                 let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                 hits.write(HitMsg {
                     source: Some(p.owner),
@@ -723,7 +886,7 @@ fn explode(
     for (te, tpos) in hash.near(pos, aoe + 1.0) {
         let Ok(en) = enemies.get(te) else { continue };
         if tpos.distance_squared(pos) < (aoe + en.scale * 0.5) * (aoe + en.scale * 0.5) {
-            let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, rng);
+            let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), rng);
             let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
             let kdir = (tpos - pos).normalize_or_zero();
             hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0 });
@@ -767,7 +930,7 @@ pub fn drone_update(
                 let Ok(en) = enemies.get(te) else { continue };
                 let reach = 0.8 + en.scale * 0.5;
                 if tpos.distance_squared(tf.translation) < reach * reach {
-                    let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
+                    let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                     hits.write(HitMsg {
                         source: Some(d.owner),
@@ -808,7 +971,11 @@ pub fn beam_update(
         };
         beam.tick_cd -= dt;
         let up = player.dir;
-        let origin = ptf.translation + up * 0.6;
+        let origin = if beam.ghost {
+            crate::items::ghost_anchor(ptf, time.elapsed_secs())
+        } else {
+            ptf.translation + up * 0.6
+        };
         tf.translation = origin + beam.heading * beam.range * 0.5;
         tf.rotation = sphere::frame_quat(up, beam.heading);
         tf.scale = Vec3::new(beam.width, beam.width, beam.range);
@@ -828,7 +995,7 @@ pub fn beam_update(
                 }
                 let perp = (v - beam.heading * along - up * v.dot(up)).length();
                 if perp < beam.width + en.scale * 0.5 {
-                    let (cm, crit) = roll_crit(run.crit_chance(), run.stats.crit_damage, &mut rng);
+                    let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
                     hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO });
                 }
@@ -974,32 +1141,44 @@ pub fn apply_hits(
     }
 }
 
-/// Resolve hits on the player: evasion -> shield -> armor -> hp, thorns reflect.
+/// Resolve hits on the player: evasion -> shield -> armor -> hp, thorns reflect — and, when
+/// a hit would kill, the ONE death-save resolver (`items::resolve_death_save`, §7 stacking
+/// rule). HOST-only: a peer's saves resolve here too and reach its screen as an item event.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_player_hits(
     mut reader: MessageReader<PlayerHitMsg>,
-    mut run: ResMut<RunState>,
-    mut q_ps: Query<(&mut PlayerState, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
+    planet: Res<CurrentPlanet>,
+    mut q_ps: Query<(
+        &mut PlayerState,
+        &mut Player,
+        &mut crate::items::ItemProcs,
+        &crate::player::PlayerId,
+        &Transform,
+        Has<crate::player::LocalPlayer>,
+    )>,
     mut shake: ResMut<Shake>,
-    mut phase: ResMut<RunPhase>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
+    mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
+    mut telemetry: ResMut<crate::items::ItemTelemetry>,
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
         // Address the hit to its actual victim. `continue`, never unwrap: messages are
         // double-buffered, so a victim CAN be despawned between the write and this read
         // (stage change, disconnect).
-        let Ok((mut run_ps, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
+        let Ok((mut run_ps, mut body, mut procs, pid, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
         if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
             continue;
         }
         // evasion
-        if rng.gen_bool(run_ps.stats.evasion_fraction() as f64) {
+        if rng.gen_bool(run_ps.effective_evasion_fraction() as f64) {
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        let mut amount = msg.amount * (1.0 - run_ps.effective_armor_fraction());
+        // Cracked Helmet's price is paid before mitigation, like any other damage taken.
+        let mut amount = msg.amount * run_ps.stats.damage_taken.max(0.0) * (1.0 - run_ps.effective_armor_fraction());
         // shield first
         if run_ps.shield > 0.0 {
             let absorbed = run_ps.shield.min(amount);
@@ -1021,9 +1200,45 @@ pub fn apply_player_hits(
             }
         }
 
+        let here = body.dir;
         if run_ps.hp <= 0.0 {
-            run_ps.hp = 0.0;
-            run_ps.dead = true;
+            match crate::items::resolve_death_save(&mut run_ps, &mut procs, here) {
+                Some((save, landing)) => {
+                    telemetry.saves[save.code() as usize] += 1;
+                    if landing != here {
+                        telemetry.rewinds.push(crate::sphere::arc_dist(here, landing, planet.radius));
+                        move_astronaut(&mut body, &mut procs, landing);
+                    }
+                    item_fx.write(crate::items::ItemFxMsg {
+                        fx: crate::items::ItemFx::DeathSave { owner: pid.0, save, dir: landing },
+                        from_wire: false,
+                    });
+                }
+                None => {
+                    run_ps.hp = 0.0;
+                    run_ps.dead = true;
+                }
+            }
+        } else if let Some(landing) = crate::items::boomerang_insurance(&run_ps, &mut procs, here) {
+            move_astronaut(&mut body, &mut procs, landing);
+            item_fx.write(crate::items::ItemFxMsg {
+                fx: crate::items::ItemFx::DeathSave {
+                    owner: pid.0,
+                    save: crate::items::DeathSave::AntipodeEscape,
+                    dir: landing,
+                },
+                from_wire: false,
+            });
         }
     }
+}
+
+/// Put an astronaut somewhere else on the planet (a tether rewind, a blink): standing,
+/// still, and without the move reading as a fall to Downhill Momentum.
+fn move_astronaut(body: &mut Player, procs: &mut crate::items::ItemProcs, to: Vec3) {
+    body.dir = to;
+    body.vel_t = Vec3::ZERO;
+    body.vel_r = 0.0;
+    body.height = 0.0;
+    procs.forget_altitude();
 }

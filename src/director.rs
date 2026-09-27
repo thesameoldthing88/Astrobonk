@@ -6,7 +6,7 @@ use crate::content::enemies::BossKind;
 use crate::content::items::ItemKind;
 use crate::content::planets::PlanetKind;
 use crate::content::tomes::TomeKind;
-use crate::enemies::{self, Boss, Director, EnemyAssets, MinibossSlot};
+use crate::enemies::{self, Director, EnemyAssets, MinibossSlot};
 use crate::interact;
 use crate::messages::*;
 use crate::planet::{self, CurrentPlanet, StageScoped};
@@ -38,6 +38,7 @@ pub struct ResultsData {
 }
 
 /// Countdown, boss marks, The Static.
+#[allow(clippy::too_many_arguments)]
 pub fn run_clock(
     mut commands: Commands,
     time: Res<Time>,
@@ -47,7 +48,7 @@ pub fn run_clock(
     enemy_assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<&Player>,
-    q_boss: Query<&Boss>,
+    mut telemetry: ResMut<crate::items::ItemTelemetry>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
@@ -62,10 +63,9 @@ pub fn run_clock(
         run.static_timer += dt;
         // every overtime second is paid at banking (§10 Static_overtime_seconds)
         run.static_secs_total += dt;
-        return;
+    } else {
+        run.timer -= dt;
     }
-
-    run.timer -= dt;
 
     // Spawn anchor: the party CENTROID, so a boss doesn't erupt in one player's lap and
     // half a planet away from the other. Only the spawn calls below need it, so the clock
@@ -80,49 +80,58 @@ pub fn run_clock(
 
     let scaling = Scaling::for_run(&run, dirs.len());
 
-    // miniboss marks
-    for (i, mark) in MINIBOSS_MARKS.iter().enumerate() {
-        let Some(anchor) = anchor else { break };
-        if run.timer <= *mark && !run.minibosses_spawned[i] {
-            run.minibosses_spawned[i] = true;
-            let kind = if i == 0 { BossKind::CraterpillarJr } else { BossKind::RoverGoneWrong };
-            let e = enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor, kind, &scaling);
-            // Tag WHICH mark this is: the §3 guaranteed chest follows miniboss #1, whatever
-            // kind a world's miniboss table (P20) puts there.
-            commands.entity(e).insert(MinibossSlot(i as u8));
-            banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
+    // The marks belong to the clock, and the clock stops when The Static rises.
+    if !run.static_active {
+        // miniboss marks
+        for (i, mark) in MINIBOSS_MARKS.iter().enumerate() {
+            let Some(anchor) = anchor else { break };
+            if run.timer <= *mark && !run.minibosses_spawned[i] {
+                run.minibosses_spawned[i] = true;
+                let kind = if i == 0 { BossKind::CraterpillarJr } else { BossKind::RoverGoneWrong };
+                let e = enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor, kind, &scaling);
+                // Tag WHICH mark this is: the §3 guaranteed chest follows miniboss #1, whatever
+                // kind a world's miniboss table (P20) puts there.
+                commands.entity(e).insert(MinibossSlot(i as u8));
+                banners.write(BannerMsg(format!("{} APPROACHES", kind.def().name)));
+                sfx.write(SfxMsg(Sfx::BossRoar));
+            }
+        }
+
+        // stage boss
+        if run.timer <= BOSS_MARK && !run.boss_spawned && anchor.is_some() {
+            run.boss_spawned = true;
+            let kind = match planet.kind {
+                PlanetKind::Moon => BossKind::Craterpillar,
+                _ => BossKind::Anubot,
+            };
+            enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, &scaling);
+            banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
     }
 
-    // stage boss
-    if run.timer <= BOSS_MARK && !run.boss_spawned && anchor.is_some() {
-        run.boss_spawned = true;
-        let kind = match planet.kind {
-            PlanetKind::Moon => BossKind::Craterpillar,
-            _ => BossKind::Anubot,
-        };
-        enemies::spawn_boss(&mut commands, &mut meshes, &enemy_assets, &planet, anchor.unwrap_or(Vec3::Y), kind, &scaling);
-        banners.write(BannerMsg(format!("{} RISES", kind.def().name)));
-        sfx.write(SfxMsg(Sfx::BossRoar));
-    }
-
-    // boss died -> teleporter (once)
+    // boss died -> teleporter (once). Checked in The Static too: a boss the squad finally
+    // drops in overtime still opens the way out — and with The Static Radio (§7) the boss
+    // and The Static arrive together, so otherwise the stage could never be left.
     if run.boss_dead && !run.teleporter_open && anchor.is_some() {
         run.teleporter_open = true;
         interact::spawn_teleporter(&mut commands, &mut meshes, &mut materials, &planet, anchor.unwrap_or(Vec3::Y));
         banners.write(BannerMsg("TELEPORTER ONLINE — OR STAY AND FARM".into()));
     }
 
-    // clock ran out
-    if run.timer <= 0.0 {
-        run.timer = 0.0;
-        if !run.static_active {
-            run.static_active = true;
+    // clock ran out — STATIC_RADIO_LEAD_SECS early if someone carries The Static Radio
+    let lead = if run.static_radio { STATIC_RADIO_LEAD_SECS } else { 0.0 };
+    if !run.static_active && run.timer <= lead {
+        run.timer = run.timer.max(0.0);
+        run.static_active = true;
+        if lead > 0.0 {
+            telemetry.radio_static_at.get_or_insert(run.timer);
+            banners.write(BannerMsg("THE RADIO CALLED IT IN. THE STATIC RISES EARLY.".into()));
+        } else {
             banners.write(BannerMsg("THE STATIC RISES. RUN OR FARM SILVER.".into()));
-            sfx.write(SfxMsg(Sfx::BossRoar));
-            // the boss (if alive) stays; if it was never beaten the teleporter never opens
         }
+        sfx.write(SfxMsg(Sfx::BossRoar));
+        // the boss (if alive) stays; if it was never beaten the teleporter never opens
     }
 }
 

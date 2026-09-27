@@ -603,7 +603,7 @@ pub fn director_spawn(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<&Player>,
+    q_player: Query<(&Player, &crate::run::PlayerState)>,
     q_enemies: Query<(), With<Enemy>>,
     q_boss: Query<&Boss>,
 ) {
@@ -612,18 +612,27 @@ pub fn director_spawn(
         return;
     }
     // Anchors to spawn around — one per living astronaut, round-robined below so each
-    // player gets their own share of the horde arriving over THEIR horizon.
-    let anchors: Vec<Vec3> = q_player.iter().map(|p| p.dir).collect();
+    // player gets their own share of the horde arriving over THEIR horizon. A Signal Flare
+    // carrier (§7: "enemies always know where you are") is listed twice — a double share —
+    // and theirs lands closer (the flag).
+    let mut anchors: Vec<(Vec3, bool)> = Vec::new();
+    for (p, ps) in &q_player {
+        anchors.push((p.dir, ps.revealed()));
+        if ps.revealed() {
+            anchors.push((p.dir, true));
+        }
+    }
     if anchors.is_empty() {
         return;
     }
+    let party = q_player.iter().count();
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_enemies.iter().count();
     // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
     // sub-linearly — a full budget per player doubles density and blows the cap, while no
     // bump at all gives each player half a horde.
-    let sc = Scaling::for_run(&run, anchors.len());
+    let sc = Scaling::for_run(&run, party);
 
     // Breathing: a boss count that dropped since last tick means one just fell.
     let bosses_now = q_boss.iter().count();
@@ -635,7 +644,7 @@ pub fn director_spawn(
     let miniboss_alive = q_boss.iter().any(|b| !b.kind.def().is_stage_boss);
 
     let rate = scaling::spawn_rate_base(run.timer, run.static_active, run.static_timer)
-        * if run.static_active { 1.0 } else { scaling::beat_modifier(miniboss_alive, director.exhale) }
+        * if run.static_active { sc.static_rate } else { scaling::beat_modifier(miniboss_alive, director.exhale) }
         * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
@@ -672,17 +681,24 @@ pub fn director_spawn(
     let room = cap.saturating_sub(alive);
     let n = budget.min(room);
     for i in 0..n {
-        let anchor = anchors[i % anchors.len()];
+        let (anchor, flare) = anchors[i % anchors.len()];
         let heading = {
             let (t, b) = sphere::tangent_frame(anchor);
             let a = rng.gen_range(0.0..std::f32::consts::TAU);
             t * a.cos() + b * a.sin()
         };
-        let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
+        // one draw either way: the band changes, the stream does not
+        let band = if flare {
+            SIGNAL_FLARE_SPAWN_ARC_MIN..SIGNAL_FLARE_SPAWN_ARC_MAX
+        } else {
+            SPAWN_ARC_MIN..SPAWN_ARC_MAX
+        };
+        let arc = rng.gen_range(band);
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, sc.hp, sc.dmg, rng);
+            let (hp, dmg) = (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg);
+            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp, dmg, rng);
             continue;
         }
 
@@ -1126,11 +1142,25 @@ pub fn enemy_move(
     if snaps.is_empty() {
         return;
     }
+    // How far each astronaut SEEMS to the horde: a Signal Flare carrier reads closer than
+    // they are, so the chase prefers them over a nearer teammate (§7).
+    let lure: Vec<f32> = q_player
+        .iter()
+        .filter(|(_, _, ps, _)| !ps.dead)
+        .map(|(_, _, ps, _)| if ps.revealed() { SIGNAL_FLARE_LURE } else { 1.0 })
+        .collect();
     let t_now = time.elapsed_secs();
 
     for (entity, mut e, mut tf) in &mut q {
-        // Each enemy chases whoever is closest ALONG THE SURFACE.
-        let target = crate::player::nearest_astronaut(e.dir, &snaps, planet.radius)
+        // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
+        let target = snaps
+            .iter()
+            .zip(&lure)
+            .min_by(|(a, la), (b, lb)| {
+                (sphere::arc_dist(e.dir, a.dir, planet.radius) * **la)
+                    .total_cmp(&(sphere::arc_dist(e.dir, b.dir, planet.radius) * **lb))
+            })
+            .map(|(s, _)| *s)
             .unwrap_or(snaps[0]);
         let player_dir = target.dir;
         let player_pos = target.pos;
@@ -1370,9 +1400,10 @@ pub fn spitter_attack(
     }
     // Anyone hidden in the dust storm is invisible to ranged enemies — per astronaut, so a
     // teammate outside the cell is still a target while you ride it.
+    // (a Signal Flare carrier is never hidden: the horde always knows where they are)
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps, hidden)| !ps.dead && !hidden)
+        .filter(|(_, _, ps, hidden)| !ps.dead && (!hidden || ps.revealed()))
         .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {
@@ -1429,7 +1460,10 @@ pub fn beamer_attack(
     let all: Vec<(crate::player::AstronautSnap, bool)> = q_player
         .iter()
         .filter(|(_, _, ps, _, _)| !ps.dead)
-        .map(|(en, p, _, tf, hidden)| (crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation }, hidden))
+        // a Signal Flare carrier is never hidden: the horde always knows where they are
+        .map(|(en, p, ps, tf, hidden)| {
+            (crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation }, hidden && !ps.revealed())
+        })
         .collect();
     // Only astronauts OUT of the dust can be picked as a new target.
     let visible: Vec<crate::player::AstronautSnap> =
@@ -1559,9 +1593,10 @@ pub fn lobber_attack(
         return;
     }
     // can't range anyone through the dust
+    // (a Signal Flare carrier is never hidden: the horde always knows where they are)
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps, hidden)| !ps.dead && !hidden)
+        .filter(|(_, _, ps, hidden)| !ps.dead && (!hidden || ps.revealed()))
         .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {

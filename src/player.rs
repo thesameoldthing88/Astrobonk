@@ -74,6 +74,7 @@ pub struct InputIntent {
     pub jump: bool,      // edge-triggered (true only on the frame pressed)
     pub slide: bool,     // edge-triggered
     pub interact: bool,  // edge-triggered
+    pub jump_held: bool, // level: jump is down this frame (Anti-Grav Boots hover)
 }
 
 #[derive(Component)]
@@ -164,12 +165,14 @@ pub fn spawn_player(
             InputIntent::default(),
             RigHero(character),
             crate::comet::CometState::default(),
+            crate::items::ItemProcs::default(),
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false },
                 crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
+                crate::net::NetItemVis::default(),
                 bevy_replicon::prelude::Replicated,
             ),
             Transform::from_translation(pos),
@@ -441,6 +444,7 @@ pub fn gather_local_input(
     intent.wish = wish.normalize_or_zero();
     intent.forward = fwd;
     intent.jump = keys.just_pressed(KeyCode::Space);
+    intent.jump_held = keys.pressed(KeyCode::Space);
     intent.slide = keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC);
     intent.interact = keys.just_pressed(KeyCode::KeyE);
 }
@@ -552,17 +556,23 @@ pub fn player_input(
 }
 
 /// Integrate motion over the sphere, snap to terrain, drive the transform.
+///
+/// Also where the movement-side items live, because this runs on every body a machine
+/// moves (the host: all; a client: its own, predicted) and so the owner's feel and the
+/// host's truth come out of the same code: Anti-Grav Boots' hover, and the `airborne` /
+/// `descent_m` readings Icarus Boots and Downhill Momentum deal damage from.
 pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     props: Res<crate::planet::PropColliders>,
-    mut q: Query<(&mut Player, &mut PlayerState, &mut Transform)>,
+    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    mut q: Query<(&mut Player, &mut PlayerState, &mut crate::items::ItemProcs, &InputIntent, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (mut p, mut run, mut tf) in &mut q {
+    for (mut p, mut run, mut procs, intent, mut tf) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
     p.coyote = (p.coyote - dt).max(0.0);
@@ -571,8 +581,22 @@ pub fn player_physics(
     // above base run speed? (Nova's "no cooldown while sprinting")
     run.fast_move = p.vel_t.length() > PLAYER_RUN_SPEED * run.move_speed_mult() * 1.08;
 
-    // gravity
-    p.vel_r -= PLAYER_GRAVITY * dt;
+    // Anti-Grav Boots: holding jump once the rise is spent holds the altitude — gravity
+    // simply stops for as long as the airtime's budget lasts.
+    procs.hovering = !p.grounded
+        && intent.jump_held
+        && procs.hover_left > 0.0
+        && p.vel_r <= 0.0
+        && !run.dead
+        && run.has_item(crate::content::items::ItemKind::AntiGravBoots);
+    if procs.hovering {
+        procs.hover_left -= dt;
+        p.vel_r = 0.0;
+        telemetry.hover_secs += dt;
+    } else {
+        // gravity
+        p.vel_r -= PLAYER_GRAVITY * dt;
+    }
 
     // advance over the sphere at current radius
     let r = planet.surface(p.dir) + p.height;
@@ -608,9 +632,17 @@ pub fn player_physics(
         p.grounded = true;
         p.jumps_used = 0;
         p.coyote = 0.12;
+        procs.hover_left = ANTIGRAV_HOVER_SECS;
     } else if p.height > 0.02 {
         p.grounded = false;
     }
+    run.airborne = !p.grounded;
+    if run.airborne {
+        telemetry.airborne_secs += dt;
+    }
+    // altitude above the core, so a crater slope and a fall both count as descent
+    run.descent_m = procs.track_descent(planet.surface(p.dir) + p.height, dt);
+    telemetry.max_descent = telemetry.max_descent.max(run.descent_m);
 
     let up = p.dir;
     let pos = planet.surface_point(p.dir) + up * (p.height + PLAYER_HEIGHT * 0.5);

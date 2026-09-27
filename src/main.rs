@@ -9,6 +9,7 @@ mod events_world;
 mod fx;
 mod headless;
 mod interact;
+mod items;
 mod meshkit;
 mod messages;
 mod music;
@@ -117,6 +118,8 @@ fn main() {
         .init_resource::<ui::menus::MenuTab>()
         .init_resource::<ui::hud::BannerQueue>()
         .init_resource::<audio::SfxThrottle>()
+        .init_resource::<items::ItemTelemetry>()
+        .add_message::<items::ItemFxMsg>()
         .add_message::<messages::HitMsg>()
         .add_message::<messages::PlayerHitMsg>()
         .add_message::<messages::KillMsg>()
@@ -131,6 +134,7 @@ fn main() {
                 enemies::setup_enemy_assets,
                 combat::setup_weapon_assets,
                 pickups::setup_pickup_assets,
+                items::setup_item_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -290,6 +294,34 @@ fn main() {
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
         )
+        // ------------- §7 items: the host simulates what they DO for every astronaut; every
+        // machine draws them (from NetItemVis and the hazard lane's item events)
+        .add_systems(
+            Update,
+            (
+                items::item_upkeep.run_if(net::is_simulating),
+                items::encirclement_scan,
+                items::orbital_yoyo.run_if(net::is_simulating),
+                items::comet_tail.run_if(net::is_simulating),
+                items::little_black_hole.run_if(net::is_simulating),
+                items::orbit_chunks,
+                items::trail_patches,
+                items::trail_client_drops.run_if(net::is_client),
+                items::singularity_update,
+                items::push_net_item_vis.run_if(net::is_simulating),
+                items::item_fx_presentation,
+                items::item_visuals,
+                items::apply_sun_shrink,
+            )
+                .chain()
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            dev_grant_items
+                .run_if(in_state(AppState::InRun))
+                .run_if(|| dev_flag("--items")),
+        )
         .add_systems(
             Update,
             pickups::gem_merge.run_if(net::is_simulating).run_if(
@@ -336,6 +368,7 @@ fn main() {
                 ui::hud::update_weapon_row,
                 ui::hud::update_boss_bar,
                 ui::hud::update_comet_hud,
+                ui::hud::update_item_status,
                 ui::hud::update_dust_overlay,
                 ui::hud::update_edge_markers,
                 tutorial::tutorial_system.run_if(playing),
@@ -613,6 +646,25 @@ fn dev_levelup_now(
     ps.gold += 60;
     *done = true;
     info!("DEV --levelupnow: {} level-ups queued", ps.pending_levelups);
+}
+
+/// `--dev --items a,b,…` (or `new` for the fifteen §7 additions): hand the LOCAL astronaut
+/// those items at their native grade once it stands, so a windowed or two-instance test can
+/// watch them work without farming cards. On a joiner they reach the host through the
+/// normal build sync — the path a picked card takes.
+fn dev_grant_items(
+    save: Res<save::MetaSave>,
+    run: Res<run::RunState>,
+    mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let Ok(mut ps) = q.single_mut() else { return };
+    let granted = items::grant_items(&mut ps, &items::items_from_args(), &save, run.greed_stacks);
+    info!("DEV --items: granted {granted:?}");
+    *done = true;
 }
 
 /// Close any leftover modal state when leaving a run.

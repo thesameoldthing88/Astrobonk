@@ -128,6 +128,121 @@ pub const REWARD_CACHE_LUCK: f32 = 0.35;
 /// Items offered by the miniboss cache (pick one).
 pub const REWARD_CACHE_CHOICES: usize = 3;
 
+// ── Items (GDD §7) ───────────────────────────────────────────────────────────
+/// Effect added per Rarity Grade an item is rolled ABOVE its native grade: a Rare-native
+/// item rolled Legendary carries ×2.0 of the same effect (§7 "a bigger roll of the same
+/// effect"). Cursed items never roll, so they always carry ×1.
+pub const ITEM_GRADE_STEP: f32 = 0.5;
+/// Stack limit for the items §7 lets stack "additively and near-infinitely". A number, not
+/// "no cap", so the card can still say (n/cap) — nobody reaches it in a 30-minute chain.
+pub const ITEM_STACKS_UNCAPPED: u32 = 99;
+/// Share of chest / vendor / shrine rolls that come up Cursed, before the normal grade roll.
+/// Luck never touches it: Cursed is a temptation, not a reward tier.
+pub const CURSED_LOOT_CHANCE: f64 = 0.07;
+/// A Cursed item's chance to make each of its level-up pool slots (commons pass at 0.9).
+pub const CURSED_CARD_PASS: f64 = 0.2;
+/// Shady Guy price of a Cursed item: cheap, because the price is paid in risk.
+pub const CURSED_ITEM_PRICE: f32 = 90.0;
+/// A lower-grade item rolled up to the grade drawn is this much less likely than an item
+/// native to that grade (a Legendary roll is mostly Legendaries, sometimes a huge Borgar).
+pub const GRADE_NATIVE_WEIGHT: f32 = 3.0;
+
+/// Orbital Yo-Yo: every YOYO_PERIOD s a chunk orbits you once, hitting each foe once for
+/// YOYO_DAMAGE. The swing radius scales with the planet (§7 "bigger world, wider swing"):
+/// YOYO_RADIUS on a planet of YOYO_REF_PLANET_RADIUS.
+pub const YOYO_PERIOD: f32 = 4.0;
+pub const YOYO_DAMAGE: f32 = 40.0;
+pub const YOYO_RADIUS: f32 = 5.0;
+pub const YOYO_REF_PLANET_RADIUS: f32 = 140.0;
+pub const YOYO_ORBIT_SECS: f32 = 1.1;
+/// Extra stacks add chunks up to this many (spaced evenly), sharing the stack's damage.
+pub const YOYO_MAX_CHUNKS: u32 = 4;
+
+/// Comet Tail: a burning patch every COMET_TAIL_DROP_SECS while moving faster than
+/// COMET_TAIL_MOVING_SPEED; patches live COMET_TAIL_LIFE — longer than the stand-still, so
+/// the loop you just ran is still burning when you stop and ignite it.
+pub const COMET_TAIL_DROP_SECS: f32 = 0.25;
+pub const COMET_TAIL_LIFE: f32 = 4.0;
+pub const COMET_TAIL_RADIUS: f32 = 1.4;
+pub const COMET_TAIL_DPS: f32 = 14.0;
+pub const COMET_TAIL_TICK: f32 = 0.5;
+pub const COMET_TAIL_MOVING_SPEED: f32 = 1.5;
+/// Stand (nearly) still this long to ignite the trail around you.
+pub const COMET_TAIL_STILL_SECS: f32 = 2.0;
+pub const COMET_TAIL_STILL_SPEED: f32 = 0.6;
+/// Ignition: a burst at every live patch and a ring around you; patches then burn hotter.
+pub const COMET_TAIL_IGNITE_DAMAGE: f32 = 45.0;
+pub const COMET_TAIL_IGNITE_RADIUS: f32 = 4.5;
+pub const COMET_TAIL_IGNITED_DPS_MULT: f32 = 2.0;
+
+/// The Overheat: every Nth volley jams all guns for OVERHEAT_JAM_SECS.
+pub const OVERHEAT_JAM_EVERY: u32 = 10;
+pub const OVERHEAT_JAM_SECS: f32 = 1.0;
+
+/// Downhill Momentum: +1% damage per metre of altitude lost over the last second.
+pub const DOWNHILL_DMG_PER_M: f32 = 0.01;
+pub const DOWNHILL_WINDOW_SECS: f32 = 1.0;
+
+/// Second Astronaut: the ghost fires one of your weapons at this share of its damage, and
+/// picks a new one every GHOST_SWAP_SECS.
+pub const GHOST_MIRROR: f32 = 0.5;
+pub const GHOST_SWAP_SECS: f32 = 20.0;
+
+/// Encirclement Bonus: +2% per compass octant (of 8) with an enemy inside ENCIRCLE_RADIUS.
+pub const ENCIRCLE_DMG_PER_DIR: f32 = 0.02;
+pub const ENCIRCLE_RADIUS: f32 = 12.0;
+pub const ENCIRCLE_SCAN_SECS: f32 = 0.2;
+
+/// Icarus Boots: +40% damage airborne, −10% grounded.
+pub const ICARUS_AIR_BONUS: f32 = 0.40;
+pub const ICARUS_GROUND_PENALTY: f32 = 0.10;
+
+/// Anti-Grav Boots: hover budget per airtime (refilled on landing), and the fewest shots a
+/// straight-firing weapon puts in its 360° ring — a "ring" of one shot is not a ring.
+pub const ANTIGRAV_HOVER_SECS: f32 = 2.0;
+pub const ANTIGRAV_RING_SHOTS: u32 = 6;
+/// Beams fan out into this many spokes while airborne.
+pub const ANTIGRAV_RING_BEAMS: u32 = 3;
+
+/// Little Black Hole: every BLACK_HOLE_PERIOD s, a singularity opens BLACK_HOLE_AHEAD m in
+/// front of you and drags everything within BLACK_HOLE_RADIUS into it over the pull.
+pub const BLACK_HOLE_PERIOD: f32 = 6.0;
+pub const BLACK_HOLE_RADIUS: f32 = 8.0;
+pub const BLACK_HOLE_AHEAD: f32 = 3.0;
+pub const BLACK_HOLE_PULL_SECS: f32 = 0.9;
+pub const BLACK_HOLE_MAX_PULL_SPEED: f32 = 26.0;
+
+/// Dead Man's Tether: rewind this far, and stay untouchable this long after.
+pub const TETHER_REWIND_SECS: f32 = 3.0;
+pub const TETHER_IFRAMES: f32 = 1.5;
+
+/// Widow's Ring: +30% to every stat while at 1 HP (below WIDOW_HP_BAND, since HP is
+/// fractional). Its 1-HP save recharges, or it would be immortality with extra steps.
+pub const WIDOW_STAT_BONUS: f32 = 0.30;
+pub const WIDOW_HP_BAND: f32 = 1.5;
+pub const WIDOW_SAVE_COOLDOWN: f32 = 20.0;
+pub const WIDOW_IFRAMES: f32 = 1.0;
+
+/// Boomerang Insurance arms its antipode escape when a hit leaves you under this HP share.
+pub const BOOMERANG_INSURANCE_HP: f32 = 0.20;
+
+/// The Static Radio: The Static arrives this many seconds early, and angrier.
+pub const STATIC_RADIO_LEAD_SECS: f32 = 90.0;
+pub const STATIC_RADIO_HP: f32 = 1.35;
+pub const STATIC_RADIO_DMG: f32 = 1.25;
+pub const STATIC_RADIO_RATE: f32 = 1.3;
+
+/// Signal Flare: the horde rates your distance at this fraction when picking whom to chase,
+/// and your share of each wave lands this close.
+pub const SIGNAL_FLARE_LURE: f32 = 0.5;
+pub const SIGNAL_FLARE_SPAWN_ARC_MIN: f32 = 30.0;
+pub const SIGNAL_FLARE_SPAWN_ARC_MAX: f32 = 42.0;
+
+/// Devoured Sun Shard: every SUN_SHARD_PERIOD s the day side shrinks one SUN_SHARD_STEP
+/// toward total night (RunState::sun_shrink, 0..1).
+pub const SUN_SHARD_PERIOD: f32 = 60.0;
+pub const SUN_SHARD_STEP: f32 = 0.1;
+
 pub const WEAPON_SLOTS: usize = 4;
 pub const MAX_WEAPON_LEVEL: u32 = 7;
 /// Evolved weapons one astronaut may own per run (GDD §15 ledger). Tome of Ascension adds
