@@ -1616,13 +1616,14 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| silver_self_check())
         .and_then(|_| crate::items::self_check(&MetaSave::default()))
         .and_then(|_| crate::save::settings_self_check())
+        .and_then(|_| crate::save::format_self_check())
         .and_then(|_| crate::fx::flash_gate_self_check())
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
         .and_then(|_| crate::tomes::self_check())
         .and_then(|_| crate::techs::self_check())
         .and_then(|_| crate::net::edge_presses_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes, movement techs, input edges)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, flash gate, ui fit, tomes, movement techs, input edges)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
