@@ -582,6 +582,7 @@ pub fn pause_panel(
     role: Res<crate::net::NetRole>,
     mut leave_out: MessageWriter<crate::net::LeaveSession>,
     mut settings_were_open: Local<bool>,
+    save_c: Res<crate::save::MetaSave>,
 ) {
     // While the settings overlay is up, it owns input (incl. ESC) — don't also resume.
     if settings_open.0 {
@@ -635,6 +636,13 @@ pub fn pause_panel(
                     refresh,
                     ps.banishes
                 );
+                // the tome loadout this run was dropped with (this machine's own save)
+                let tomes: Vec<String> = save_c
+                    .tome_loadout
+                    .iter()
+                    .map(|t| format!("{} R{}", t.def().name.trim_start_matches("Tome of ").trim_start_matches("the "), save_c.tome_level(*t)))
+                    .collect();
+                let rules = if tomes.is_empty() { rules } else { format!("{rules}\nTOMES {}", tomes.join(", ")) };
                 // §13 assists sit on top of the numbers above; say which are in force
                 let rules = if run.assisted {
                     let now = run.assist.summary();

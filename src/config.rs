@@ -133,6 +133,50 @@ pub const SILVER_PER_STATIC_SEC: f32 = 1.0;
 pub const SILVER_GOLDEN_TOME_PER_LEVEL: f32 = 0.05;
 pub const SILVER_CURSED_ROCK_EACH: f32 = 0.15;
 
+// ── Tomes (GDD §7) ───────────────────────────────────────────────────────────
+/// Ranks per tome, and the Silver price of the next one: `100 × 1.6^rank` (a full tome is
+/// ~18,000 Silver — "even a bad run funds a fraction of a tier").
+pub const TOME_MAX_RANK: u32 = 10;
+pub const TOME_COST_BASE: f32 = 100.0;
+pub const TOME_COST_GROWTH: f32 = 1.6;
+/// Loadout slots every save starts with ("limited to 4 of the pool"); quest rewards widen
+/// it (`Reward::TomeSlot`) up to TOME_SLOTS_MAX.
+pub const TOME_BASE_SLOTS: u32 = 4;
+pub const TOME_SLOTS_MAX: u32 = 8;
+/// Tome of Encirclement counts the foes within this many metres of you, up to this many.
+pub const TOME_CROWD_RADIUS: f32 = 8.0;
+pub const TOME_CROWD_CAP: u32 = 30;
+/// Tome of Momentum: the bonus builds over this many seconds of unbroken movement above
+/// MOMENTUM_MIN_SPEED and drains MOMENTUM_DRAIN× as fast once you stop — a landing or a
+/// sharp turn does not wipe it, standing around does.
+pub const MOMENTUM_RAMP_SECS: f32 = 6.0;
+pub const MOMENTUM_MIN_SPEED: f32 = 3.0;
+pub const MOMENTUM_DRAIN: f32 = 3.0;
+/// Tome of Ricochet: a shot that comes down skips once — a fresh leg of RICOCHET_LIFE s
+/// (× Duration) aimed at the nearest foe within RICOCHET_SEEK m, hopping RICOCHET_HOP m up
+/// over RICOCHET_HOP_SECS so the skip reads.
+pub const RICOCHET_LIFE: f32 = 1.1;
+pub const RICOCHET_SEEK: f32 = 16.0;
+pub const RICOCHET_HOP: f32 = 1.3;
+pub const RICOCHET_HOP_SECS: f32 = 0.3;
+/// Tome of the Horizon: XP lying more than this arc from you is over the horizon (§4: "the
+/// horizon is a curved lip ~40 m out"). After `1 / HorizonCollect` s on the ground it flies
+/// home along the surface at HORIZON_FLY_SPEED, lifting up to HORIZON_FLY_LIFT m so a gem
+/// crossing the planet reads as a streak rather than a crawl through the dirt.
+/// The flight sets off at HORIZON_FLY_START m/s, gains HORIZON_FLY_ACCEL m/s every second
+/// up to HORIZON_FLY_SPEED, and within HORIZON_HANDOFF_ARC m of its caller the ordinary
+/// magnet flight takes it in (host and client share these, so both draw one flight).
+pub const HORIZON_ARC: f32 = 40.0;
+pub const HORIZON_FLY_START: f32 = 8.0;
+pub const HORIZON_FLY_ACCEL: f32 = 40.0;
+pub const HORIZON_FLY_SPEED: f32 = 60.0;
+pub const HORIZON_FLY_LIFT: f32 = 3.0;
+pub const HORIZON_HANDOFF_ARC: f32 = 2.5;
+/// The astronaut's flashlight. Tome of Nightfall multiplies the intensity by its Flashlight
+/// stat and the reach by half as much again (a 2× beam throws 1.5× as far).
+pub const FLASHLIGHT_INTENSITY: f32 = 6_000_000.0;
+pub const FLASHLIGHT_RANGE: f32 = 55.0;
+
 pub const XP_BASE: f32 = 6.0;
 pub const XP_PER_LEVEL: f32 = 3.4;
 pub const XP_QUAD: f32 = 0.18;

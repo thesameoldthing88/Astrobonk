@@ -127,6 +127,18 @@ pub struct Projectile {
     pub size: f32,
     pub kind: ProjKind,
     pub hit_cd: HashMap<Entity, f32>,
+    /// Skips off the ground left (Tome of Ricochet): when the shot comes down it takes one
+    /// more leg instead of fizzling. Rolled when fired.
+    pub bounces: u8,
+    /// Seconds left of the skip's hop (0 = flying level).
+    pub hop: f32,
+}
+
+impl Projectile {
+    /// Does this shot skip? One roll per shot, at the owner's Ricochet chance.
+    fn roll_bounce(stats: &crate::stats::Stats, rng: &mut impl Rng) -> u8 {
+        u8::from(stats.ricochet > 0.0 && rng.gen_bool(stats.ricochet.clamp(0.0, 1.0) as f64))
+    }
 }
 
 #[derive(Component)]
@@ -142,6 +154,8 @@ pub struct Drone {
     pub radius: f32,
     pub deg_per_sec: f32,
     pub tick: f32,
+    /// Body size (Tome of Orbit swells the drones along with their ring).
+    pub scale: f32,
 }
 
 #[derive(Component)]
@@ -330,6 +344,8 @@ fn fire_volley(
                         size,
                         kind: ProjKind::Straight,
                         hit_cd: HashMap::new(),
+                        bounces: Projectile::roll_bounce(stats, rng),
+                        hop: 0.0,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -359,6 +375,8 @@ fn fire_volley(
                         size,
                         kind: ProjKind::Seek,
                         hit_cd: HashMap::new(),
+                        bounces: Projectile::roll_bounce(stats, rng),
+                        hop: 0.0,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -375,6 +393,9 @@ fn fire_volley(
                     .map(|i| Quat::from_axis_angle(up, i as f32 * 0.5 - (count as f32 - 1.0) * 0.25) * aim)
                     .collect()
             };
+            // Tome of Orbit: a return weapon flies bigger and faster; with the same out-time
+            // that also carries it further before it turns for home.
+            let size = size * stats.orbit;
             for h in headings {
                 let out_time = range / speed;
                 commands.spawn((
@@ -382,13 +403,15 @@ fn fire_volley(
                         owner: v.owner,
                         dir: start_dir,
                         heading: h,
-                        speed: speed * stats.proj_speed,
+                        speed: speed * stats.proj_speed * stats.orbit,
                         damage: dmg,
                         pierce: 999,
                         life: out_time * 2.4 * stats.duration,
                         size,
                         kind: ProjKind::Boomerang { age: 0.0, out_time },
                         hit_cd: HashMap::new(),
+                        bounces: 0, // it comes back; it never comes down
+                        hop: 0.0,
                     },
                     Mesh3d(assets.drone_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -496,6 +519,8 @@ fn fire_volley(
                         size,
                         kind: ProjKind::Rocket { aoe: aoe * size },
                         hit_cd: HashMap::new(),
+                        bounces: 0, // a rocket that comes down goes off
+                        hop: 0.0,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -589,7 +614,7 @@ pub fn weapon_fire(
     let mut zaps = ZapLook { photo: save.accessibility.photosensitive, gate: &mut *flash_gate, now: t_now };
 
     // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
-    let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32)> = HashMap::new();
+    let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32, f32)> = HashMap::new();
     let mut want_auras: Vec<(Entity, WeaponKind)> = Vec::new();
     let mut player_pos: Vec<(Entity, Vec3)> = Vec::new();
 
@@ -613,13 +638,17 @@ pub fn weapon_fire(
     for wi in run.weapons.iter_mut() {
         let def = wi.kind.def();
         let (lvl_dmg, lvl_extra, lvl_size) = wi.kind.level_scaling(wi.level);
-        let dmg = def.damage * lvl_dmg * dmg_mult;
+        // Tome of Ascension's later ranks: evolved weapons hit harder
+        let evo = if wi.kind.is_evolution() { stats.evo_damage } else { 1.0 };
+        let dmg = def.damage * lvl_dmg * dmg_mult * evo;
         let count = (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1);
         let size = lvl_size * stats.size;
 
         match def.behavior {
             Behavior::Orbit { radius, deg_per_sec } => {
-                want_drones.insert((pe, wi.kind), (count as usize, dmg, radius * size, deg_per_sec));
+                // Tome of Orbit: a wider ring of bigger bodies, swung faster
+                let orbit = stats.orbit;
+                want_drones.insert((pe, wi.kind), (count as usize, dmg, radius * size * orbit, deg_per_sec * orbit, orbit));
                 continue;
             }
             Behavior::Aura { radius, slow } => {
@@ -708,10 +737,11 @@ pub fn weapon_fire(
             let (lvl_dmg, lvl_extra, lvl_size) = kind.level_scaling(level);
             let gpos = crate::items::ghost_anchor(ptf, t_now);
             let gup = gpos.normalize_or_zero();
+            let evo = if kind.is_evolution() { stats.evo_damage } else { 1.0 };
             let v = Volley {
                 owner: pe,
                 kind,
-                dmg: def.damage * lvl_dmg * dmg_mult * GHOST_MIRROR * ghost_power,
+                dmg: def.damage * lvl_dmg * dmg_mult * evo * GHOST_MIRROR * ghost_power,
                 count: (def.projectiles + lvl_extra + stats.projectiles.max(0) as u32).max(1),
                 size: lvl_size * stats.size,
                 center: gpos,
@@ -733,7 +763,7 @@ pub fn weapon_fire(
     for (e, d) in q_drones.iter() {
         let alive = want_drones.get(&(d.owner, d.weapon));
         match alive {
-            Some((want_count, dmg, radius, dps)) => {
+            Some((want_count, dmg, radius, dps, scale)) => {
                 have.entry((d.owner, d.weapon)).and_modify(|c| *c += 1).or_insert(1);
                 if d.idx >= *want_count {
                     commands.entity(e).despawn();
@@ -748,6 +778,7 @@ pub fn weapon_fire(
                         radius: *radius,
                         deg_per_sec: *dps,
                         tick: d.tick,
+                        scale: *scale,
                     });
                 }
             }
@@ -756,7 +787,7 @@ pub fn weapon_fire(
             }
         }
     }
-    for ((owner, kind), (count, dmg, radius, dps)) in &want_drones {
+    for ((owner, kind), (count, dmg, radius, dps, scale)) in &want_drones {
         let existing = have.get(&(*owner, *kind)).copied().unwrap_or(0);
         let home = player_pos.iter().find(|(e, _)| e == owner).map(|(_, p)| *p).unwrap_or(Vec3::ZERO);
         for idx in existing..*count {
@@ -770,6 +801,7 @@ pub fn weapon_fire(
                     radius: *radius,
                     deg_per_sec: *dps,
                     tick: 0.0,
+                    scale: *scale,
                 },
                 Mesh3d(assets.drone_mesh.clone()),
                 MeshMaterial3d(assets.mats[kind].clone()),
@@ -868,6 +900,30 @@ pub fn projectile_move(
             ProjKind::Straight => {}
         }
 
+        if p.life <= 0.0 && p.bounces > 0 {
+            // Tome of Ricochet: the shot comes down and skips off the ground once — a fresh
+            // leg, turned toward the nearest foe it can find (pottery is not a target).
+            p.bounces -= 1;
+            p.life = RICOCHET_LIFE * run.stats.duration;
+            p.hop = RICOCHET_HOP_SECS;
+            p.hit_cd.clear();
+            p.pierce = p.pierce.max(0);
+            let here = tf.translation;
+            let target = hash
+                .near(here, RICOCHET_SEEK)
+                .filter(|(he, _)| q_pots.get(*he).is_err() && enemies.get(*he).is_ok_and(|en| en.speed > 0.0))
+                .min_by(|a, b| a.1.distance_squared(here).total_cmp(&b.1.distance_squared(here)));
+            if let Some((_, tpos)) = target {
+                let v = tpos - here;
+                let vt = (v - p.dir * v.dot(p.dir)).normalize_or_zero();
+                if vt != Vec3::ZERO {
+                    p.heading = vt;
+                }
+            }
+            if let Some(pa) = &particles {
+                fx::burst(&mut commands, pa, planet.surface_point(p.dir), p.dir, Pcolor::White, 5, 3.0);
+            }
+        }
         if p.life <= 0.0 {
             if let ProjKind::Rocket { aoe } = p.kind {
                 explode(&mut commands, &hash, &enemies, &run, p.owner, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
@@ -882,7 +938,14 @@ pub fn projectile_move(
         let (nd, nv) = sphere::advance(p.dir, vel, r, dt);
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
-        tf.translation = planet.surface_point(p.dir) + p.dir * 0.9;
+        // a skip arcs up off the ground and back down onto its new line
+        p.hop = (p.hop - dt).max(0.0);
+        let hop = if p.hop > 0.0 {
+            RICOCHET_HOP * (std::f32::consts::PI * (1.0 - p.hop / RICOCHET_HOP_SECS)).sin()
+        } else {
+            0.0
+        };
+        tf.translation = planet.surface_point(p.dir) + p.dir * (0.9 + hop);
         tf.rotation = sphere::frame_quat(p.dir, p.heading) * Quat::from_rotation_x((time.elapsed_secs() * 14.0).sin() * 0.3);
 
         // decay per-target re-hit cooldowns
@@ -986,12 +1049,13 @@ pub fn drone_update(
         let offset = (tan * base.cos() + bit * base.sin()) * d.radius;
         tf.translation = ptf.translation + offset + up * 0.6;
         tf.rotation = sphere::frame_quat(up, offset.normalize_or_zero());
+        tf.scale = Vec3::splat(d.scale);
 
         if d.tick <= 0.0 {
             let mut hit_any = false;
-            for (te, tpos) in hash.near(tf.translation, 1.6) {
+            for (te, tpos) in hash.near(tf.translation, 0.8 * d.scale + 0.8) {
                 let Ok(en) = enemies.get(te) else { continue };
-                let reach = 0.8 + en.scale * 0.5;
+                let reach = 0.8 * d.scale + en.scale * 0.5;
                 if tpos.distance_squared(tf.translation) < reach * reach {
                     let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
@@ -1147,6 +1211,7 @@ pub fn apply_hits(
                 elite: false,
                 xp: 0.0,
                 is_boss: false,
+                is_miniboss: false,
                 is_pot: true,
             });
             sfx.write(SfxMsg(Sfx::Pot));
@@ -1188,6 +1253,7 @@ pub fn apply_hits(
                     elite: e.elite || is_mini,
                     xp: e.xp,
                     is_boss,
+                    is_miniboss: is_mini,
                     is_pot: false,
                 });
                 // §3: the 7:00 spike pays out a guaranteed chest where the miniboss fell.
@@ -1229,7 +1295,7 @@ pub fn apply_player_hits(
         &Transform,
         Has<crate::player::LocalPlayer>,
     )>,
-    mut q_crowd: Query<&mut Enemy, (Without<Boss>, Without<Pot>)>,
+    mut q_crowd: Query<(&mut Enemy, Has<Boss>), Without<Pot>>,
     mut shake: ResMut<Shake>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
@@ -1252,11 +1318,19 @@ pub fn apply_player_hits(
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        // Cracked Helmet's price is paid before mitigation, like any other damage taken; the
-        // §13 enemy-damage assist eases the hit itself.
+        // Cracked Helmet's price is paid before mitigation, like any other damage taken, and
+        // so are the tomes' (Elite, Static) against the kind of foe that swung; the §13
+        // enemy-damage assist eases the hit itself. A boss or miniboss head carries the elite
+        // flag for its loot, but it is not the "elite" Tome of the Elite hunts.
+        let (by_elite, by_static) = msg
+            .attacker
+            .and_then(|a| q_crowd.get(a).ok())
+            .map(|(en, boss)| (en.elite && !boss, en.kind == crate::content::enemies::EnemyKind::Ghost))
+            .unwrap_or((false, false));
         let mut amount = msg.amount
             * run.assist.enemy_damage
             * run_ps.stats.damage_taken.max(0.0)
+            * crate::tomes::incoming_mult(&run_ps.stats, by_elite, by_static)
             * (1.0 - run_ps.effective_armor_fraction());
         // shield first
         if run_ps.shield > 0.0 {
@@ -1325,13 +1399,13 @@ pub fn apply_player_hits(
 /// same crowd that closed the first. Crowd only — bosses and pots hold their ground.
 fn revive_nova(
     hash: &SpatialHash,
-    q_crowd: &mut Query<&mut Enemy, (Without<Boss>, Without<Pot>)>,
+    q_crowd: &mut Query<(&mut Enemy, Has<Boss>), Without<Pot>>,
     at: Vec3,
     dir: Vec3,
     planet_radius: f32,
 ) {
     for (e, _) in hash.near(at, REVIVE_NOVA_RADIUS) {
-        let Ok(mut en) = q_crowd.get_mut(e) else { continue };
+        let Ok((mut en, false)) = q_crowd.get_mut(e) else { continue };
         let arc = sphere::arc_dist(en.dir, dir, planet_radius);
         if arc >= REVIVE_NOVA_RADIUS {
             continue;

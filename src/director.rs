@@ -333,12 +333,12 @@ pub fn bank_results(
     }
 
     // silver payout: the §10 formula plus the Silver physically picked up this run
-    let golden_tome = if save.tome_loadout.contains(&TomeKind::Golden) { save.tome_level(TomeKind::Golden) } else { 0 };
-    let (cursed_rocks, silver_gain) = q_ps
+    let golden_tome = save.tome_rank_equipped(TomeKind::Golden);
+    let (cursed_rocks, silver_gain, static_silver) = q_ps
         .single()
-        .map(|p| (p.item_count(ItemKind::CursedMoonRock), p.stats.silver_gain))
-        .unwrap_or((0, 1.0));
-    let silver = silver_payout(&run, victory, golden_tome, cursed_rocks, silver_gain);
+        .map(|p| (p.item_count(ItemKind::CursedMoonRock), p.stats.silver_gain, p.stats.static_silver))
+        .unwrap_or((0, 1.0, 1.0));
+    let silver = silver_payout(&run, victory, golden_tome, cursed_rocks, silver_gain, static_silver);
     let payout = silver.total;
     save.silver += payout;
 
@@ -429,13 +429,24 @@ pub struct SilverPayout {
 /// Added on top: the Silver picked up in the run (pots, The Static's ghosts), already
 /// multiplied by Silver gain when it was collected. `tier_bonus` is the Tier on a chain
 /// clear and 0 otherwise — a death still banks every other term (§3: death is never a zero).
-pub fn silver_payout(run: &RunState, victory: bool, golden_tome: u32, cursed_rocks: u32, silver_gain: f32) -> SilverPayout {
+/// `static_silver` is Tome of Static ("The Static pays double Silver"): it multiplies both
+/// things The Static pays — the overtime term and the ghosts' Silver — the latter as one
+/// total here, since a 1-Silver coin cannot carry a x1.1.
+pub fn silver_payout(
+    run: &RunState,
+    victory: bool,
+    golden_tome: u32,
+    cursed_rocks: u32,
+    silver_gain: f32,
+    static_silver: f32,
+) -> SilverPayout {
     let clock = |secs: f32| format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32);
     let survival = (run.total_elapsed.max(0.0) / SILVER_SURVIVAL_SECS_PER) as u64;
     let kills = (run.kills as f32 / SILVER_KILLS_PER) as u64;
     let bosses = run.boss_kills * SILVER_PER_BOSS;
     let tier = if victory { run.tier as u64 * SILVER_PER_TIER } else { 0 };
-    let overtime = (run.static_secs_total.max(0.0) * SILVER_PER_STATIC_SEC) as u64;
+    let static_tome = static_silver.max(0.0);
+    let overtime = (run.static_secs_total.max(0.0) * SILVER_PER_STATIC_SEC * static_tome) as u64;
     let base = survival + kills + bosses + tier + overtime;
 
     let mut lines = vec![
@@ -449,7 +460,8 @@ pub fn silver_payout(run: &RunState, victory: bool, golden_tome: u32, cursed_roc
         lines.push((format!("Tier {} clear", run.tier), format!("+{tier}")));
     }
     if overtime > 0 {
-        lines.push((format!("Static overtime {}", clock(run.static_secs_total)), format!("+{overtime}")));
+        let tome = if (static_tome - 1.0).abs() > 1e-3 { format!(" (Tome of Static x{static_tome:.1})") } else { String::new() };
+        lines.push((format!("Static overtime {}{tome}", clock(run.static_secs_total)), format!("+{overtime}")));
     }
     let golden = 1.0 + SILVER_GOLDEN_TOME_PER_LEVEL * golden_tome as f32;
     let cursed = 1.0 + SILVER_CURSED_ROCK_EACH * cursed_rocks as f32;
@@ -466,7 +478,11 @@ pub fn silver_payout(run: &RunState, victory: bool, golden_tome: u32, cursed_roc
     if run.silver_run > 0 {
         lines.push(("Silver found".into(), format!("+{}", run.silver_run)));
     }
-    SilverPayout { lines, total: performance + run.silver_run }
+    let ghost_bonus = (run.static_silver_found as f32 * (static_tome - 1.0).max(0.0)).round() as u64;
+    if ghost_bonus > 0 {
+        lines.push((format!("Static ghost Silver (Tome of Static x{static_tome:.1})"), format!("+{ghost_bonus}")));
+    }
+    SilverPayout { lines, total: performance + run.silver_run + ghost_bonus }
 }
 
 /// `--minibossnow` (test harness; the windowed game also needs `--dev`): wind the clock to

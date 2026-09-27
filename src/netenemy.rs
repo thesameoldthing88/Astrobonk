@@ -747,9 +747,24 @@ fn stream_pickups(
     fresh: Query<(Entity, &Pickup), Without<PickupNetId>>,
     mut known: Local<HashMap<Entity, u16>>,
     live: Query<(Entity, &PickupNetId)>,
+    mut withdrawn: RemovedComponents<crate::pickups::HorizonBound>,
+    settled: Query<(&PickupNetId, &Pickup), Without<crate::pickups::HorizonBound>>,
+    called: Query<(&PickupNetId, &crate::pickups::HorizonBound), Changed<crate::pickups::HorizonBound>>,
     mut out: MessageWriter<ToClients<PickupEventMsg>>,
 ) {
     let mut events: Vec<PickupEvent> = Vec::new();
+    // Tome of the Horizon: the one flight a client cannot work out for itself. A withdrawn
+    // call first (a gem collected or merged is despawned, fails the lookup and goes out as
+    // a Despawn below), then new calls — Changed, so a gem re-called by someone else after
+    // it settled is announced again.
+    for e in withdrawn.read() {
+        if let Ok((id, p)) = settled.get(e) {
+            events.push(PickupEvent::HorizonSettle { id: id.0, dir: p.dir.to_array() });
+        }
+    }
+    for (id, hb) in &called {
+        events.push(PickupEvent::Horizon { id: id.0, owner: hb.0 });
+    }
 
     for (e, p) in &fresh {
         ids.next = ids.next.wrapping_add(1).max(1);
@@ -801,6 +816,7 @@ fn receive_pickups(
     mut commands: Commands,
     mut msgs: MessageReader<PickupEventMsg>,
     mut index: ResMut<NetPickupIndex>,
+    mut q_pickups: Query<&mut Pickup>,
     assets: Option<Res<PickupAssets>>,
     planet: Option<Res<CurrentPlanet>>,
 ) {
@@ -833,7 +849,7 @@ fn receive_pickups(
                     };
                     let e = commands
                         .spawn((
-                            Pickup { kind: k, dir, flying: false, speed: 0.0, bob, target: None },
+                            Pickup::new(k, dir, bob),
                             PickupNetId(id),
                             Mesh3d(mesh),
                             MeshMaterial3d(mat),
@@ -852,6 +868,21 @@ fn receive_pickups(
                         }
                     }
                 }
+                PickupEvent::Horizon { id, owner } => {
+                    // `animate_net_pickups` flies it home to that astronaut from here on
+                    let Some(&e) = index.0.get(&id) else { continue };
+                    if let Ok(mut p) = q_pickups.get_mut(e) {
+                        p.call_home();
+                        commands.entity(e).try_insert(crate::pickups::HorizonBound(owner));
+                    }
+                }
+                PickupEvent::HorizonSettle { id, dir } => {
+                    let Some(&e) = index.0.get(&id) else { continue };
+                    if let Ok(mut p) = q_pickups.get_mut(e) {
+                        p.settle(Vec3::from(dir));
+                        commands.entity(e).remove::<crate::pickups::HorizonBound>();
+                    }
+                }
             }
         }
     }
@@ -862,11 +893,17 @@ fn receive_pickups(
 /// Purely cosmetic — collection and the XP grant belong to the host, and `pickup_update` is
 /// gated off here. Without this a joiner's gems would hang motionless in the air and then
 /// blink out when the host collected them.
+#[allow(clippy::type_complexity)]
 fn animate_net_pickups(
+    mut commands: Commands,
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
     q_players: Query<(&Player, &crate::run::PlayerState, &Transform), Without<Pickup>>,
-    mut q: Query<(&mut Pickup, &mut Transform), Without<Player>>,
+    bodies: Query<
+        (&PlayerId, &Transform, Option<&crate::run::PlayerState>, Option<&crate::net::PlayerVitals>),
+        (Or<(With<Player>, With<crate::remote::RemoteAstronaut>)>, Without<Pickup>),
+    >,
+    mut q: Query<(Entity, &mut Pickup, &mut Transform, Option<&crate::pickups::HorizonBound>), Without<Player>>,
 ) {
     let Some(planet) = planet else { return };
     let dt = time.delta_secs();
@@ -880,7 +917,28 @@ fn animate_net_pickups(
         .map(|(_, ps, tf)| (tf.translation, ps.pickup_range()))
         .collect();
 
-    for (mut p, mut tf) in &mut q {
+    for (e, mut p, mut tf, called) in &mut q {
+        // Called home over the horizon (the host announced it): the host's own flight
+        // (`Pickup::fly_home`, then the magnet) to whichever astronaut called it — ours or a
+        // teammate's. The host's despawn ends it, or its HorizonSettle withdraws it.
+        let caller = called.and_then(|hb| bodies.iter().find(|(id, ..)| id.0 == hb.0));
+        if let Some((_, body, ps, vitals)) = caller {
+            if ps.is_some_and(|ps| ps.dead) || vitals.is_some_and(|v| v.down) {
+                // The host drops a call whose caller went down; stop here rather than fly
+                // to a body the gem will never reach (its HorizonSettle puts it exactly).
+                let dir = p.dir;
+                p.settle(dir);
+                commands.entity(e).remove::<crate::pickups::HorizonBound>();
+                continue;
+            }
+            let body = body.translation;
+            tf.translation = if p.arc {
+                p.fly_home(body.normalize_or_zero(), dt, &planet)
+            } else {
+                p.magnet_step(tf.translation, body, dt)
+            };
+            continue;
+        }
         let near = attractors
             .iter()
             .filter(|(pos, range)| tf.translation.distance(*pos) < *range)
@@ -892,9 +950,7 @@ fn animate_net_pickups(
             .map(|(pos, _)| *pos);
         if let Some(pos) = near {
             p.flying = true;
-            p.speed = (p.speed + 60.0 * dt).min(crate::config::PICKUP_FLY_SPEED * 1.8);
-            let to = (pos - tf.translation).normalize_or_zero();
-            tf.translation += to * p.speed * dt;
+            tf.translation = p.magnet_step(tf.translation, pos, dt);
         } else {
             let up = p.dir;
             tf.translation =

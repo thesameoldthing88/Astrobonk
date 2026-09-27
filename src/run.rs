@@ -134,6 +134,9 @@ pub struct RunState {
     /// Seconds spent in The Static across ALL stages (`static_timer` restarts per stage) —
     /// the §10 formula's `Static_overtime_seconds`.
     pub static_secs_total: f32,
+    /// Of `silver_run`, the Silver The Static's ghosts dropped (`pickups::StaticSilver`) —
+    /// what Tome of Static multiplies at banking. HOST state: only the host banks.
+    pub static_silver_found: u64,
     /// Where the guaranteed miniboss-#1 cache stands, while it is unopened. Set by the host
     /// when miniboss #1 dies and cleared when it is opened; streamed in `RunSnapMsg` so a
     /// client draws the same chest (`interact::sync_reward_cache` owns the entity).
@@ -144,6 +147,10 @@ pub struct RunState {
     /// Someone in the party carries The Static Radio: The Static comes early and angrier
     /// (§7). Party-wide like `difficulty`, set by the host each frame (`items::run_wide_items`).
     pub static_radio: bool,
+    /// Tome of the Elite: how much more loot elite kills drop (the party's best, ≥ 1). HOST
+    /// state like `static_radio`, set each frame by `items::item_upkeep`; drops are the
+    /// host's, so it never crosses the wire.
+    pub elite_loot: f32,
     /// Devoured Sun Shard's diegetic lever: how far the day side has shrunk toward total
     /// night, 0..1. The host advances it; `RunSnapMsg` carries it so both machines light the
     /// same sky. P07's day/night terminator reads this.
@@ -189,9 +196,11 @@ pub struct PlayerState {
     pub banned_items: HashSet<ItemKind>,
     /// Weapons (and evolutions) banished out of this run's card pool.
     pub banned_weapons: HashSet<WeaponKind>,
-    /// Extra evolution slots on top of `config::EVOLUTION_CAP`. Tome of Ascension (P05)
-    /// sets this; read only through `evo_cap()`.
+    /// Extra evolution slots on top of `config::EVOLUTION_CAP`: Tome of Ascension's, set
+    /// when the sheet is made. Read only through `evo_cap()`.
     pub evo_slots_bonus: u32,
+    /// Free Microwave uses left this stage (Tome of Duplication); refilled by `enter_stage`.
+    pub free_microwave: u32,
     pub frenzy_timer: f32,
     pub fast_move: bool,     // above base run speed (Nova / Aurora passives)
     pub reticle_timer: f32,  // cycles 0..1.5 for Reticle's focus pulse
@@ -205,6 +214,12 @@ pub struct PlayerState {
     pub descent_m: f32,
     /// Bitmask of the compass octants holding an enemy nearby — Encirclement Bonus.
     pub encircle_dirs: u8,
+    /// Foes within TOME_CROWD_RADIUS (capped) — Tome of Encirclement.
+    pub crowd: u32,
+    /// Standing on the night side — Tome of Nightfall.
+    pub night: bool,
+    /// Seconds of unbroken movement, 0..MOMENTUM_RAMP_SECS — Tome of Momentum.
+    pub momentum: f32,
     /// Dead Man's Tether already rewound this run (it is once per run, so it rides the
     /// sheet across stages rather than the per-stage `items::ItemProcs`).
     pub tether_used: bool,
@@ -268,10 +283,12 @@ impl RunState {
             evolves: 0,
             boss_kills: 0,
             static_secs_total: 0.0,
+            static_silver_found: 0,
             reward_chest: None,
             result: None,
             difficulty: 0.0,
             static_radio: false,
+            elite_loot: 1.0,
             sun_shrink: 0.0,
             sun_shard_secs: 0.0,
             assist: save.assist,
@@ -301,13 +318,14 @@ impl PlayerState {
             shield: 0.0,
             shield_cd: 0.0,
             iframes: 0.0,
-            // P05's Tome of Banishment adds +1 banish and +1 refresh on top of these.
+            // + Tome of Banishment's, once the sheet knows its stats (below)
             banishes: config::BANISH_CHARGES,
             refreshes: config::FREE_REFRESHES,
             paid_refreshes: 0,
             banned_items: HashSet::new(),
             banned_weapons: HashSet::new(),
             evo_slots_bonus: 0,
+            free_microwave: 0,
             frenzy_timer: 0.0,
             fast_move: false,
             reticle_timer: 0.0,
@@ -316,6 +334,9 @@ impl PlayerState {
             airborne: false,
             descent_m: 0.0,
             encircle_dirs: 0,
+            crowd: 0,
+            night: false,
+            momentum: 0.0,
             tether_used: false,
             ghost_weapon: None,
             revives: 0,
@@ -323,17 +344,30 @@ impl PlayerState {
         s.recompute_stats(save, 0);
         s.hp = s.stats.max_hp;
         s.shield = s.stats.shield;
+        // The per-run allowances the tome loadout widens (Banishment, Ascension). Set once:
+        // the loadout is fixed for the run, and these are spent, not recomputed.
+        s.banishes += s.stats.extra_banishes.max(0) as u32;
+        s.refreshes += s.stats.extra_refreshes.max(0) as u32;
+        s.evo_slots_bonus = s.stats.evo_slots.max(0) as u32;
+        s.enter_stage();
         s
+    }
+
+    /// A new stage begins for this sheet (the first one, or through a teleporter): refill
+    /// what is granted per stage.
+    pub fn enter_stage(&mut self) {
+        self.free_microwave = self.stats.free_microwave.max(0) as u32;
     }
 
     pub fn recompute_stats(&mut self, save: &MetaSave, greed_stacks: u32) {
         let mut st = Stats::default();
-        // Tomes (meta loadout)
+        // Tomes (meta loadout): every line of each slotted tome at its rank
         for t in &save.tome_loadout {
-            let lvl = save.tome_level(*t);
-            if lvl > 0 {
-                let d = t.def();
-                st.apply(d.stat, d.per_level * lvl as f32);
+            let rank = save.tome_level(*t);
+            for e in t.def().effects {
+                if rank > 0 {
+                    st.apply(e.stat, e.at(rank));
+                }
             }
         }
         // Character passive
@@ -352,7 +386,9 @@ impl PlayerState {
         }
         // Items: each boost scaled by the stack's summed grade multipliers
         for stack in &self.items {
-            let power = stack.power();
+            // Tome of Vampirism feeds Vampire Visor (the tome lines were applied first)
+            let boost = if stack.kind == ItemKind::VampireVisor { 1.0 + st.visor_boost } else { 1.0 };
+            let power = stack.power() * boost;
             for (k, v) in stack.kind.def().boosts {
                 st.apply(*k, v * power);
             }
@@ -415,7 +451,29 @@ impl PlayerState {
         bonus += config::ENCIRCLE_DMG_PER_DIR
             * self.encircle_dirs.count_ones() as f32
             * self.item_power(ItemKind::EncirclementBonus);
-        bonus
+        bonus + self.tome_conditional_damage()
+    }
+
+    /// The tomes' conditional damage — Encirclement's crowd, Nightfall's dark side,
+    /// Momentum's run-up — read from the same per-frame conditions as the items above.
+    pub fn tome_conditional_damage(&self) -> f32 {
+        self.crowd_bonus() + self.night_bonus() + self.momentum_bonus()
+    }
+
+    pub fn crowd_bonus(&self) -> f32 {
+        self.stats.crowd_damage * self.crowd.min(config::TOME_CROWD_CAP) as f32
+    }
+
+    pub fn night_bonus(&self) -> f32 {
+        if self.night {
+            self.stats.night_damage
+        } else {
+            0.0
+        }
+    }
+
+    pub fn momentum_bonus(&self) -> f32 {
+        self.stats.momentum_damage * (self.momentum / config::MOMENTUM_RAMP_SECS).clamp(0.0, 1.0)
     }
 
     /// Widow's Ring is live: the ring is worn and the astronaut hangs at 1 HP.
@@ -617,8 +675,9 @@ impl PlayerState {
             RefreshPrice::Free
         } else {
             let cost = config::REFRESH_BASE_COST as f32
-                * config::REFRESH_COST_GROWTH.powi(self.paid_refreshes as i32);
-            RefreshPrice::Gold(cost.round() as u64)
+                * config::REFRESH_COST_GROWTH.powi(self.paid_refreshes as i32)
+                * (1.0 - self.stats.refresh_discount.clamp(0.0, 0.9));
+            RefreshPrice::Gold((cost.round() as u64).max(1))
         }
     }
 
