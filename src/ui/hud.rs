@@ -248,13 +248,18 @@ pub fn spawn_hud(mut commands: Commands) {
                 ..default()
             },))
                 .with_children(|c| {
-                    // weapons tray
+                    // weapons tray, then item chips. It WRAPS, growing upward from the bars:
+                    // a late build holds 20+ distinct items, and one row ran off the screen.
                     c.spawn((
                         WeaponRow,
                         Node {
+                            width: Val::Percent(100.0),
+                            min_height: Val::Px(34.0),
+                            flex_wrap: FlexWrap::Wrap,
                             column_gap: Val::Px(6.0),
+                            row_gap: Val::Px(4.0),
                             align_items: AlignItems::Center,
-                            height: Val::Px(34.0),
+                            align_content: AlignContent::FlexEnd,
                             ..default()
                         },
                     ));

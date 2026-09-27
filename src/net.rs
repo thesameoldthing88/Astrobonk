@@ -11,7 +11,8 @@
 //!   * `PlayerVitals`    — hp / max_hp / level, for teammate HUD + the down-state
 //!   * `NetHero`         — which hero it is, so every machine draws the right suit
 //!   * `NetComet`        — its Comet Combo, for its owner's HUD and everyone's tail sparks
-//!   * `NetItemVis`      — what its items look like (ghost co-pilot, burning trail, hover)
+//!   * `NetItemVis`      — what its items look like (ghost co-pilot, burning trail, hover,
+//!                         Widow halo) and the host-owned item state its owner's HUD shows
 //! A player's *build* (weapons, items, cards) is picked locally — each player picks their
 //! own upgrades — and synced UP to the host (`PlayerBuildMsg`), which simulates it; only its
 //! visible effects come back down.
@@ -111,17 +112,23 @@ pub struct NetItemVis {
     pub ghost: u8,
     /// ITEMVIS_* bits.
     pub flags: u8,
+    /// Widow's Ring's death-save recharge, whole seconds left (0 = ready) — the host ticks
+    /// it, and a joiner's HUD shows it.
+    pub widow_cd: u8,
 }
 
 /// Laying a Comet Tail right now (carrying it and moving).
 pub const ITEMVIS_TRAIL: u8 = 1;
 /// Held up by Anti-Grav Boots.
 pub const ITEMVIS_HOVER: u8 = 2;
-/// Widow's Ring is live (at 1 HP).
+/// Widow's Ring is live (at 1 HP): every machine draws its halo over that astronaut.
 pub const ITEMVIS_WIDOW: u8 = 4;
 /// Dead Man's Tether already spent this run — a client's own HUD reads it from here, since
 /// the rewind happened on the host.
 pub const ITEMVIS_TETHER_SPENT: u8 = 8;
+/// Guns jammed by The Overheat. The host counts the volleys; a joiner's cosmetic fire
+/// stops on this, so its screen jams when the real guns do.
+pub const ITEMVIS_JAMMED: u8 = 16;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
@@ -957,10 +964,13 @@ fn adopt_my_vitals(
 fn adopt_my_item_vis(
     mine: Res<MyPlayerId>,
     server: Query<(&PlayerId, &NetItemVis), Without<crate::player::Player>>,
-    mut q: Query<(&mut crate::run::PlayerState, &mut NetItemVis), (With<LocalPlayer>, With<crate::player::Player>)>,
+    mut q: Query<
+        (&mut crate::run::PlayerState, &mut NetItemVis, &mut crate::items::ItemProcs),
+        (With<LocalPlayer>, With<crate::player::Player>),
+    >,
 ) {
     let Some(my_id) = mine.0 else { return };
-    let Ok((mut ps, mut vis)) = q.single_mut() else { return };
+    let Ok((mut ps, mut vis, mut procs)) = q.single_mut() else { return };
     let Some((_, host)) = server.iter().find(|(pid, _)| pid.0 == my_id) else { return };
     if *vis != *host {
         *vis = *host;
@@ -973,6 +983,14 @@ fn adopt_my_item_vis(
     if ps.tether_used != spent {
         ps.tether_used = spent;
     }
+    // Held just above zero while the host says jammed (weapon_fire ticks it down every
+    // frame), and cleared the moment it stops saying so.
+    if host.flags & ITEMVIS_JAMMED != 0 {
+        procs.jam = procs.jam.max(0.2);
+    } else {
+        procs.jam = 0.0;
+    }
+    procs.widow_cd = host.widow_cd as f32;
 }
 
 /// CLIENT: pull our predicted astronaut toward the host's authoritative copy of it.
@@ -2053,10 +2071,13 @@ fn reset_after_session(
 // 2f. ITEMS (P03) — the host simulates what every astronaut's §7 items DO; a joiner's
 //    items reach it in PlayerBuildMsg (explicit item/grade codes). What a client must see
 //    comes back on existing lanes: persistent looks on the replicated NetItemVis (ghost
-//    co-pilot + its weapon, a burning trail being laid, a hover, tether spent), one-shots
-//    (yo-yo throw, singularity, ignition, death-save) as hazard-lane events that a client
-//    turns back into the same local `items::ItemFxMsg` the host's systems write. A client
-//    snaps its own predicted body on a Tether rewind. Repro / evidence:
+//    co-pilot + its weapon, a burning trail being laid, a hover, Widow's halo, tether
+//    spent, an Overheat jam, Widow's recharge), one-shots (yo-yo throw, singularity,
+//    ignition, death-save) as hazard-lane events that a client turns back into the same
+//    local `items::ItemFxMsg` the host's systems write — presented even behind a card
+//    panel. A client snaps its own predicted body on a Tether rewind (the camera glides).
+//    Still open: a teammate's WEAPON fire is not streamed at all, so a teammate's ghost
+//    co-pilot and Anti-Grav ring volleys are drawn without their shots. Repro / evidence:
 //        headless: --items new [--coop2] | --deathsave [--coop2]
 //        windowed: coop.sh … --dev --items orbitalyoyo,comettail,secondastronaut,littleblackhole
 //                  and compare the two sides' ITEMFX lines (a joiner's `wire=` counts events).

@@ -309,12 +309,21 @@ fn main() {
                 items::trail_client_drops.run_if(net::is_client),
                 items::singularity_update,
                 items::push_net_item_vis.run_if(net::is_simulating),
-                items::item_fx_presentation,
                 items::item_visuals,
                 items::apply_sun_shrink,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // Item one-shots are presented even behind a card panel: a joiner picking a level-up
+        // is still being hunted on the host, and a death-save that fires meanwhile must not
+        // expire unread (messages live two updates) — no banner, and no snap of the
+        // predicted body to where the host rewound it.
+        .add_systems(
+            Update,
+            items::item_fx_presentation
+                .after(items::apply_sun_shrink)
+                .run_if(in_state(AppState::InRun)),
         )
         .add_systems(
             Update,

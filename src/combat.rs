@@ -520,6 +520,7 @@ pub fn weapon_fire(
     q_auras: Query<(Entity, &AuraVis)>,
     mut hits: MessageWriter<HitMsg>,
     mut sfx: MessageWriter<SfxMsg>,
+    role: Res<crate::net::NetRole>,
 ) {
     use crate::content::items::ItemKind;
     let dt = time.delta_secs();
@@ -528,6 +529,7 @@ pub fn weapon_fire(
     }
     let mut rng = rand::thread_rng();
     let t_now = time.elapsed_secs();
+    let simulating = role.simulates();
 
     // Reconcile drone + aura entities with owned weapons — keyed by (owner, weapon).
     let mut want_drones: HashMap<(Entity, WeaponKind), (usize, f32, f32, f32)> = HashMap::new();
@@ -621,9 +623,11 @@ pub fn weapon_fire(
         if ring {
             telemetry.ring_volleys += 1;
         }
-        // The Overheat: every Nth volley jams every gun for a beat.
+        // The Overheat: every Nth volley jams every gun for a beat. The HOST counts; a
+        // client's cosmetic copy takes the jam from the host (`net::adopt_my_item_vis`),
+        // or its own count would jam its guns at moments the real ones keep firing.
         procs.volleys += 1;
-        if overheat && procs.volleys % OVERHEAT_JAM_EVERY == 0 {
+        if overheat && simulating && procs.volleys % OVERHEAT_JAM_EVERY == 0 {
             procs.jam = OVERHEAT_JAM_SECS;
             telemetry.jams += 1;
             if let Some(pa) = &particles {
@@ -634,10 +638,12 @@ pub fn weapon_fire(
     }
 
     // Second Astronaut: the ghost co-pilot fires its mirrored weapon on its own cadence,
-    // from where it floats, at a share of the weapon's damage.
+    // from where it floats, at a share of the weapon's damage. It mirrors one of OUR guns
+    // (and fires at our Overheat-boosted speed), so an Overheat jam — including one this
+    // very frame — silences it too.
     let ghost_power = run.item_power(ItemKind::SecondAstronaut);
     let mirrored = run.ghost_weapon.and_then(|g| run.weapons.iter().find(|w| w.kind == g).map(|w| (w.kind, w.level)));
-    if let (true, Some((kind, level))) = (ghost_power > 0.0, mirrored) {
+    if let (true, Some((kind, level)), false) = (ghost_power > 0.0, mirrored, procs.jam > 0.0) {
         procs.ghost_cd -= dt * atk_speed;
         if procs.ghost_cd <= 0.0 {
             let def = kind.def();

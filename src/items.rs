@@ -16,8 +16,9 @@
 //!     back into the same local message — so `item_fx_presentation` is one code path on
 //!     every machine;
 //!   * persistent looks (the ghost co-pilot and its weapon, a burning trail being laid, a
-//!     hover) ride the replicated `net::NetItemVis` on each astronaut, which every machine's
-//!     visual systems read for every body it draws.
+//!     hover, Widow's halo) ride the replicated `net::NetItemVis` on each astronaut, which
+//!     every machine's visual systems read for every body it draws — with the host-owned
+//!     state its owner's own screen needs (an Overheat jam, Widow's recharge).
 
 use crate::config::*;
 use crate::content::items::ItemKind;
@@ -342,6 +343,7 @@ pub struct ItemAssets {
     pub orb_mesh: Handle<Mesh>,
     pub glow_mesh: Handle<Mesh>,
     pub glow_mat: Handle<StandardMaterial>,
+    pub halo_mat: Handle<StandardMaterial>,
 }
 
 pub fn setup_item_assets(
@@ -394,6 +396,8 @@ pub fn setup_item_assets(
         orb_mesh: meshes.add(Mesh::from(Sphere::new(0.14))),
         glow_mesh: meshes.add(Mesh::from(Cylinder::new(0.55, 0.05))),
         glow_mat: materials.add(unlit(Color::srgb(0.4, 0.9, 1.0), 3.0, 0.6)),
+        // Widow's Ring: the item's own purple, worn as a halo — "one hit from gone"
+        halo_mat: materials.add(unlit(Color::srgb(0.8, 0.45, 1.0), 3.0, 0.85)),
     });
 }
 
@@ -967,7 +971,7 @@ pub fn singularity_update(
 /// HOST: mirror what a client must draw of each astronaut's items onto its replicated
 /// `NetItemVis` — only on change, since replicon sends whatever is touched.
 pub fn push_net_item_vis(mut q: Query<(&Player, &PlayerState, &ItemProcs, &mut NetItemVis)>) {
-    use crate::net::{ITEMVIS_HOVER, ITEMVIS_TETHER_SPENT, ITEMVIS_TRAIL, ITEMVIS_WIDOW};
+    use crate::net::{ITEMVIS_HOVER, ITEMVIS_JAMMED, ITEMVIS_TETHER_SPENT, ITEMVIS_TRAIL, ITEMVIS_WIDOW};
     for (p, ps, procs, mut vis) in &mut q {
         let mut flags = 0u8;
         if !ps.dead && ps.has_item(ItemKind::CometTail) && p.vel_t.length() > COMET_TAIL_MOVING_SPEED {
@@ -982,8 +986,12 @@ pub fn push_net_item_vis(mut q: Query<(&Player, &PlayerState, &ItemProcs, &mut N
         if ps.tether_used {
             flags |= ITEMVIS_TETHER_SPENT;
         }
+        if procs.jam > 0.0 {
+            flags |= ITEMVIS_JAMMED;
+        }
         let ghost = ps.ghost_weapon.map(|w| w.code() + 1).unwrap_or(0);
-        let next = NetItemVis { ghost, flags };
+        let widow_cd = procs.widow_cd.ceil().min(255.0) as u8;
+        let next = NetItemVis { ghost, flags, widow_cd };
         if *vis != next {
             *vis = next;
         }
@@ -1078,16 +1086,38 @@ pub struct GhostCopilot {
     pub weapon: u8,
 }
 
-/// Anti-Grav Boots' glow under a hovering body.
+/// A status glow on a drawn body while its `NetItemVis` carries `flag`: Anti-Grav Boots'
+/// pad under a hovering body, Widow's Ring's halo over one hanging on at 1 HP.
 #[derive(Component)]
-pub struct HoverGlow {
+pub struct ItemGlow {
     pub owner: Entity,
+    pub flag: u8,
+}
+
+/// The status glows `item_visuals` keeps, by NetItemVis flag.
+const GLOW_FLAGS: [u8; 2] = [crate::net::ITEMVIS_HOVER, crate::net::ITEMVIS_WIDOW];
+
+/// Where a status glow sits on its body: the hover pad pulses under the boots, the halo
+/// turns slowly over the helmet.
+fn glow_pose(flag: u8, body: &Transform, t: f32) -> Transform {
+    let up = body.translation.normalize_or_zero();
+    let (tan, _) = sphere::tangent_frame(up);
+    if flag == crate::net::ITEMVIS_WIDOW {
+        Transform::from_translation(body.translation + up * (PLAYER_HEIGHT * 0.5 + 0.3))
+            .with_rotation(Quat::from_axis_angle(up, t * 1.5) * sphere::frame_quat(up, tan))
+            .with_scale(Vec3::new(0.3, 0.2, 0.3) * (1.0 + (t * 3.0).sin() * 0.05))
+    } else {
+        Transform::from_translation(body.translation - up * (PLAYER_HEIGHT * 0.5 + 0.1))
+            .with_rotation(sphere::frame_quat(up, tan))
+            .with_scale(Vec3::splat(1.0 + (t * 14.0).sin() * 0.12))
+    }
 }
 
 /// Every machine: keep a ghost beside every drawn body whose `NetItemVis` names one (in its
-/// mirrored weapon's colour), and a glow under every hovering one. The host's own bodies
-/// carry the NetItemVis it writes; a client's teammates carry the replicated one, and its
-/// own body the copy `net::adopt_my_item_vis` takes from the host.
+/// mirrored weapon's colour), and the status glows (`GLOW_FLAGS`) on every body that has
+/// them. The host's own bodies carry the NetItemVis it writes; a client's teammates carry
+/// the replicated one, and its own body the copy `net::adopt_my_item_vis` takes from the
+/// host — so a teammate at 1 HP on Widow's Ring is visible from across the planet.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn item_visuals(
     mut commands: Commands,
@@ -1095,8 +1125,8 @@ pub fn item_visuals(
     assets: Res<ItemAssets>,
     weapons: Res<crate::combat::WeaponAssets>,
     bodies: Query<(Entity, &Transform, &NetItemVis), Or<(With<Player>, With<RemoteAstronaut>)>>,
-    mut ghosts: Query<(Entity, &GhostCopilot, &mut Transform), (Without<Player>, Without<RemoteAstronaut>, Without<HoverGlow>)>,
-    mut glows: Query<(Entity, &HoverGlow, &mut Transform), (Without<Player>, Without<RemoteAstronaut>, Without<GhostCopilot>)>,
+    mut ghosts: Query<(Entity, &GhostCopilot, &mut Transform), (Without<Player>, Without<RemoteAstronaut>, Without<ItemGlow>)>,
+    mut glows: Query<(Entity, &ItemGlow, &mut Transform), (Without<Player>, Without<RemoteAstronaut>, Without<GhostCopilot>)>,
 ) {
     let t = time.elapsed_secs();
     // ghosts: retire the stale, move the live, raise the missing
@@ -1132,32 +1162,29 @@ pub fn item_visuals(
                 }
             });
     }
-    // hover glows
-    let mut glowing: Vec<Entity> = Vec::new();
+    // status glows: retire the stale, move the live, raise the missing
+    let mut lit: Vec<(Entity, u8)> = Vec::new();
     for (ge, g, mut gtf) in &mut glows {
-        let body = bodies.get(g.owner).ok().filter(|(_, _, v)| v.flags & crate::net::ITEMVIS_HOVER != 0);
+        let body = bodies.get(g.owner).ok().filter(|(_, _, v)| v.flags & g.flag != 0);
         let Some((_, btf, _)) = body else {
             commands.entity(ge).despawn();
             continue;
         };
-        glowing.push(g.owner);
-        let up = btf.translation.normalize_or_zero();
-        gtf.translation = btf.translation - up * (PLAYER_HEIGHT * 0.5 + 0.1);
-        gtf.rotation = sphere::frame_quat(up, sphere::tangent_frame(up).0);
-        gtf.scale = Vec3::splat(1.0 + (t * 14.0).sin() * 0.12);
+        lit.push((g.owner, g.flag));
+        *gtf = glow_pose(g.flag, btf, t);
     }
     for (be, btf, vis) in &bodies {
-        if vis.flags & crate::net::ITEMVIS_HOVER == 0 || glowing.contains(&be) {
-            continue;
+        for flag in GLOW_FLAGS {
+            if vis.flags & flag == 0 || lit.contains(&(be, flag)) {
+                continue;
+            }
+            let (mesh, mat) = if flag == crate::net::ITEMVIS_WIDOW {
+                (assets.ring_mesh.clone(), assets.halo_mat.clone())
+            } else {
+                (assets.glow_mesh.clone(), assets.glow_mat.clone())
+            };
+            commands.spawn((ItemGlow { owner: be, flag }, Mesh3d(mesh), MeshMaterial3d(mat), glow_pose(flag, btf, t), StageScoped));
         }
-        let up = btf.translation.normalize_or_zero();
-        commands.spawn((
-            HoverGlow { owner: be },
-            Mesh3d(assets.glow_mesh.clone()),
-            MeshMaterial3d(assets.glow_mat.clone()),
-            Transform::from_translation(btf.translation - up * (PLAYER_HEIGHT * 0.5 + 0.1)),
-            StageScoped,
-        ));
     }
 }
 
@@ -1341,6 +1368,20 @@ pub fn self_check(save: &crate::save::MetaSave) -> Result<(), String> {
     }
     if !cursed_seen {
         return Err("400 loot rolls never came up Cursed".into());
+    }
+    // A Legendary roll is mostly Legendaries (GRADE_NATIVE_SHARE), whatever the pool's mix.
+    let (mut legendary_rolls, mut legendary_items) = (0u32, 0u32);
+    for seed in 0..2000u64 {
+        let mut r = rand::rngs::StdRng::seed_from_u64(seed);
+        let (i, g) = crate::run::roll_item(&plain, 3.0, &mut r);
+        if g == Rarity::Legendary {
+            legendary_rolls += 1;
+            legendary_items += u32::from(i.def().rarity == Rarity::Legendary);
+        }
+    }
+    let share = legendary_items as f32 / legendary_rolls.max(1) as f32;
+    if legendary_rolls < 100 || (share - GRADE_NATIVE_SHARE).abs() > 0.1 {
+        return Err(format!("a Legendary roll dealt a Legendary item {:.0}% of the time", share * 100.0));
     }
 
     // Cursed stats.

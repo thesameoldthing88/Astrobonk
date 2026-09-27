@@ -871,12 +871,18 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::items::trail_client_drops.run_if(crate::net::is_client),
                 crate::items::singularity_update,
                 crate::items::push_net_item_vis,
-                crate::items::item_fx_presentation,
                 crate::items::item_visuals,
                 crate::items::apply_sun_shrink,
             )
                 .chain()
                 .run_if(crate::playing),
+        )
+        // as in main.rs: item one-shots are presented behind a card panel too
+        .add_systems(
+            Update,
+            crate::items::item_fx_presentation
+                .after(crate::items::apply_sun_shrink)
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         .add_systems(
             Update,

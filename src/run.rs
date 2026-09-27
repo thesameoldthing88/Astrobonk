@@ -844,8 +844,8 @@ pub fn item_available(ps: &PlayerState, item: ItemKind) -> bool {
 /// Roll one loot item and the grade it drops at — chests, the Shady Guy, shrines, the Moai
 /// and the miniboss cache all deal through here (§7). First a `CURSED_LOOT_CHANCE` for a
 /// cursed item; otherwise a grade from `luck` (+ The Static Radio's rung), then an item that
-/// can drop at that grade: one native to it `GRADE_NATIVE_WEIGHT`× as often as a lower-grade
-/// item rolled up to it.
+/// can drop at that grade: one native to it `GRADE_NATIVE_SHARE` of the time, else a
+/// lower-grade item rolled up to it.
 ///
 /// A FIXED three draws whatever the sheet: the Shady Guy's stock is rolled from the seeded
 /// world stream (CLAUDE.md rule 5), where a draw count that depended on a machine's own save
@@ -855,45 +855,38 @@ pub fn roll_item(ps: &PlayerState, luck: f32, rng: &mut impl Rng) -> (ItemKind, 
     let grade = Rarity::roll(luck, rng).step_up(ps.grade_bonus());
     let pick: f32 = rng.gen_range(0.0..1.0);
 
-    let weighted: Vec<(ItemKind, f32)> = if cursed {
-        ItemKind::pool()
-            .filter(|i| i.is_cursed() && item_available(ps, *i))
-            .map(|i| (i, 1.0))
-            .collect()
+    // Cursed: one of the cursed family, if any is still available. Otherwise an item that
+    // can drop at the rolled grade: one NATIVE to it GRADE_NATIVE_SHARE of the time (a
+    // Legendary roll is mostly Legendaries), else a lower-grade item rolled up to it (a
+    // huge Borgar). A fixed share, not per-item weights, so the pool's grade mix can't
+    // drown the rare natives out. The one `pick` draw chooses both bucket and item.
+    let cursed_items: Vec<ItemKind> = if cursed {
+        ItemKind::pool().filter(|i| i.is_cursed() && item_available(ps, *i)).collect()
     } else {
         Vec::new()
     };
-    let weighted = if weighted.is_empty() {
-        ItemKind::pool()
-            .filter(|i| !i.is_cursed() && item_available(ps, *i))
-            .filter_map(|i| {
-                let native = i.def().rarity;
-                if native == grade {
-                    Some((i, config::GRADE_NATIVE_WEIGHT))
-                } else if native < grade {
-                    Some((i, 1.0))
-                } else {
-                    None
-                }
-            })
-            .collect()
+    let (bucket, x) = if !cursed_items.is_empty() {
+        (cursed_items, pick)
     } else {
-        weighted
-    };
-    let total: f32 = weighted.iter().map(|(_, w)| w).sum();
-    let mut x = pick * total;
-    for (item, w) in &weighted {
-        if x < *w {
-            return (*item, if item.is_cursed() { Rarity::Cursed } else { grade });
+        let (native, lower): (Vec<ItemKind>, Vec<ItemKind>) = ItemKind::pool()
+            .filter(|i| !i.is_cursed() && item_available(ps, *i) && i.def().rarity <= grade)
+            .partition(|i| i.def().rarity == grade);
+        let share = config::GRADE_NATIVE_SHARE;
+        if lower.is_empty() || (!native.is_empty() && pick < share) {
+            let x = if lower.is_empty() { pick } else { pick / share };
+            (native, x)
+        } else if native.is_empty() {
+            (lower, pick)
+        } else {
+            (lower, (pick - share) / (1.0 - share))
         }
-        x -= w;
+    };
+    let grade_of = |i: ItemKind| if i.is_cursed() { Rarity::Cursed } else { grade };
+    match bucket.get(((x * bucket.len() as f32) as usize).min(bucket.len().saturating_sub(1))) {
+        Some(item) => (*item, grade_of(*item)),
+        // Everything capped or banished: a Borgar — it never caps out.
+        None => (ItemKind::SpaceBorgar, grade),
     }
-    // Everything capped or banished (or float slop at the end of the walk): the last
-    // candidate, else a Borgar — it never caps out.
-    weighted
-        .last()
-        .map(|(i, _)| (*i, if i.is_cursed() { Rarity::Cursed } else { grade }))
-        .unwrap_or((ItemKind::SpaceBorgar, grade))
 }
 
 /// Roll the level-up options (`config::LEVELUP_CARDS` of them).

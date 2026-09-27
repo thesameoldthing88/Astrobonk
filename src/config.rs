@@ -18,6 +18,12 @@ pub const SPEED_HARD_CAP: f32 = 2.1; // × run speed, bhop chains can't exceed
 pub const CAM_DISTANCE: f32 = 7.5;
 pub const CAM_HEIGHT: f32 = 3.2;
 pub const CAM_STIFFNESS: f32 = 14.0;
+/// Arc metres the local body may jump in one frame (beyond what its speed covers) before
+/// the camera treats it as a teleport — a Tether rewind, a blink — and glides across.
+pub const CAM_TELEPORT_ARC: f32 = 3.0;
+/// How long that glide takes: long enough to read as a move, short enough not to leave
+/// you blind to the horde at the landing spot.
+pub const CAM_TELEPORT_GLIDE_SECS: f32 = 0.45;
 
 /// How hard a co-op teammate's drawn pose chases the last replicated snapshot. Raise it and
 /// motion becomes stuttery in lockstep with the packet rate; lower it and teammates lag.
@@ -143,9 +149,11 @@ pub const CURSED_LOOT_CHANCE: f64 = 0.07;
 pub const CURSED_CARD_PASS: f64 = 0.2;
 /// Shady Guy price of a Cursed item: cheap, because the price is paid in risk.
 pub const CURSED_ITEM_PRICE: f32 = 90.0;
-/// A lower-grade item rolled up to the grade drawn is this much less likely than an item
-/// native to that grade (a Legendary roll is mostly Legendaries, sometimes a huge Borgar).
-pub const GRADE_NATIVE_WEIGHT: f32 = 3.0;
+/// Share of a loot roll at grade G that deals an item NATIVE to G; the rest is a
+/// lower-grade item rolled up to G (a Legendary roll is mostly Legendaries, sometimes a
+/// huge Borgar). A share, not a per-item weight, so the 4 Legendaries aren't outvoted by
+/// the 28 items below them.
+pub const GRADE_NATIVE_SHARE: f32 = 0.75;
 
 /// Orbital Yo-Yo: every YOYO_PERIOD s a chunk orbits you once, hitting each foe once for
 /// YOYO_DAMAGE. The swing radius scales with the planet (§7 "bigger world, wider swing"):
