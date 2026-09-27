@@ -364,9 +364,7 @@ pub fn update_down_panel(
         } else if standing == 0 {
             "Nobody is left standing to reach your Beacon...".to_string()
         } else {
-            format!(
-                "Your Beacon is calling. A teammate standing in its ring for {REVIVE_SECS:.0}s\nbrings you back. Nobody revives themselves."
-            )
+            format!("Your Beacon is calling.\nA teammate in your ring for {REVIVE_SECS:.0}s brings you back.")
         };
         if t.0 != hint {
             t.0 = hint;
