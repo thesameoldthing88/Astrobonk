@@ -740,6 +740,7 @@ pub fn director_spawn(
     q_player: Query<(&Player, &crate::run::PlayerState)>,
     q_enemies: Query<(), With<Enemy>>,
     q_boss: Query<&Boss>,
+    (crawl, mut gimmicks): (Res<crate::gimmicks::Crawl>, ResMut<crate::gimmicks::GimmickTelemetry>),
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -767,6 +768,8 @@ pub fn director_spawn(
     // sub-linearly — a full budget per player doubles density and blows the cap, while no
     // bump at all gives each player half a horde.
     let sc = Scaling::for_run(&run, party);
+    // §4: a wave aimed at an astronaut standing in the night lands closer
+    let sun = crate::daynight::Sun::of(&run);
 
     // Breathing: a boss count that dropped since last tick means one just fell.
     let bosses_now = q_boss.iter().count();
@@ -789,7 +792,9 @@ pub fn director_spawn(
         director.since_elite += dt;
         if director.elite_timer <= 0.0 {
             director.elite_timer += ELITE_ROLL_SECS;
-            if rng.gen_bool(sc.elite_chance as f64) {
+            // §8 Farside: elites prowl the Moon's far hemisphere (+20% with the party there)
+            let far = crate::daynight::farside_elite_mult(planet.kind, anchors.iter().map(|(d, _)| *d));
+            if rng.gen_bool((sc.elite_chance * far).min(1.0) as f64) {
                 director.elite_pending = true;
             }
         }
@@ -827,11 +832,20 @@ pub fn director_spawn(
         } else {
             SPAWN_ARC_MIN..SPAWN_ARC_MAX
         };
-        let arc = rng.gen_range(band);
+        let night = sun.spawn_arc(anchor);
+        let arc = rng.gen_range(band) * night;
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
             let (hp, dmg) = (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg);
+            // the Dark Moon's CRAWL: The Static erupts where it was seen massing
+            let dir = match crawl.ghost_dir(rng, planet.radius) {
+                Some(d) => {
+                    gimmicks.crawl_ghosts += 1;
+                    d
+                }
+                None => dir,
+            };
             spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp, dmg, rng);
             continue;
         }
@@ -844,7 +858,7 @@ pub fn director_spawn(
         }
         // Burrowers ambush: spawn close.
         let dir = if kind == EnemyKind::Burrower {
-            let arc = rng.gen_range(9.0..16.0);
+            let arc = rng.gen_range(9.0..16.0) * night;
             sphere::offset_dir(anchor, heading, arc, planet.radius)
         } else {
             dir
@@ -1255,9 +1269,10 @@ pub fn enemy_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
+    run: Res<RunState>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
     mut q: Query<
-        (Entity, &mut Enemy, &mut Transform),
+        (Entity, &mut Enemy, &mut Transform, Has<Boss>),
         (Without<Buried>, Without<crate::interact::Pot>),
     >,
 ) {
@@ -1284,8 +1299,10 @@ pub fn enemy_move(
         .map(|(_, _, ps, _)| if ps.revealed() { SIGNAL_FLARE_LURE } else { 1.0 })
         .collect();
     let t_now = time.elapsed_secs();
+    // §4 night risk: the horde is faster on the night side (bosses keep their authored pace)
+    let sun = crate::daynight::Sun::of(&run);
 
-    for (entity, mut e, mut tf) in &mut q {
+    for (entity, mut e, mut tf, is_boss) in &mut q {
         // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
         let target = snaps
             .iter()
@@ -1304,7 +1321,8 @@ pub fn enemy_move(
         e.knock *= (1.0 - 7.0 * dt).max(0.0);
 
         let r = planet.surface(e.dir);
-        let eff_speed = e.speed * (1.0 - e.slow);
+        let night = if is_boss { 1.0 } else { sun.enemy_speed(e.dir) };
+        let eff_speed = e.speed * (1.0 - e.slow) * night;
 
         // Ranged kinds hold their preferred distance and strafe; melee beelines.
         let standoff = e.kind.def().standoff;

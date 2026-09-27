@@ -724,7 +724,8 @@ pub fn player_physics(
     props: Res<crate::planet::PropColliders>,
     global: Res<RunState>,
     lines: Res<crate::techs::GrindLines>,
-    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    flora: Res<crate::gimmicks::WorldFlora>,
+    (mut telemetry, mut gimmicks): (ResMut<crate::items::ItemTelemetry>, ResMut<crate::gimmicks::GimmickTelemetry>),
     mut sfx: MessageWriter<crate::messages::SfxMsg>,
     mut q: Query<(
         &mut Player,
@@ -740,6 +741,7 @@ pub fn player_physics(
     if dt <= 0.0 {
         return;
     }
+    let sun = crate::daynight::Sun::of(&global);
     for (mut p, mut run, mut procs, mut tech, intent, mut tf, is_local) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
@@ -829,6 +831,19 @@ pub fn player_physics(
         }
     }
 
+    // Mars's thorn flora (§8): wading through a bush drags you down to THORN_SLOW of your
+    // speed (`move_speed_mult`), lingering a moment after you leave it; a jump clears it.
+    if !run.dead && flora.thorn_contact(p.dir, p.height, PLAYER_RADIUS, planet.radius) {
+        if run.thorned <= 0.0 {
+            gimmicks.thorn_snags += 1;
+            if is_local {
+                sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Thorns));
+            }
+        }
+        run.thorned = THORN_LINGER;
+        gimmicks.thorn_secs += dt;
+    }
+
     // terrain contact
     if p.height <= 0.0 {
         if !p.grounded {
@@ -904,8 +919,9 @@ pub fn player_physics(
     // altitude above the core, so a crater slope and a fall both count as descent
     run.descent_m = procs.track_descent(planet.surface(p.dir) + p.height, dt);
     telemetry.max_descent = telemetry.max_descent.max(run.descent_m);
-    // Tome of Nightfall reads the side of the planet we stand on…
-    run.night = crate::planet::is_night(p.dir, global.sun_shrink);
+    run.thorned = (run.thorned - dt).max(0.0);
+    // Tome of Nightfall reads the side of the planet we stand on (the one sun, `daynight`)…
+    run.night = sun.is_night(p.dir);
     // …and Tome of Momentum how long we have kept moving (airborne counts: a bunny-hop
     // chain is the purest momentum there is)
     run.momentum = if p.vel_t.length() >= MOMENTUM_MIN_SPEED && !run.dead {

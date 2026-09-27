@@ -1,5 +1,6 @@
 //! Planet + sky construction: icosphere terrain with analytic hills, scattered props,
-//! starfield, sun, and (on the Moon) an Earthrise.
+//! starfield, sun, and (on the Moon) an Earthrise. The sun turns in `daynight`; the flora's
+//! rules (thorns, spore caps) are `gimmicks`.
 
 use crate::content::planets::{FloraStyle, PlanetDef, PlanetKind};
 use crate::sphere::{self, Terrain};
@@ -345,6 +346,7 @@ pub fn spawn_stage(
     }
 
     // Flora: per-world plant archetypes built from shared primitive parts.
+    let mut flora = crate::gimmicks::WorldFlora { style: (def.flora > 0).then_some(def.flora_style), plants: Vec::new() };
     if def.flora > 0 {
         let (part_a, part_b, mat_a, mat_b): (Handle<Mesh>, Handle<Mesh>, Handle<StandardMaterial>, Handle<StandardMaterial>) =
             match def.flora_style {
@@ -398,7 +400,7 @@ pub fn spawn_stage(
             let fwd = sphere::tangent_frame(dir).0;
             let scale = rng.gen_range(0.7..1.6);
             let rot = sphere::frame_quat(dir, fwd) * Quat::from_rotation_y(rng.gen_range(0.0..6.28));
-            commands
+            let plant = commands
                 .spawn((
                     Transform::from_translation(pos).with_rotation(rot).with_scale(Vec3::splat(scale)),
                     Visibility::default(),
@@ -436,9 +438,13 @@ pub fn spawn_stage(
                             ));
                         }
                     }
-                });
+                })
+                .id();
+            // §8 gimmicks read the flora: Mars's thorns snag, the Dark Moon's caps detonate
+            flora.plants.push(crate::gimmicks::Plant { dir, scale, entity: plant });
         }
     }
+    commands.insert_resource(flora);
 
     // Grind-Lines (§4): the ridged crests' exposed spines, and the rail that shows them.
     // Traced from the terrain alone — no draw from `rng` — so the layout stream above is
@@ -476,7 +482,8 @@ pub fn spawn_stage(
         ));
     }
 
-    // Earthrise
+    // Earthrise — and on the Moon the Earth's cyan fill, which lights Earthside only (§8
+    // Earthside/Farside, §12 "Earthrise casts cyan fill on the night side").
     if def.has_earthrise {
         let earth_mat = materials.add(StandardMaterial {
             base_color: Color::srgb(0.25, 0.5, 0.95),
@@ -484,27 +491,39 @@ pub fn spawn_stage(
             perceptual_roughness: 0.7,
             ..default()
         });
-        let dir = Vec3::new(0.5, 0.62, 0.35).normalize();
+        let dir = crate::daynight::earth_dir();
         commands.spawn((
             Mesh3d(meshes.add(Mesh::from(Sphere::new(90.0)))),
             MeshMaterial3d(earth_mat),
             Transform::from_translation(dir * 1500.0),
             StageScoped,
         ));
+        commands.spawn((
+            DirectionalLight {
+                color: Color::srgb(0.45, 0.78, 1.0),
+                illuminance: crate::config::EARTHLIGHT_LUX,
+                shadows_enabled: false,
+                ..default()
+            },
+            crate::daynight::EarthFill,
+            Transform::from_translation(dir * 10.0).looking_at(Vec3::ZERO, sphere::tangent_frame(dir).0),
+            StageScoped,
+        ));
     }
 
-    // Sun: directional light + visible disc. `sun_dir` is the way the light TRAVELS.
-    let sun_dir = -sunward();
+    // Sun: key light + visible disc. `daynight::apply_sky` turns both with the run's sun
+    // every frame (and dims and shrinks them as the sun is eaten); placed at the stage's
+    // dawn here so the first frame is already lit right.
+    let sun = crate::daynight::sunward(planet.kind, 0.0);
     commands.spawn((
         DirectionalLight {
             color: def.sun,
-            illuminance: 9_000.0,
+            illuminance: def.light.sun_lux,
             shadows_enabled: true,
             ..default()
         },
-        // the Devoured Sun Shard dims it (`items::apply_sun_shrink`)
-        crate::items::SunLight { base: 9_000.0 },
-        Transform::from_translation(-sun_dir * 10.0).looking_at(Vec3::ZERO, Vec3::Y),
+        crate::daynight::SunLight,
+        Transform::from_translation(sun * 10.0).looking_at(Vec3::ZERO, sphere::tangent_frame(sun).0),
         StageScoped,
     ));
     let sun_mat = materials.add(StandardMaterial {
@@ -516,8 +535,8 @@ pub fn spawn_stage(
     commands.spawn((
         Mesh3d(meshes.add(Mesh::from(Sphere::new(45.0)))),
         MeshMaterial3d(sun_mat),
-        crate::items::SunDisc,
-        Transform::from_translation(-sun_dir * 1600.0),
+        crate::daynight::SunDisc,
+        Transform::from_translation(sun * 1600.0),
         StageScoped,
     ));
 
@@ -601,20 +620,6 @@ fn rail_mesh(planet: &CurrentPlanet, lines: &crate::techs::GrindLines) -> Mesh {
         }
     }
     m.build()
-}
-
-/// Unit direction from the planet's core toward the sun — the lit hemisphere faces it.
-/// Fixed for now; P07's day/night cycle turns it, and `is_night` turns with it.
-pub fn sunward() -> Vec3 {
-    Vec3::new(0.55, -0.35, 0.75).normalize()
-}
-
-/// Is the surface point `dir` on the night side? Gameplay's one test (Tome of Nightfall),
-/// against the same sun the lighting uses. `sun_shrink` (Devoured Sun Shard, §3 diegetic
-/// difficulty) eats the day side from its rim: at 0 the terminator is the great circle, at
-/// 1 the whole world is night.
-pub fn is_night(dir: Vec3, sun_shrink: f32) -> bool {
-    sun_shrink >= 1.0 || dir.dot(sunward()) < sun_shrink.max(0.0)
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {

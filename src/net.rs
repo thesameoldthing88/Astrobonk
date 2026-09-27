@@ -49,7 +49,8 @@ use std::time::{Duration, SystemTime};
 // PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
-pub const PROTOCOL_ID: u64 = 0xA570B0_8;
+// P07: the sun's phase and The Crawl's sites in RunSnapMsg, HazardEvent::Spore -> _9.
+pub const PROTOCOL_ID: u64 = 0xA570B0_9;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -239,8 +240,15 @@ pub struct RunSnapMsg {
     pub storm_dir: [f32; 3],
     pub storm_heading: [f32; 3],
     pub storm_radius: f32,
-    /// Devoured Sun Shard: how much of the sun is eaten — both machines light the same sky.
+    /// §3 diegetic difficulty: how much of the sun is eaten — both machines light the same sky.
     pub sun_shrink: f32,
+    /// §4 day/night: how far the sun has turned this stage. A client dead-reckons it between
+    /// snapshots (`daynight::drift_sun`), so both machines light — and judge night by — one sun.
+    pub sun_phase: f32,
+    /// The Dark Moon's CRAWL: where The Static is massing / erupting, as direction + mass
+    /// (`gimmicks::Crawl::to_wire`; a handful of sites at most). A client masses them on
+    /// between snapshots and draws them through the ground.
+    pub crawl: Vec<[f32; 4]>,
     /// The Static Radio is in the party (The Static comes early; the pause screen's threat
     /// line and anything else a joiner derives from `Scaling` must know).
     pub static_radio: bool,
@@ -477,6 +485,11 @@ pub enum HazardEvent {
     /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
     /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
     Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
+    // ---- appended (P07): world gimmicks, see `gimmicks` ----
+    /// A Dark Moon spore cap was primed: plant `plant` of the stage's `WorldFlora` (seeded,
+    /// so indexed alike on every machine) runs its fuse → burst → cloud → regrowth. The fuse's
+    /// danger disc arrives as its own Telegraph.
+    Spore { plant: u16 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -821,6 +834,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
+                crate::daynight::log_sky
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 crate::netenemy::log_stream_stats.run_if(|d: Res<NetDebug>| d.log),
             )
             .add_systems(
@@ -923,6 +942,7 @@ fn announce_player_ids(
 fn push_run_snapshot(
     run: Res<crate::run::RunState>,
     storm: Res<crate::events_world::DustStorm>,
+    crawl: Res<crate::gimmicks::Crawl>,
     session: Res<SessionState>,
     mut out: MessageWriter<ToClients<RunSnapMsg>>,
 ) {
@@ -951,6 +971,8 @@ fn push_run_snapshot(
             storm_heading: storm.heading.to_array(),
             storm_radius: storm.radius,
             sun_shrink: run.sun_shrink,
+            sun_phase: run.sun_phase,
+            crawl: crawl.to_wire(),
             static_radio: run.static_radio,
             assist: run.assist,
             assisted: run.assisted,
@@ -965,6 +987,7 @@ fn apply_run_snapshot(
     mut run: ResMut<crate::run::RunState>,
     mut sync: ResMut<RunSync>,
     mut storm: ResMut<crate::events_world::DustStorm>,
+    mut crawl: ResMut<crate::gimmicks::Crawl>,
 ) {
     for m in msgs.read() {
         // A straggler from a run that has already ended (or been superseded).
@@ -1005,6 +1028,8 @@ fn apply_run_snapshot(
         storm.heading = Vec3::from(m.storm_heading);
         storm.radius = m.storm_radius;
         run.sun_shrink = m.sun_shrink;
+        run.sun_phase = m.sun_phase;
+        crawl.adopt(&m.crawl);
         run.static_radio = m.static_radio;
         run.assist = m.assist;
         run.assisted = m.assisted;
@@ -2343,6 +2368,21 @@ fn reset_after_session(
 //    Repro: headless `--techs [--coop2] [--planet …]`; windowed
 //        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
 //    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
+// 2i. DAY/NIGHT + WORLD GIMMICKS (P07, see daynight.rs / gimmicks.rs) — one sun: the host
+//    turns it (`RunState::sun_phase`) and eats it (`sun_shrink`, Sun Shard + Cursed Δ); both
+//    ride RunSnapMsg and a client dead-reckons the phase (`daynight::drift_sun`), so every
+//    machine lights from, and judges night by, the same `daynight::Sun`. Night's effects on
+//    the horde (speed, closer spawns) and on loot (+25% Gold) are host simulation; the
+//    joiner's own Nightfall reading comes from its predicted body against the same sun.
+//    Mars's thorns snag in `player_physics` from the seeded flora both machines lay, so a
+//    joiner predicts its own snag. Dark Moon spore caps are host-primed; the cycle rides the
+//    hazard lane (HazardEvent::Spore, the plant's index) and its fuse disc streams as a
+//    Telegraph like any other; the damage is the host's. The Crawl's sites ride RunSnapMsg
+//    (`crawl`), massed on locally between snapshots, and draw through the ground on both.
+//    The Moon's Earthside/Farside is geometry both machines know (the Earth is fixed).
+//    Repro: headless `--daynight [--coop2] [--planet …]`, `--hazards --planet mars|darkmoon
+//    [--coop2]`; windowed coop.sh … --planet darkmoon --dev --staticnow and compare the
+//    two sides' SKY / GIMMICK lines.
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

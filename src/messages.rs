@@ -86,6 +86,10 @@ pub enum Sfx {
     Grind,
     Blink,
     Flashlight,
+    // ---- §8 world gimmicks ----
+    Thorns,
+    Spore,
+    SporePop,
 }
 
 #[derive(Message)]

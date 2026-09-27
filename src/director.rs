@@ -241,6 +241,8 @@ pub fn stage_transition(
     run.teleporter_open = false;
     run.microwave_used = false;
     run.reward_chest = None;
+    // a new world, a new morning (the eaten sun stays eaten: the world keeps dying)
+    run.sun_phase = 0.0;
     *director = Director::default();
     let stage_seed = run.run_seed.wrapping_add(run.stage as u64);
     game_rng.reseed(stage_seed);

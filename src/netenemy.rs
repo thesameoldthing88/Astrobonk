@@ -482,6 +482,7 @@ fn stream_hazards(
     added_mortar: Query<&MortarShell, Added<MortarShell>>,
     added_lines: Query<(Entity, &AimLine), Added<AimLine>>,
     added_cracks: Query<&CrackDecal, (Added<CrackDecal>, Without<NetHazard>)>,
+    added_spores: Query<&crate::gimmicks::SporeBurst, Added<crate::gimmicks::SporeBurst>>,
     beamers: Query<(&NetId, &Beamer)>,
     astronauts: Query<&PlayerId>,
     mut removed_lines: RemovedComponents<AimLine>,
@@ -559,6 +560,10 @@ fn stream_hazards(
     for c in &added_cracks {
         events.push(HazardEvent::Crack { dir: c.dir.to_array(), dur: c.timer });
     }
+    // Dark Moon spore caps: the plant's index is enough, both machines lay the same flora
+    for b in added_spores.iter().filter(|b| b.live) {
+        events.push(HazardEvent::Spore { plant: b.plant });
+    }
     if events.is_empty() {
         return;
     }
@@ -580,6 +585,7 @@ fn receive_hazards(
     lines: Query<(Entity, &AimLine)>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
     mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
+    flora: Option<Res<crate::gimmicks::WorldFlora>>,
 ) {
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
     use crate::techs::{TechFx, TechFxMsg};
@@ -680,6 +686,21 @@ fn receive_hazards(
                 HazardEvent::Crack { dir, dur } => {
                     let crack = crate::enemies::spawn_crack_decal(&mut commands, &assets, &planet, Vec3::from(dir), dur);
                     commands.entity(crack).insert(NetHazard);
+                }
+                HazardEvent::Spore { plant } => {
+                    // a cap on a world we are not standing on (a straggler across a stage
+                    // change) has no plant to swell
+                    let Some(pl) = flora
+                        .as_ref()
+                        .filter(|f| f.style == Some(crate::content::planets::FloraStyle::GlowShrooms))
+                        .and_then(|f| f.plants.get(plant as usize).copied())
+                    else {
+                        continue;
+                    };
+                    commands.spawn((
+                        crate::gimmicks::spore_bundle(&planet, crate::gimmicks::SporeBurst::new(plant, pl.dir, false)),
+                        NetHazard,
+                    ));
                 }
                 // handled above, as ItemFxMsg / TechFxMsg
                 HazardEvent::ItemOrbit { .. }

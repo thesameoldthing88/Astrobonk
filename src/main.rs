@@ -3,10 +3,12 @@ mod combat;
 mod comet;
 mod config;
 mod content;
+mod daynight;
 mod director;
 mod enemies;
 mod events_world;
 mod fx;
+mod gimmicks;
 mod headless;
 mod interact;
 mod items;
@@ -95,6 +97,8 @@ fn main() {
             brightness: 80.0,
             ..default()
         })
+        // The Crawl's through-the-crust markers (`gimmicks::XRay`)
+        .add_plugins(MaterialPlugin::<gimmicks::XRayMaterial>::default())
         .add_plugins(net::NetPlugin)
         .add_plugins(remote::RemoteVisualsPlugin)
         .add_plugins(netenemy::EnemyStreamPlugin)
@@ -130,6 +134,9 @@ fn main() {
         .init_resource::<techs::GrindLines>()
         .init_resource::<techs::TechTelemetry>()
         .init_resource::<player::FlashlightSwitch>()
+        .init_resource::<gimmicks::WorldFlora>()
+        .init_resource::<gimmicks::Crawl>()
+        .init_resource::<gimmicks::GimmickTelemetry>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
@@ -148,6 +155,7 @@ fn main() {
                 pickups::setup_pickup_assets,
                 items::setup_item_assets,
                 techs::setup_tech_assets,
+                gimmicks::setup_gimmick_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -352,10 +360,46 @@ fn main() {
                 items::singularity_update,
                 items::push_net_item_vis.run_if(net::is_simulating),
                 items::item_visuals,
-                items::apply_sun_shrink,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ------------- §4 day/night + §8 world gimmicks: the host turns and eats the sun,
+        // places The Crawl and primes/bites with the spore caps; a client turns its copy of
+        // the sun and masses its streamed Crawl between snapshots; every machine ages the
+        // spore cycles (the host's and the hazard lane's alike).
+        .add_systems(
+            Update,
+            (
+                daynight::advance_sun.run_if(net::is_simulating),
+                daynight::drift_sun.run_if(net::is_client),
+                gimmicks::crawl_sim.run_if(net::is_simulating).before(enemies::director_spawn),
+                gimmicks::crawl_drift.run_if(net::is_client),
+                gimmicks::spore_clock,
+                gimmicks::spore_sim.run_if(net::is_simulating).after(enemies::rebuild_hash),
+            )
+                .chain()
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ...and what they look like, on every machine, from the run's sun and the streamed
+        // state (behind a card panel too: the world is still lit)
+        .add_systems(
+            Update,
+            (
+                daynight::apply_sky,
+                daynight::sky_notices,
+                daynight::farside_gems,
+                gimmicks::spore_visuals.after(gimmicks::spore_clock),
+                gimmicks::crawl_visuals,
+            )
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            dev_sky
+                .run_if(in_state(AppState::InRun))
+                .run_if(net::is_simulating)
+                .run_if(|| std::env::args().any(|a| a == "--dev")),
         )
         // Item one-shots are presented even behind a card panel: a joiner picking a level-up
         // is still being hunted on the host, and a death-save that fires meanwhile must not
@@ -364,7 +408,7 @@ fn main() {
         .add_systems(
             Update,
             items::item_fx_presentation
-                .after(items::apply_sun_shrink)
+                .after(items::item_visuals)
                 .run_if(in_state(AppState::InRun)),
         )
         .add_systems(
@@ -814,6 +858,33 @@ fn dev_fast_boss(
         info!("DEV --bossnow: clock wound to {:.0}s (minibosses skipped)", run.timer);
     }
     *done = true;
+}
+
+/// `--dev` sky controls for windowed tests (host/solo), applied once a few seconds in:
+/// `--sun <radians>` turns the sun to that phase (π puts the crash site in deep night),
+/// `--sunshrink <0..1>` eats that much of the day side, and `--staticsoon` winds the clock
+/// to just before The Crawl starts massing (Dark Moon) ahead of The Static.
+fn dev_sky(time: Res<Time>, mut run: ResMut<run::RunState>, mut done: Local<bool>) {
+    if *done || time.elapsed_secs() < 3.0 {
+        return;
+    }
+    *done = true;
+    let args: Vec<String> = std::env::args().collect();
+    let num = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<f32>().ok());
+    if let Some(phase) = num("--sun") {
+        run.sun_phase = phase.rem_euclid(std::f32::consts::TAU);
+        info!("DEV --sun: phase {:.2}", run.sun_phase);
+    }
+    if let Some(shrink) = num("--sunshrink") {
+        run.sun_shrink = shrink.clamp(0.0, 1.0);
+        info!("DEV --sunshrink: {:.2}", run.sun_shrink);
+    }
+    if args.iter().any(|a| a == "--staticsoon") && !run.static_active {
+        run.timer = run.timer.min(config::CRAWL_MASS_SECS + 6.0);
+        run.boss_spawned = true;
+        run.minibosses_spawned = [true; 2];
+        info!("DEV --staticsoon: clock wound to {:.0}s (bosses skipped)", run.timer);
+    }
 }
 
 /// `--dev --levelupnow`: queue three level-ups and 60 Gold on the local astronaut a few

@@ -404,10 +404,77 @@ pub const SIGNAL_FLARE_LURE: f32 = 0.5;
 pub const SIGNAL_FLARE_SPAWN_ARC_MIN: f32 = 30.0;
 pub const SIGNAL_FLARE_SPAWN_ARC_MAX: f32 = 42.0;
 
-/// Devoured Sun Shard: every SUN_SHARD_PERIOD s the day side shrinks one SUN_SHARD_STEP
-/// toward total night (RunState::sun_shrink, 0..1).
-pub const SUN_SHARD_PERIOD: f32 = 60.0;
+// ── Day/night (GDD §4) and diegetic difficulty (§3) ───────────────────────────
+/// Full turns of the sun over one stage's clock: the terminator sweeps the whole surface
+/// once per stage (§4 "the terminator sweeps the surface over the 10:00 run"). At ~1.4 m/s
+/// on the equator a runner can chase the day or stay in the night — it is a biome you pick.
+pub const SUN_TURNS_PER_STAGE: f32 = 1.0;
+/// Where the sun stands at the crash site when a stage begins: this far (radians) short of
+/// noon, so the first night reaches the crash site about a third of the way in.
+pub const SUN_START_BEFORE_NOON: f32 = 0.5;
+/// Half-width of the twilight band in `dot(dir, sunward)` — where `Sun::daylight` ramps.
+pub const TWILIGHT_BAND: f32 = 0.05;
+/// §4 night risk: the horde moves this much faster on the night side...
+pub const NIGHT_ENEMY_SPEED: f32 = 0.15;
+/// ...and a wave aimed at an astronaut standing in the night lands this much closer (it
+/// crests the horizon INSIDE your vision).
+pub const NIGHT_SPAWN_ARC_MULT: f32 = 0.8;
+/// §4 night reward: gold from kills on the night side.
+pub const NIGHT_GOLD_MULT: f32 = 1.25;
+/// Diegetic difficulty (§3): every SUN_EAT_SECS the day side shrinks toward night-lock
+/// (RunState::sun_shrink, 0..1) — by SUN_SHARD_STEP while a Devoured Sun Shard is carried,
+/// plus SUN_CURSED_STEP per unit of the party's Difficulty (Cursed Moon Rock, Cursed Tome,
+/// Greed): the more danger invited, the more of the sun goes out.
+pub const SUN_EAT_SECS: f32 = 60.0;
 pub const SUN_SHARD_STEP: f32 = 0.1;
+pub const SUN_CURSED_STEP: f32 = 0.1;
+/// The key light dims by this share as the sun is eaten (it goes out entirely at 1).
+pub const SUN_DIM_AT_FULL_SHRINK: f32 = 0.5;
+/// How fast (per second) the ambient eases between day and night levels as you cross the
+/// terminator — a dusk, not a light switch.
+pub const AMBIENT_EASE: f32 = 1.2;
+
+// ── World gimmicks (GDD §8) ───────────────────────────────────────────────────
+/// The Moon's Earthlight: a cyan fill from the fixed Earth on the Earthside hemisphere.
+pub const EARTHLIGHT_LUX: f32 = 700.0;
+/// Farside (the hemisphere facing away from the Earth): ambient drops by this share, gems
+/// glow brighter, and the elite roll is this much likelier (scaled by the share of the
+/// party standing on Farside).
+pub const FARSIDE_AMBIENT_DROP: f32 = 0.45;
+pub const FARSIDE_ELITE_BONUS: f32 = 0.2;
+pub const FARSIDE_GEM_GLOW: f32 = 2.6;
+/// Mars's thorn flora: touching a bush (below its height, within this many metres of its
+/// stem per unit of scale) slows you to THORN_SLOW of your speed, lingering THORN_LINGER s.
+pub const THORN_REACH: f32 = 0.85;
+pub const THORN_HEIGHT: f32 = 0.9;
+pub const THORN_SLOW: f32 = 0.55;
+pub const THORN_LINGER: f32 = 0.45;
+/// The Dark Moon's fungus: an astronaut within SPORE_TRIGGER m primes a ripe cap; after a
+/// SPORE_FUSE s telegraph it detonates (SPORE_RADIUS, the burst hurts astronauts AND the
+/// horde) and leaves a spore cloud (SPORE_CLOUD_RADIUS, SPORE_CLOUD_SECS) that eats HP
+/// every SPORE_TICK s. The cap regrows over SPORE_REGROW s.
+pub const SPORE_TRIGGER: f32 = 6.0;
+pub const SPORE_FUSE: f32 = 1.5;
+pub const SPORE_RADIUS: f32 = 5.0;
+pub const SPORE_BURST_DAMAGE: f32 = 12.0;
+pub const SPORE_ENEMY_DAMAGE: f32 = 40.0;
+pub const SPORE_CLOUD_RADIUS: f32 = 4.2;
+pub const SPORE_CLOUD_SECS: f32 = 4.0;
+pub const SPORE_CLOUD_DPS: f32 = 5.0;
+pub const SPORE_TICK: f32 = 0.5;
+pub const SPORE_REGROW: f32 = 20.0;
+/// The Dark Moon's CRAWL: The Static masses under the crust (seen through it) for
+/// CRAWL_MASS_SECS before it erupts at that site; the site then spews ghosts for
+/// CRAWL_ERUPT_SECS, and its successor starts massing CRAWL_MASS_SECS before it closes, so
+/// the next eruption is always on show. CRAWL_SITES + one per extra astronaut stand at once,
+/// CRAWL_ARC_MIN..MAX m from an astronaut (over the horizon); ghosts erupt within
+/// CRAWL_SPREAD m of a site.
+pub const CRAWL_MASS_SECS: f32 = 15.0;
+pub const CRAWL_ERUPT_SECS: f32 = 25.0;
+pub const CRAWL_SITES: usize = 3;
+pub const CRAWL_ARC_MIN: f32 = 38.0;
+pub const CRAWL_ARC_MAX: f32 = 60.0;
+pub const CRAWL_SPREAD: f32 = 5.0;
 
 pub const WEAPON_SLOTS: usize = 4;
 pub const MAX_WEAPON_LEVEL: u32 = 7;
