@@ -66,6 +66,22 @@ pub struct AssistText;
 /// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
 #[derive(Component)]
 pub struct EdgeMarker;
+/// The antipode dial's distance from the screen's bottom edge, in UI units.
+const ANTIPODE_DIAL_Y: f32 = 44.0;
+/// The antipode dial (§4: the HUD tell for Antipode Blink): who waits on the far side of
+/// the planet, and whether the blink is charged. Shown while the local astronaut carries a
+/// blink (Antipode Blink or Boomerang Insurance).
+#[derive(Component)]
+pub struct AntipodeDial;
+/// The dial's ring: its border is the far side's band colour, pulsing when it's a wall.
+#[derive(Component)]
+pub struct AntipodeRing;
+#[derive(Component)]
+pub struct AntipodeCount;
+#[derive(Component)]
+pub struct AntipodeBandText;
+#[derive(Component)]
+pub struct AntipodeBlinkText;
 
 #[derive(Resource, Default)]
 pub struct BannerQueue {
@@ -120,6 +136,51 @@ pub fn spawn_hud(mut commands: Commands) {
                     Pickable::IGNORE,
                 ));
             }
+
+            // the antipode dial, bottom-left: a ring naming the far side's crowd, over the
+            // blink's charge. Clear of the bottom cluster (which starts at 18% across); it
+            // steps aside while a card panel is up, like the other mid-screen lines.
+            root.spawn((
+                AntipodeDial,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(14.0),
+                    // above the line the off-screen edge markers run along (34 px in)
+                    bottom: Val::Px(ANTIPODE_DIAL_Y),
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Center,
+                    row_gap: Val::Px(1.0),
+                    padding: UiRect::axes(Val::Px(6.0), Val::Px(4.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                // a dark backing: the dial sits over the day side's bright regolith too
+                BackgroundColor(Color::srgba(0.03, 0.04, 0.08, 0.55)),
+                Visibility::Hidden,
+                Pickable::IGNORE,
+            ))
+            .with_children(|d| {
+                d.spawn((txt("ANTIPODE", 11.0, Color::srgb(0.7, 0.8, 0.9)),));
+                d.spawn((
+                    AntipodeRing,
+                    Node {
+                        width: Val::Px(52.0),
+                        height: Val::Px(52.0),
+                        border: UiRect::all(Val::Px(4.0)),
+                        border_radius: BorderRadius::MAX,
+                        justify_content: JustifyContent::Center,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(0.03, 0.04, 0.08, 0.75)),
+                    BorderColor::all(Color::WHITE),
+                ))
+                .with_children(|r| {
+                    r.spawn((AntipodeCount, txt("0", FONT_MED, Color::WHITE)));
+                });
+                d.spawn((AntipodeBandText, txt("CLEAR", 12.0, Color::WHITE)));
+                d.spawn((AntipodeBlinkText, txt("", 12.0, Color::WHITE)));
+            });
 
             // dust-storm haze (Mars) — fades in while you're inside the storm
             root.spawn((
@@ -490,6 +551,104 @@ pub fn update_assist_hud(
     let line = if run.assisted { format!("ASSISTED{token}") } else { String::new() };
     if t.0 != line {
         t.0 = line;
+    }
+}
+
+/// The antipode dial (§4 "the off-screen threat ring shows antipode density"): the count
+/// the host takes at the local astronaut's far pole every quarter second, named in a band
+/// word (shape + text + colour, §13 — never colour alone), The Static or a boss called out,
+/// and the blink's charge. It reads only the local body's `NetItemVis` — written by the host
+/// for its own body, adopted by a joiner from the host's copy of it — so both HUDs are one
+/// path. The ring pulses (well under 3 Hz, and never a flash) while the far side is a wall.
+#[allow(clippy::type_complexity)]
+pub fn update_antipode_dial(
+    time: Res<Time<Real>>,
+    save: Res<crate::save::MetaSave>,
+    phase: Res<crate::run::RunPhase>,
+    q_ps: Query<(&PlayerState, &crate::net::NetItemVis), With<crate::player::LocalPlayer>>,
+    mut dial: Query<&mut Visibility, With<AntipodeDial>>,
+    mut ring: Query<&mut BorderColor, With<AntipodeRing>>,
+    mut texts: ParamSet<(
+        Query<(&mut Text, &mut TextColor), With<AntipodeCount>>,
+        Query<(&mut Text, &mut TextColor), With<AntipodeBandText>>,
+        Query<(&mut Text, &mut TextColor), With<AntipodeBlinkText>>,
+    )>,
+) {
+    use crate::content::items::ItemKind;
+    use crate::net::{ITEMVIS_ANTIPODE_BOSS, ITEMVIS_ANTIPODE_STATIC, ITEMVIS_INSURED};
+    use crate::techs::AntipodeBand;
+    let Ok(mut vis) = dial.single_mut() else { return };
+    let Ok((ps, net)) = q_ps.single() else {
+        *vis = Visibility::Hidden;
+        return;
+    };
+    let blink = ps.has_item(ItemKind::AntipodeBlink);
+    let insured = ps.has_item(ItemKind::BoomerangInsurance);
+    use crate::run::RunPhase;
+    let panel = matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused);
+    let want = if (blink || insured) && !panel { Visibility::Inherited } else { Visibility::Hidden };
+    if *vis != want {
+        *vis = want;
+    }
+    if want == Visibility::Hidden {
+        return;
+    }
+    let danger = save.accessibility.palette.danger();
+    let count = net.antipode as u32;
+    let band = AntipodeBand::of(count);
+    let (label, color) = if net.flags & ITEMVIS_ANTIPODE_STATIC != 0 {
+        ("THE STATIC", Color::srgb(0.85, 0.65, 1.0))
+    } else if net.flags & ITEMVIS_ANTIPODE_BOSS != 0 {
+        ("BOSS", danger)
+    } else {
+        match band {
+            AntipodeBand::Clear => (band.label(), Color::srgb(0.45, 1.0, 0.8)),
+            AntipodeBand::Thin => (band.label(), Color::srgb(0.85, 0.95, 1.0)),
+            AntipodeBand::Crowded => (band.label(), Color::srgb(1.0, 0.75, 0.3)),
+            AntipodeBand::Wall => (band.label(), danger),
+        }
+    };
+    let alarm = band == AntipodeBand::Wall || net.flags & (ITEMVIS_ANTIPODE_STATIC | ITEMVIS_ANTIPODE_BOSS) != 0;
+    let pulse = if alarm { 0.7 + 0.3 * (time.elapsed_secs() * std::f32::consts::TAU * 1.2).sin() } else { 1.0 };
+    if let Ok(mut b) = ring.single_mut() {
+        *b = BorderColor::all(color.with_alpha(pulse));
+    }
+    let count_line = if count >= 255 { "255+".to_string() } else { count.to_string() };
+    let charged = net.blink_cd == 0;
+    let blink_line = match (blink, insured) {
+        (true, _) if charged => "[Q] BLINK".to_string(),
+        (true, _) => format!("BLINK {}s", net.blink_cd),
+        (false, _) if !charged => format!("RECHARGE {}s", net.blink_cd),
+        (false, _) => String::new(),
+    };
+    let policy = if !insured {
+        ""
+    } else if net.flags & ITEMVIS_INSURED != 0 {
+        "INSURED"
+    } else {
+        "POLICY PAID"
+    };
+    let blink_line = match (blink_line.is_empty(), policy.is_empty()) {
+        (_, true) => blink_line,
+        (true, false) => policy.to_string(),
+        (false, false) => format!("{blink_line}\n{policy}"),
+    };
+    let ready = Color::srgb(0.5, 0.95, 1.0);
+    let waiting = Color::srgb(0.75, 0.78, 0.85);
+    set_text(&mut texts.p0(), &count_line, color);
+    set_text(&mut texts.p1(), label, color);
+    set_text(&mut texts.p2(), &blink_line, if charged { ready } else { waiting });
+}
+
+/// Write a HUD line only when it changed (a text edit re-lays the node).
+fn set_text<F: bevy::ecs::query::QueryFilter>(q: &mut Query<(&mut Text, &mut TextColor), F>, s: &str, c: Color) {
+    if let Ok((mut t, mut tc)) = q.single_mut() {
+        if t.0 != s {
+            t.0 = s.to_string();
+        }
+        if tc.0 != c {
+            tc.0 = c;
+        }
     }
 }
 

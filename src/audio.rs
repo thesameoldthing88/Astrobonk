@@ -149,6 +149,29 @@ pub fn build_sfx_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSo
     tone(&mut b, Wave::Sine, 880.0, 1760.0, 0.4, 0.2, 0.05);
     add(Sfx::Comet, std::mem::take(&mut b));
 
+    // slam: a low body-blow thud under a gravel spray — the crater you just made
+    tone(&mut b, Wave::Saw, 120.0, 38.0, 0.34, 0.5, 0.0);
+    tone(&mut b, Wave::Sine, 70.0, 30.0, 0.3, 0.45, 0.0);
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.22, 0.3, 0.02);
+    add(Sfx::Slam, std::mem::take(&mut b));
+
+    // grind: the metal-on-rock "shhk" of catching a rail
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.16, 0.22, 0.0);
+    tone(&mut b, Wave::Square, 1480.0, 1320.0, 0.12, 0.12, 0.0);
+    tone(&mut b, Wave::Sine, 2960.0, 2700.0, 0.1, 0.08, 0.01);
+    add(Sfx::Grind, std::mem::take(&mut b));
+
+    // blink: an inhale-and-pop — a rising suck, then the far side
+    tone(&mut b, Wave::Sine, 180.0, 1400.0, 0.16, 0.3, 0.0);
+    tone(&mut b, Wave::Square, 1600.0, 900.0, 0.08, 0.2, 0.15);
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.08, 0.15, 0.15);
+    add(Sfx::Blink, std::mem::take(&mut b));
+
+    // flashlight: a small switch click
+    tone(&mut b, Wave::Square, 2400.0, 2200.0, 0.018, 0.2, 0.0);
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.015, 0.15, 0.0);
+    add(Sfx::Flashlight, std::mem::take(&mut b));
+
     commands.insert_resource(SfxBank { map });
 }
 

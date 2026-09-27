@@ -75,6 +75,17 @@ pub struct ItemProcs {
     pub path_cd: f32,
     /// Boomerang Insurance fires once per dip below its threshold.
     pub insurance_armed: bool,
+    /// Antipode Blink's recharge — THE blink's, shared by the item's key and Boomerang
+    /// Insurance's escape (§15: one antipode mechanic). HOST-ticked; a joiner's HUD reads it
+    /// from `NetItemVis::blink_cd`.
+    pub blink_cd: f32,
+    /// The antipode read for the HUD tell (`techs::antipode_scan`, HOST): enemies within
+    /// ANTIPODE_SCAN_ARC of the far pole, whether The Static / a boss is among them, and
+    /// the time to the next recount.
+    pub antipode: u16,
+    pub antipode_static: bool,
+    pub antipode_boss: bool,
+    pub antipode_scan: f32,
 }
 
 impl Default for ItemProcs {
@@ -99,6 +110,11 @@ impl Default for ItemProcs {
             path: VecDeque::new(),
             path_cd: 0.0,
             insurance_armed: true,
+            blink_cd: 0.0,
+            antipode: 0,
+            antipode_static: false,
+            antipode_boss: false,
+            antipode_scan: 0.0,
         }
     }
 }
@@ -162,7 +178,7 @@ pub enum DeathSave {
     /// Warden Solongo's ghost-revive — hero #20, outside the 1.0 roster (BUILD_PLAN scope:
     /// heroes 13–21 are post-launch). Her passive slots in here, in its canon place.
     WardenRevive,
-    /// Boomerang Insurance / Antipode Blink's escape to the far pole (P06's blink).
+    /// Boomerang Insurance's escape to the far pole, through Antipode Blink's mechanic.
     AntipodeEscape,
     /// Widow's Ring: survive at exactly 1 HP (recharging).
     WidowsRing,
@@ -204,17 +220,21 @@ fn warden_revive(_ps: &PlayerState) -> bool {
     false
 }
 
-/// P06 HOOK — Antipode Blink. Returns where the astronaut lands (the exact antipode) when a
-/// blink may fire now for this sheet: Boomerang Insurance's panic escape, or an Antipode
-/// Blink item off cooldown. Until P06 lands the mechanic nothing can blink, so this is the
-/// safe "no escape" answer — and Boomerang Insurance stays out of the pools
-/// (`ItemDef::pooled`) so nobody is dealt an item that cannot fire.
-pub fn antipode_escape(_ps: &PlayerState, _procs: &mut ItemProcs, _here: Vec3) -> Option<Vec3> {
-    None
+/// Boomerang Insurance's escape, through Antipode Blink (§15: every antipode effect routes
+/// through the one mechanic). Returns where the astronaut will land — the exact antipode —
+/// when the blink is charged, and spends the charge; None while it recharges, so an escape
+/// and a keyed blink can never chain. The caller moves the body with `techs::blink_body`.
+pub fn antipode_escape(ps: &PlayerState, procs: &mut ItemProcs, here: Vec3) -> Option<Vec3> {
+    if procs.blink_cd > 0.0 {
+        return None;
+    }
+    procs.blink_cd = crate::techs::blink_cooldown(ps);
+    Some(-here)
 }
 
 /// Boomerang Insurance's non-lethal trigger (§7: auto-blink at 20% HP). Called after every
-/// hit that leaves the astronaut standing; re-arms once they heal back above the line.
+/// hit that leaves the astronaut standing; re-arms once they heal back above the line. A
+/// dip while the blink recharges stays armed, and pays on the next hit once it is charged.
 pub fn boomerang_insurance(ps: &PlayerState, procs: &mut ItemProcs, here: Vec3) -> Option<Vec3> {
     let low = ps.hp <= ps.stats.max_hp * BOOMERANG_INSURANCE_HP;
     if !low {
@@ -241,9 +261,14 @@ pub fn resolve_death_save(ps: &mut PlayerState, procs: &mut ItemProcs, here: Vec
                 (tether_point(procs, here), TETHER_IFRAMES)
             }
             DeathSave::WardenRevive if warden_revive(ps) => (here, TETHER_IFRAMES),
-            DeathSave::AntipodeEscape if ps.has_item(ItemKind::BoomerangInsurance) => {
+            // The same once-per-dip policy as the non-lethal trigger: a dip that already paid
+            // out cannot pay again on the killing blow (that would be a blink per hit).
+            DeathSave::AntipodeEscape if ps.has_item(ItemKind::BoomerangInsurance) && procs.insurance_armed => {
                 match antipode_escape(ps, procs, here) {
-                    Some(d) => (d, TETHER_IFRAMES),
+                    Some(d) => {
+                        procs.insurance_armed = false;
+                        (d, TETHER_IFRAMES)
+                    }
                     None => continue,
                 }
             }
@@ -436,6 +461,7 @@ pub fn item_upkeep(
     let mut rng = rand::thread_rng();
     for (p, mut ps, mut procs) in &mut q {
         procs.widow_cd = (procs.widow_cd - dt).max(0.0);
+        procs.blink_cd = (procs.blink_cd - dt).max(0.0);
         // Tether memory: the clock is the one Downhill's tracker advances in player_physics.
         procs.path_cd -= dt;
         if procs.path_cd <= 0.0 {
@@ -971,7 +997,10 @@ pub fn singularity_update(
 /// HOST: mirror what a client must draw of each astronaut's items onto its replicated
 /// `NetItemVis` — only on change, since replicon sends whatever is touched.
 pub fn push_net_item_vis(mut q: Query<(&Player, &PlayerState, &ItemProcs, &mut NetItemVis)>) {
-    use crate::net::{ITEMVIS_HOVER, ITEMVIS_JAMMED, ITEMVIS_TETHER_SPENT, ITEMVIS_TRAIL, ITEMVIS_WIDOW};
+    use crate::net::{
+        ITEMVIS_ANTIPODE_BOSS, ITEMVIS_ANTIPODE_STATIC, ITEMVIS_HOVER, ITEMVIS_INSURED, ITEMVIS_JAMMED,
+        ITEMVIS_TETHER_SPENT, ITEMVIS_TRAIL, ITEMVIS_WIDOW,
+    };
     for (p, ps, procs, mut vis) in &mut q {
         let mut flags = 0u8;
         if !ps.dead && ps.has_item(ItemKind::CometTail) && p.vel_t.length() > COMET_TAIL_MOVING_SPEED {
@@ -989,9 +1018,21 @@ pub fn push_net_item_vis(mut q: Query<(&Player, &PlayerState, &ItemProcs, &mut N
         if procs.jam > 0.0 {
             flags |= ITEMVIS_JAMMED;
         }
+        if procs.antipode_static {
+            flags |= ITEMVIS_ANTIPODE_STATIC;
+        }
+        if procs.antipode_boss {
+            flags |= ITEMVIS_ANTIPODE_BOSS;
+        }
+        if procs.insurance_armed && ps.has_item(ItemKind::BoomerangInsurance) {
+            flags |= ITEMVIS_INSURED;
+        }
         let ghost = ps.ghost_weapon.map(|w| w.code() + 1).unwrap_or(0);
         let widow_cd = procs.widow_cd.ceil().min(255.0) as u8;
-        let next = NetItemVis { ghost, flags, widow_cd };
+        // whole seconds, rounded up: 0 means charged, never "0 s left"
+        let blink_cd = procs.blink_cd.ceil().min(255.0) as u8;
+        let antipode = procs.antipode.min(255) as u8;
+        let next = NetItemVis { ghost, flags, widow_cd, blink_cd, antipode };
         if *vis != next {
             *vis = next;
         }
@@ -1338,8 +1379,8 @@ pub fn self_check(save: &crate::save::MetaSave) -> Result<(), String> {
             return Err(format!("{} is marked cap 1 in §7", marked.def().name));
         }
     }
-    if ItemKind::NEW.iter().any(|i| !i.def().pooled) || ItemKind::pool().count() != ItemKind::ALL.len() - 1 {
-        return Err("every new §7 item must be in the pools (only Boomerang Insurance waits on P06)".into());
+    if ItemKind::NEW.iter().any(|i| !i.def().pooled) || ItemKind::pool().count() != ItemKind::ALL.len() {
+        return Err("every §7 item must be in the pools".into());
     }
 
     // The loot roll: legal, graded, and a FIXED draw count whatever the sheet (rule 5).
@@ -1422,6 +1463,43 @@ pub fn self_check(save: &crate::save::MetaSave) -> Result<(), String> {
     ps.hp = 0.0;
     if resolve_death_save(&mut ps, &mut procs, start).is_some() {
         return Err("a third death was saved with the Tether spent and the Ring recharging".into());
+    }
+
+    // Boomerang Insurance: through the blink (exact antipode), once per dip, never while
+    // the shared blink recharges, and in its canon place — after the Tether, before the Ring.
+    let mut ps = PlayerState::new(AstronautKind::Buzz, save);
+    let mut procs = ItemProcs::default();
+    ps.add_item(ItemKind::BoomerangInsurance, Rarity::Epic);
+    ps.recompute_stats(save, 0);
+    ps.hp = ps.stats.max_hp * BOOMERANG_INSURANCE_HP * 0.5;
+    if boomerang_insurance(&ps, &mut procs, start) != Some(-start) || procs.blink_cd <= 0.0 {
+        return Err("Boomerang Insurance did not blink to the exact antipode below its line".into());
+    }
+    procs.blink_cd = 0.0;
+    if boomerang_insurance(&ps, &mut procs, start).is_some() {
+        return Err("Boomerang Insurance paid twice in one dip".into());
+    }
+    ps.hp = ps.stats.max_hp;
+    let _ = boomerang_insurance(&ps, &mut procs, start); // healed: re-arms
+    ps.hp = ps.stats.max_hp * BOOMERANG_INSURANCE_HP * 0.5;
+    procs.blink_cd = 3.0;
+    if boomerang_insurance(&ps, &mut procs, start).is_some() || !procs.insurance_armed {
+        return Err("Boomerang Insurance fired while the blink was recharging, or lost its arming".into());
+    }
+    for item in [ItemKind::DeadMansTether, ItemKind::WidowsRing] {
+        ps.add_item(item, item.def().rarity);
+    }
+    procs.blink_cd = 0.0;
+    procs.path.push_back((0.0, Vec3::Z));
+    procs.clock = 5.0;
+    let order: Vec<Option<DeathSave>> = (0..3)
+        .map(|_| {
+            ps.hp = 0.0;
+            resolve_death_save(&mut ps, &mut procs, start).map(|s| s.0)
+        })
+        .collect();
+    if order != [Some(DeathSave::Tether), Some(DeathSave::AntipodeEscape), Some(DeathSave::WidowsRing)] {
+        return Err(format!("death-saves with the Insurance resolved as {order:?}"));
     }
     Ok(())
 }

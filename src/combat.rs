@@ -1225,6 +1225,8 @@ pub fn apply_player_hits(
         &mut PlayerState,
         &mut Player,
         &mut crate::items::ItemProcs,
+        &mut crate::techs::MoveTech,
+        &crate::player::InputIntent,
         &crate::player::PlayerId,
         &Transform,
         Has<crate::player::LocalPlayer>,
@@ -1234,8 +1236,8 @@ pub fn apply_player_hits(
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
-    mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
-    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    (mut item_fx, mut tech_fx): (MessageWriter<crate::items::ItemFxMsg>, MessageWriter<crate::techs::TechFxMsg>),
+    (mut telemetry, mut tech_telemetry): (ResMut<crate::items::ItemTelemetry>, ResMut<crate::techs::TechTelemetry>),
     mut banners: MessageWriter<BannerMsg>,
 ) {
     let mut rng = rand::thread_rng();
@@ -1243,7 +1245,17 @@ pub fn apply_player_hits(
         // Address the hit to its actual victim. `continue`, never unwrap: messages are
         // double-buffered, so a victim CAN be despawned between the write and this read
         // (stage change, disconnect).
-        let Ok((mut run_ps, mut body, mut procs, pid, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
+        let Ok((mut run_ps, mut body, mut procs, mut tech, intent, pid, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
+        // Boomerang Insurance's escape is an Antipode Blink (§15: one mechanic), turned
+        // the way this astronaut is looking, like a keyed one.
+        let mut insured_blink = |body: &mut Player, ps: &mut PlayerState, procs: &mut crate::items::ItemProcs| {
+            let jump = crate::techs::blink_body(body, ps, &mut tech, procs, intent.forward);
+            tech_telemetry.insured_blinks += 1;
+            tech_fx.write(crate::techs::TechFxMsg {
+                fx: crate::techs::TechFx::Blink { owner: pid.0, from: jump.from, to: jump.to, axis: jump.axis, insured: true },
+                from_wire: false,
+            });
+        };
         if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
             continue;
         }
@@ -1282,6 +1294,11 @@ pub fn apply_player_hits(
         let here = body.dir;
         if run_ps.hp <= 0.0 {
             match crate::items::resolve_death_save(&mut run_ps, &mut procs, here) {
+                Some((crate::items::DeathSave::AntipodeEscape, _)) => {
+                    telemetry.saves[crate::items::DeathSave::AntipodeEscape.code() as usize] += 1;
+                    // its event (TechFx::Blink, insured) carries the banner and the snap
+                    insured_blink(&mut body, &mut run_ps, &mut procs);
+                }
                 Some((save, landing)) => {
                     telemetry.saves[save.code() as usize] += 1;
                     if landing != here {
@@ -1307,16 +1324,8 @@ pub fn apply_player_hits(
                     }
                 }
             }
-        } else if let Some(landing) = crate::items::boomerang_insurance(&run_ps, &mut procs, here) {
-            move_astronaut(&mut body, &mut procs, landing);
-            item_fx.write(crate::items::ItemFxMsg {
-                fx: crate::items::ItemFx::DeathSave {
-                    owner: pid.0,
-                    save: crate::items::DeathSave::AntipodeEscape,
-                    dir: landing,
-                },
-                from_wire: false,
-            });
+        } else if crate::items::boomerang_insurance(&run_ps, &mut procs, here).is_some() {
+            insured_blink(&mut body, &mut run_ps, &mut procs);
         }
     }
 }

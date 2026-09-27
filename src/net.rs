@@ -44,7 +44,9 @@ use std::time::{Duration, SystemTime};
 // Bumped for wave 2: P03 (items in the build sync, NetItemVis, item hazard events, jump_held,
 // sun/radio in RunSnapMsg) and P04 (§13 assists in RunSnapMsg, revives in PlayerVitals, burrow
 // cracks on the hazard lane) each took 0xA570B0_5 on their own branch; the merged wire is _6.
-pub const PROTOCOL_ID: u64 = 0xA570B0_6;
+// P06 (movement techs): slide_held/blink/light in PlayerInputMsg, grinding/light in
+// NetTransform, the blink charge and antipode read in NetItemVis, Slam/Blink hazard events.
+pub const PROTOCOL_ID: u64 = 0xA570B0_7;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -78,8 +80,13 @@ pub struct NetTransform {
     pub facing: Vec3,
     /// Mid-slide. Rides the pose rather than being derived on the client: a slide is a
     /// speed burst the finite-differenced speed can't tell apart from a bhop, and the rig
-    /// has to TUCK for the whole slide, not just while it happens to be fast.
+    /// has to TUCK for the whole slide, not just while it happens to be fast. Also set
+    /// through a Slam's dive and a grind, which wear the same tuck.
     pub sliding: bool,
+    /// Riding a Grind-Line: every machine throws rail sparks under it.
+    pub grinding: bool,
+    /// The weapon-mounted flashlight is on (F, §13) — teammates see each other's beams.
+    pub light: bool,
 }
 
 /// Which hero an astronaut is, as an explicit wire code (`hero_code`). Replicated so every
@@ -118,6 +125,12 @@ pub struct NetItemVis {
     /// Widow's Ring's death-save recharge, whole seconds left (0 = ready) — the host ticks
     /// it, and a joiner's HUD shows it.
     pub widow_cd: u8,
+    /// Antipode Blink's recharge, whole seconds left (0 = charged) — host-ticked, for the
+    /// owner's HUD dial.
+    pub blink_cd: u8,
+    /// Enemies at this astronaut's antipode (capped at 255), the §4 HUD tell. Only counted
+    /// for a blink carrier: the far side is a crowd the joiner's stream never covers.
+    pub antipode: u8,
 }
 
 /// Laying a Comet Tail right now (carrying it and moving).
@@ -132,6 +145,12 @@ pub const ITEMVIS_TETHER_SPENT: u8 = 8;
 /// Guns jammed by The Overheat. The host counts the volleys; a joiner's cosmetic fire
 /// stops on this, so its screen jams when the real guns do.
 pub const ITEMVIS_JAMMED: u8 = 16;
+/// The Static is among the crowd at the antipode — the blink would land in it.
+pub const ITEMVIS_ANTIPODE_STATIC: u8 = 32;
+/// A boss stands at the antipode.
+pub const ITEMVIS_ANTIPODE_BOSS: u8 = 64;
+/// Boomerang Insurance is armed (it pays once per dip below its line).
+pub const ITEMVIS_INSURED: u8 = 128;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
@@ -423,6 +442,13 @@ pub enum HazardEvent {
     /// A Burrower went under: its crack decal spreads over `dir` for `dur` seconds, then it
     /// erupts (the eruption's own pop arrives as a Telegraph). §13's cracking-decal tell.
     Crack { dir: [f32; 3], dur: f32 },
+    // ---- appended (P06): movement techs, see `techs::TechFx` ----
+    /// `owner` landed a Slam at `dir`; `power` is the banked speed in base-run-speeds (the
+    /// ring's size and the burst follow from it on every machine, `techs::slam_reach`).
+    Slam { owner: u8, dir: [f32; 3], power: f32 },
+    /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
+    /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
+    Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -506,6 +532,12 @@ pub struct PlayerInputMsg {
     pub interact: bool,
     /// Jump is HELD (not just pressed) — Anti-Grav Boots hover while it is.
     pub jump_held: bool,
+    /// Slide is HELD — the Slam commits on a hold in the air.
+    pub slide_held: bool,
+    /// Antipode Blink pressed (edge).
+    pub blink: bool,
+    /// The flashlight is on (a state, re-sent every packet, so a dropped one can't strand it).
+    pub light: bool,
 }
 
 /// Host-side: which `PlayerId` we handed to each connected client entity.
@@ -673,6 +705,12 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 crate::items::log_item_fx
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
+                crate::techs::log_tech_fx
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )
@@ -1032,6 +1070,7 @@ fn adopt_my_item_vis(
 /// path is just late, and is left alone. Only the offset from the nearest point of the
 /// path is corrected — carried over to where we are now and closed exponentially — so a
 /// real divergence eases home without dragging a joiner backwards through its own lag.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_own_astronaut(
     time: Res<Time>,
     mine: Res<MyPlayerId>,
@@ -1039,8 +1078,13 @@ fn reconcile_own_astronaut(
     server_copy: Query<(&PlayerId, &NetTransform), Without<crate::player::Player>>,
     mut q: Query<&mut crate::player::Player, With<LocalPlayer>>,
     mut path: Local<std::collections::VecDeque<(f32, Vec3)>>,
+    // where the host's copy of us stood when it last moved, and when that was
+    mut last_copy: Local<Option<(Vec3, f32)>>,
 ) {
-    use crate::config::{NET_RECONCILE_DEADZONE, NET_RECONCILE_RATE, NET_RECONCILE_WINDOW_SECS};
+    use crate::config::{
+        NET_RECONCILE_DEADZONE, NET_RECONCILE_RATE, NET_RECONCILE_WINDOW_SECS, PLAYER_RUN_SPEED, REMOTE_SNAP_ARC,
+        SPEED_HARD_CAP,
+    };
     let dt = time.delta_secs();
     let (Some(my_id), Some(planet)) = (mine.0, planet) else { return };
     let Ok(mut p) = q.single_mut() else { return };
@@ -1053,6 +1097,30 @@ fn reconcile_own_astronaut(
         path.pop_front();
     }
     let Some((_, host)) = server_copy.iter().find(|(pid, _)| pid.0 == my_id) else { return };
+    // The host TELEPORTED its copy of us (an Antipode Blink, Boomerang Insurance, a Tether
+    // rewind): nothing walks that far between two looks. Easing would drag us across the
+    // planet — and a blink lands on the exact antipode, where there is no one great circle
+    // to ease along. Snap, as teammates' rigs do past REMOTE_SNAP_ARC; the camera glides.
+    // (The event that says why — `techs::TechFx::Blink`, the tether's death-save — follows
+    // on the hazard lane and turns our momentum with us.)
+    // A stalled link can deliver a long walk as one update, so the bar is the snap arc
+    // PLUS the farthest a doubled-speed build could have run since the copy last moved.
+    let jumped = match *last_copy {
+        Some((d, _)) if d == host.dir => false,
+        Some((d, t)) => {
+            let reach = REMOTE_SNAP_ARC + PLAYER_RUN_SPEED * SPEED_HARD_CAP * 2.0 * (now - t);
+            crate::sphere::arc_dist(d, host.dir, planet.radius) > reach
+        }
+        None => false,
+    };
+    if last_copy.is_none_or(|(d, _)| d != host.dir) {
+        *last_copy = Some((host.dir, now));
+    }
+    if jumped {
+        p.dir = host.dir;
+        path.clear();
+        return;
+    }
     let Some(nearest) = path
         .iter()
         .map(|(_, d)| *d)
@@ -1235,7 +1303,7 @@ fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<M
 /// CLIENT -> HOST. We send intent every frame rather than on-change: it's a handful of
 /// bytes on an unreliable channel, and a dropped "I'm still holding W" packet would
 /// otherwise read as a stutter-stop on the host.
-fn send_local_input(
+pub(crate) fn send_local_input(
     q: Query<&InputIntent, With<LocalPlayer>>,
     phase: Res<crate::run::RunPhase>,
     mut out: MessageWriter<PlayerInputMsg>,
@@ -1257,6 +1325,9 @@ fn send_local_input(
             slide: false,
             interact: false,
             jump_held: false,
+            slide_held: false,
+            blink: false,
+            light: intent.light,
         });
         return;
     }
@@ -1273,12 +1344,15 @@ fn send_local_input(
         slide: intent.slide,
         interact: intent.interact,
         jump_held: intent.jump_held,
+        slide_held: intent.slide_held,
+        blink: intent.blink,
+        light: intent.light,
     });
 }
 
 /// Dev harness: override the local intent with a slow circle-strafe. Runs after the
 /// keyboard gather, so it stands in for a human holding W and easing the stick over.
-fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
+pub(crate) fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
     let Ok((p, mut intent)) = q.single_mut() else { return };
     let (t, b) = crate::sphere::tangent_frame(p.dir);
     let a = time.elapsed_secs() * 0.35;
@@ -1528,8 +1602,11 @@ fn apply_remote_input(
                 intent.jump |= message.jump;
                 intent.slide |= message.slide;
                 intent.interact |= message.interact;
-                // a HELD state, not an edge: the latest packet is the truth
+                intent.blink |= message.blink;
+                // HELD states, not edges: the latest packet is the truth
                 intent.jump_held = message.jump_held;
+                intent.slide_held = message.slide_held;
+                intent.light = message.light;
             }
         }
     }
@@ -1715,13 +1792,15 @@ pub fn apply_cli_net(mut commands: Commands, channels: Res<RepliconChannels>) {
 /// (Solo runs this too and it's a couple of writes — harmless, and it means the host
 /// path is always exercised, so co-op can't silently rot.)
 fn push_net_transform(
-    mut q: Query<(&crate::player::Player, &mut NetTransform)>,
+    mut q: Query<(&crate::player::Player, &crate::techs::MoveTech, &InputIntent, &mut NetTransform)>,
 ) {
-    for (p, mut nt) in &mut q {
+    for (p, tech, intent, mut nt) in &mut q {
         nt.dir = p.dir;
         nt.height = p.height;
         nt.facing = p.facing;
-        nt.sliding = p.slide_timer > 0.0;
+        nt.sliding = p.slide_timer > 0.0 || tech.slam.is_some();
+        nt.grinding = tech.grind.is_some();
+        nt.light = intent.light;
     }
 }
 
@@ -2113,6 +2192,23 @@ fn reset_after_session(
 //        headless: --items new [--coop2] | --deathsave [--coop2]
 //        windowed: coop.sh … --dev --items orbitalyoyo,comettail,secondastronaut,littleblackhole
 //                  and compare the two sides' ITEMFX lines (a joiner's `wire=` counts events).
+//
+// 2g. MOVEMENT TECHS (P06, see techs.rs) — a joiner PREDICTS its own slides, slope-boost,
+//    Slam dives and Grind-Line rides from its own input (the rails are traced from the
+//    terrain, so both machines hold the same `GrindLines`), and the host runs the same
+//    physics on its copy from the same PlayerInputMsg (slide_held, blink and the light ride
+//    it now). What the techs DO to the world is the host's: the Slam's shockwave, the plow,
+//    every blink (keyed or Boomerang Insurance), the antipode read. A blink moves the host's
+//    copy of a joiner across the planet: `reconcile_own_astronaut` snaps instead of easing
+//    when the copy jumps further than anyone can run, and the TechFx::Blink event (hazard
+//    lane) turns the joiner's momentum the way the host turned it; the camera glides over
+//    the top (`player::glide_axis`). Teammates see grinds/tucks/flashlights on NetTransform,
+//    blink charge and antipode read on NetItemVis, Slam rings and blink columns as events.
+//    Also fixed here: a joiner's edge intents were OR-ed in and never cleared, so one jump
+//    press bounced its host-side body forever (`techs::consume_edge_intents`).
+//    Repro: headless `--techs [--coop2] [--planet …]`; windowed
+//        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
+//    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

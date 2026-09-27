@@ -438,6 +438,24 @@ pub fn spawn_stage(
         }
     }
 
+    // Grind-Lines (§4): the ridged crests' exposed spines, and the rail that shows them.
+    // Traced from the terrain alone — no draw from `rng` — so the layout stream above is
+    // untouched and every machine lays the same rails (CLAUDE.md rule 5).
+    let lines = grind_lines(planet, &colliders);
+    if !lines.spines.is_empty() {
+        commands.spawn((
+            Mesh3d(meshes.add(rail_mesh(planet, &lines))),
+            MeshMaterial3d(materials.add(StandardMaterial {
+                base_color: crate::techs::RAIL_COLOR,
+                unlit: true,
+                ..default()
+            })),
+            Transform::IDENTITY,
+            StageScoped,
+        ));
+    }
+    commands.insert_resource(lines);
+
     // Starfield
     let star_mesh = meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
     let star_mat = materials.add(StandardMaterial {
@@ -503,6 +521,85 @@ pub fn spawn_stage(
     ));
 
     PropColliders(colliders)
+}
+
+/// The stage's Grind-Lines: the terrain's crest spines, smoothed, and cut short of every
+/// solid prop — a rail never runs through a boulder, it stops before it.
+fn grind_lines(planet: &CurrentPlanet, colliders: &[PropCollider]) -> crate::techs::GrindLines {
+    use crate::config::{GRIND_MIN_LEN, GRIND_PROP_CLEARANCE, GRIND_STEP};
+    let min_pts = (GRIND_MIN_LEN / GRIND_STEP) as usize + 1;
+    let blocked = |d: Vec3| {
+        colliders.iter().any(|c| d.dot(c.dir) > ((c.radius + GRIND_PROP_CLEARANCE) / planet.radius).cos())
+    };
+    let mut out: Vec<Vec<Vec3>> = Vec::new();
+    for mut line in planet.terrain.ridge_spines(planet.radius) {
+        // two passes of a 3-point average: the crest trace's cross-section search leaves a
+        // few centimetres of zig-zag that a rail (and a rider's camera) would feel
+        for _ in 0..2 {
+            let prev = line.clone();
+            for i in 1..prev.len().saturating_sub(1) {
+                line[i] = (prev[i - 1] + prev[i] * 2.0 + prev[i + 1]).normalize();
+            }
+        }
+        let mut run: Vec<Vec3> = Vec::new();
+        for d in line {
+            if blocked(d) {
+                if run.len() >= min_pts {
+                    out.push(std::mem::take(&mut run));
+                }
+                run.clear();
+            } else {
+                run.push(d);
+            }
+        }
+        if run.len() >= min_pts {
+            out.push(run);
+        }
+    }
+    crate::techs::GrindLines::new(out, planet.radius)
+}
+
+/// The rails, as ONE mesh for the whole stage: a thin glowing bar along every spine at
+/// GRIND_RAIL_LIFT over the crest, on a "vertebra" fin every few metres so it reads as the
+/// ridge's own exposed spine rather than a pipe laid on the ground, and a knob at each end
+/// (where a rider comes off).
+fn rail_mesh(planet: &CurrentPlanet, lines: &crate::techs::GrindLines) -> Mesh {
+    use crate::config::GRIND_RAIL_LIFT;
+    use crate::meshkit::MeshData;
+    let fin = Color::srgb(0.32, 0.5, 0.56);
+    let rail = |d: Vec3| planet.surface_point(d) + d * GRIND_RAIL_LIFT;
+    let mut m = MeshData::new();
+    for sp in &lines.spines {
+        for (i, w) in sp.pts.windows(2).enumerate() {
+            let (a, b) = (rail(w[0]), rail(w[1]));
+            let len = (b - a).length();
+            if len < 1e-4 {
+                continue;
+            }
+            let run = (b - a) / len;
+            m.add_cylinder(
+                0.075,
+                len + 0.03,
+                6,
+                Transform::from_translation((a + b) * 0.5).with_rotation(Quat::from_rotation_arc(Vec3::Y, run)),
+                Color::WHITE,
+            );
+            if i % 2 == 0 {
+                let up = w[0];
+                let h = GRIND_RAIL_LIFT + 0.35;
+                m.add_box(
+                    Vec3::new(0.07, h, 0.34),
+                    Transform::from_translation(planet.surface_point(up) + up * (h * 0.5 - 0.3))
+                        .with_rotation(sphere::frame_quat(up, run)),
+                    fin,
+                );
+            }
+        }
+        for end in [sp.pts[0], sp.pts[sp.pts.len() - 1]] {
+            m.add_sphere(0.16, 1, Transform::from_translation(rail(end)), Color::WHITE);
+        }
+    }
+    m.build()
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {

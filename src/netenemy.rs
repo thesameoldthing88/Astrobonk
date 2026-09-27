@@ -491,9 +491,12 @@ fn stream_hazards(
     // §7 item one-shots (a yo-yo throw, a singularity, an ignition, a death-save): the item
     // systems already say them as local messages, so they ride this lane as-is
     mut item_fx: MessageReader<crate::items::ItemFxMsg>,
+    // §4 movement-tech one-shots (a Slam landing, a blink), the same way
+    mut tech_fx: MessageReader<crate::techs::TechFxMsg>,
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
     use crate::items::ItemFx;
+    use crate::techs::TechFx;
     let mut events: Vec<HazardEvent> = Vec::new();
     for m in item_fx.read().filter(|m| !m.from_wire) {
         events.push(match m.fx {
@@ -501,6 +504,18 @@ fn stream_hazards(
             ItemFx::Singularity { dir, radius, dur } => HazardEvent::Singularity { dir: dir.to_array(), radius, dur },
             ItemFx::Ignite { owner } => HazardEvent::TrailIgnite { owner },
             ItemFx::DeathSave { owner, save, dir } => HazardEvent::DeathSave { owner, kind: save.code(), dir: dir.to_array() },
+        });
+    }
+    for m in tech_fx.read().filter(|m| !m.from_wire) {
+        events.push(match m.fx {
+            TechFx::Slam { owner, dir, power } => HazardEvent::Slam { owner, dir: dir.to_array(), power },
+            TechFx::Blink { owner, from, to, axis, insured } => HazardEvent::Blink {
+                owner,
+                from: from.to_array(),
+                to: to.to_array(),
+                axis: axis.to_array(),
+                insured,
+            },
         });
     }
     // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
@@ -564,8 +579,10 @@ fn receive_hazards(
     index: Res<NetEnemyIndex>,
     lines: Query<(Entity, &AimLine)>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
+    mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
 ) {
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
+    use crate::techs::{TechFx, TechFxMsg};
     let (Some(assets), Some(planet)) = (assets, planet) else { return };
     for m in msgs.read() {
         for ev in &m.events {
@@ -582,6 +599,22 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 item_fx.write(ItemFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and so do the movement techs', for `techs::tech_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Slam { owner, dir, power } => Some(TechFx::Slam { owner, dir: Vec3::from(dir), power }),
+                HazardEvent::Blink { owner, from, to, axis, insured } => Some(TechFx::Blink {
+                    owner,
+                    from: Vec3::from(from),
+                    to: Vec3::from(to),
+                    axis: Vec3::from(axis),
+                    insured,
+                }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                tech_fx.write(TechFxMsg { fx, from_wire: true });
                 continue;
             }
             match *ev {
@@ -648,11 +681,13 @@ fn receive_hazards(
                     let crack = crate::enemies::spawn_crack_decal(&mut commands, &assets, &planet, Vec3::from(dir), dur);
                     commands.entity(crack).insert(NetHazard);
                 }
-                // handled above, as ItemFxMsg
+                // handled above, as ItemFxMsg / TechFxMsg
                 HazardEvent::ItemOrbit { .. }
                 | HazardEvent::Singularity { .. }
                 | HazardEvent::TrailIgnite { .. }
-                | HazardEvent::DeathSave { .. } => {}
+                | HazardEvent::DeathSave { .. }
+                | HazardEvent::Slam { .. }
+                | HazardEvent::Blink { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
