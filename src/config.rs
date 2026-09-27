@@ -512,13 +512,13 @@ pub const SWORDYO_CORD_WIDTH: f32 = 0.9;
 /// saturation (shadows and midtones only — the gold ring and sparks keep their colour)
 /// and comes back over FANFARE_DESAT_SECS.
 pub const FANFARE_RING_RADIUS: f32 = 16.0;
-pub const FANFARE_RING_SECS: f32 = 0.9;
+pub const FANFARE_RING_SECS: f32 = 5.0;
 pub const FANFARE_SHARDS: usize = 12;
 pub const FANFARE_SHARD_RADIUS: f32 = 3.2;
-pub const FANFARE_SHARD_SECS: f32 = 0.34;
-pub const FANFARE_POP_SECS: f32 = 0.3;
+pub const FANFARE_SHARD_SECS: f32 = 2.5;
+pub const FANFARE_POP_SECS: f32 = 1.5;
 pub const FANFARE_DESAT: f32 = 0.12;
-pub const FANFARE_DESAT_SECS: f32 = 1.1;
+pub const FANFARE_DESAT_SECS: f32 = 8.0;
 
 // ── Hitstop canon (GDD §13) and the screenshake budget ───────────────────────
 /// Only YOUR killing blows stop time: a crowd kill 50 ms, an elite (or miniboss) 90, the
