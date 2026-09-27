@@ -162,9 +162,16 @@ pub fn spawn_player(
             carried.unwrap_or_else(|| PlayerState::new(character, save)),
             PlayerId(id),
             InputIntent::default(),
-            crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0 },
-            crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
-            bevy_replicon::prelude::Replicated,
+            RigHero(character),
+            crate::comet::CometState::default(),
+            // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
+            (
+                crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false },
+                crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
+                crate::net::NetHero(crate::net::hero_code(character)),
+                crate::net::NetComet::default(),
+                bevy_replicon::prelude::Replicated,
+            ),
             Transform::from_translation(pos),
             Visibility::default(),
             StageScoped,
@@ -172,6 +179,31 @@ pub fn spawn_player(
         .insert_if(LocalPlayer, || is_local)
         .id();
     build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor);
+}
+
+/// Which hero's suit an astronaut's rig was built in. Compared against the sheet by
+/// `refit_astronaut_rigs`, because on a co-op host a peer is seated before its first build
+/// heartbeat says which hero it plays.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub struct RigHero(pub crate::content::characters::AstronautKind);
+
+/// Rebuild an astronaut's rig in its hero's suit whenever the sheet's hero and the rig
+/// disagree. Every child of an astronaut is rig, so the swap is clear-and-rebuild.
+pub fn refit_astronaut_rigs(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(Entity, &PlayerState, &mut RigHero)>,
+) {
+    for (e, ps, mut rig) in &mut q {
+        if rig.0 == ps.character {
+            continue;
+        }
+        rig.0 = ps.character;
+        let def = ps.character.def();
+        commands.entity(e).despawn_related::<Children>();
+        build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor);
+    }
 }
 
 /// Build the astronaut's VISUAL rig as children of `root`: torso, helmet, four animated
