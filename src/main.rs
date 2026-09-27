@@ -1,4 +1,5 @@
 mod audio;
+mod bestiary;
 mod combat;
 mod comet;
 mod config;
@@ -130,6 +131,9 @@ fn main() {
         .init_resource::<techs::GrindLines>()
         .init_resource::<techs::TechTelemetry>()
         .init_resource::<player::FlashlightSwitch>()
+        .init_resource::<bestiary::BestiaryTelemetry>()
+        .add_message::<bestiary::BestiaryFxMsg>()
+        .add_message::<bestiary::RefundMsg>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
@@ -148,6 +152,7 @@ fn main() {
                 pickups::setup_pickup_assets,
                 items::setup_item_assets,
                 techs::setup_tech_assets,
+                bestiary::setup_bestiary_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -277,6 +282,62 @@ fn main() {
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ------------- §9 new enemies (P08, bestiary.rs): the host moves, fires and resolves
+        // the new kinds for every astronaut; every machine poses and dresses them from their
+        // EnemyVis (a client's comes on the enemy-state lane) and draws their one-shots
+        .add_systems(
+            Update,
+            (
+                bestiary::rollo_roll,
+                bestiary::trencher_update,
+                bestiary::skimmer_update,
+                bestiary::aegis_turn,
+                bestiary::tick_latch,
+                bestiary::tracker_upkeep,
+                bestiary::mimic_flee,
+                bestiary::prime_attack,
+            )
+                .after(enemies::enemy_move)
+                .before(bestiary::bestiary_pose)
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            bestiary::mimic_spring
+                .after(interact::interact_system)
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            bestiary::pay_refunds
+                .after(combat::apply_hits)
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            (
+                bestiary::bestiary_pose.after(enemies::enemy_move).after(netenemy::drive_proxies),
+                bestiary::trencher_ridges.after(bestiary::bestiary_pose),
+                bestiary::skimmer_shadows.after(bestiary::bestiary_pose),
+                bestiary::skimmer_whine,
+                bestiary::mimic_tells,
+                bestiary::tracker_beacons,
+                bestiary::reap_owned_telegraphs,
+            )
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // one-shots are presented behind a card panel too (a joiner's launch must land)
+        .add_systems(Update, bestiary::bestiary_fx_presentation.run_if(in_state(AppState::InRun)))
+        .add_systems(
+            Update,
+            bestiary::dev_spawn_enemies
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--enemies")),
         )
         .add_systems(
             Update,

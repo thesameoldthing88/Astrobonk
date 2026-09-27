@@ -172,6 +172,23 @@ pub fn build_sfx_bank(mut commands: Commands, mut sources: ResMut<Assets<AudioSo
     tone(&mut b, Wave::Noise, 0.0, 0.0, 0.015, 0.15, 0.0);
     add(Sfx::Flashlight, std::mem::take(&mut b));
 
+    // Sunskimmer whine: a thin rising scream with a sour second voice — the dive coming
+    tone(&mut b, Wave::Saw, 700.0, 1900.0, 0.9, 0.16, 0.0);
+    tone(&mut b, Wave::Sine, 1400.0, 3600.0, 0.9, 0.12, 0.0);
+    tone(&mut b, Wave::Square, 740.0, 1980.0, 0.8, 0.05, 0.08);
+    add(Sfx::Whine, std::mem::take(&mut b));
+
+    // Mimic chomp: a wooden snap, then a low gulp
+    tone(&mut b, Wave::Noise, 0.0, 0.0, 0.05, 0.45, 0.0);
+    tone(&mut b, Wave::Square, 260.0, 140.0, 0.08, 0.35, 0.0);
+    tone(&mut b, Wave::Sine, 150.0, 60.0, 0.25, 0.4, 0.09);
+    add(Sfx::Chomp, std::mem::take(&mut b));
+
+    // Beacon Tick tag: two quick pings, like a tracker locking on
+    tone(&mut b, Wave::Sine, 1650.0, 1650.0, 0.06, 0.3, 0.0);
+    tone(&mut b, Wave::Sine, 2200.0, 2200.0, 0.08, 0.3, 0.1);
+    add(Sfx::Tag, std::mem::take(&mut b));
+
     commands.insert_resource(SfxBank { map });
 }
 
@@ -198,6 +215,8 @@ pub fn play_sfx(
         let min_gap = match msg.0 {
             Sfx::Hit => 0.05,
             Sfx::Pickup | Sfx::Coin => 0.04,
+            // one whine at a time reads; a flock of them is noise
+            Sfx::Whine => 0.3,
             _ => 0.02,
         };
         if let Some(last) = throttle.last.get(&msg.0) {
