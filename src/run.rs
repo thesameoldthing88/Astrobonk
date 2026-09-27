@@ -101,6 +101,36 @@ pub enum RunResult {
     Abandoned,
 }
 
+/// What banking needs from the local astronaut's sheet, kept on `RunState` so it outlives
+/// the astronaut (see `RunState::final_sheet`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalSheet {
+    pub level: u32,
+    pub gold: u64,
+    pub cursed_rocks: u32,
+    pub silver_gain: f32,
+    pub static_silver: f32,
+}
+
+impl Default for FinalSheet {
+    /// A fresh level-1 sheet: what a run that never spawned an astronaut banks.
+    fn default() -> Self {
+        Self { level: 1, gold: 0, cursed_rocks: 0, silver_gain: 1.0, static_silver: 1.0 }
+    }
+}
+
+impl FinalSheet {
+    pub fn of(ps: &PlayerState) -> Self {
+        Self {
+            level: ps.level,
+            gold: ps.gold,
+            cursed_rocks: ps.item_count(ItemKind::CursedMoonRock),
+            silver_gain: ps.stats.silver_gain,
+            static_silver: ps.stats.static_silver,
+        }
+    }
+}
+
 /// Run-GLOBAL state: the clock, the world chain, boss flags, shared counters.
 /// Everything here is shared by every player in the run (co-op ready).
 #[derive(Resource, Clone, Debug)]
@@ -134,6 +164,14 @@ pub struct RunState {
     /// Seconds spent in The Static across ALL stages (`static_timer` restarts per stage) —
     /// the §10 formula's `Static_overtime_seconds`.
     pub static_secs_total: f32,
+    /// The longest single stretch of The Static survived this run, on ANY stage — what the
+    /// SurviveStatic2Min quest banks (`static_timer` restarts per stage, so banking it
+    /// alone only ever counted the final stage; L27).
+    pub static_secs_peak: f32,
+    /// The local astronaut's end-of-run numbers, copied every frame of the run by
+    /// `director::snapshot_local_sheet`. Results bank from here: the astronaut is
+    /// StageScoped, so by OnEnter(Results) it has already been despawned (H1).
+    pub final_sheet: FinalSheet,
     /// Of `silver_run`, the Silver The Static's ghosts dropped (`pickups::StaticSilver`) —
     /// what Tome of Static multiplies at banking. HOST state: only the host banks.
     pub static_silver_found: u64,
@@ -283,6 +321,8 @@ impl RunState {
             evolves: 0,
             boss_kills: 0,
             static_secs_total: 0.0,
+            static_secs_peak: 0.0,
+            final_sheet: FinalSheet::default(),
             static_silver_found: 0,
             reward_chest: None,
             result: None,

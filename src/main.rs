@@ -462,6 +462,8 @@ fn main() {
                 // check over its own sheet and fires while the host plays on.
                 director::downed_watch.run_if(net::is_simulating),
                 director::death_watch.run_if(net::is_simulating),
+                // what Results banks, kept on RunState: the astronaut is gone by then (H1)
+                director::snapshot_local_sheet,
             )
                 .run_if(in_state(AppState::InRun)),
         )

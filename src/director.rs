@@ -3,7 +3,6 @@
 
 use crate::config::*;
 use crate::content::enemies::BossKind;
-use crate::content::items::ItemKind;
 use crate::content::planets::PlanetKind;
 use crate::content::tomes::TomeKind;
 use crate::enemies::{self, Director, EnemyAssets, MinibossSlot};
@@ -80,6 +79,7 @@ pub fn run_clock(
         run.static_timer += dt;
         // every overtime second is paid at banking (§10 Static_overtime_seconds)
         run.static_secs_total += dt;
+        run.static_secs_peak = run.static_secs_peak.max(run.static_timer);
     } else {
         run.timer -= dt;
     }
@@ -308,16 +308,28 @@ pub fn death_watch(
     }
 }
 
+/// Keep `RunState::final_sheet` current with the local astronaut, every frame of the run
+/// on every exit path (victory, wipe, ABANDON), so Results can bank it after the stage —
+/// astronaut included — is gone (H1: Results showed LEVEL 1 / GOLD 0 and `best_level`
+/// never rose, because `bank_results` looked for an astronaut `despawn_stage` had removed).
+pub fn snapshot_local_sheet(mut run: ResMut<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>) {
+    let Ok(ps) = q_ps.single() else { return };
+    let now = crate::run::FinalSheet::of(ps);
+    if run.final_sheet != now {
+        run.final_sheet = now;
+    }
+}
+
 /// Bank the run into the save when Results opens.
 pub fn bank_results(
     mut commands: Commands,
-    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     mut run: ResMut<RunState>,
     mut save: ResMut<MetaSave>,
     mut phase: ResMut<RunPhase>,
 ) {
     let victory = run.result == Some(RunResult::Victory);
-    let (p_level, p_gold) = q_ps.single().map(|p| (p.level, p.gold)).unwrap_or((1, 0));
+    let sheet = run.final_sheet;
+    let (p_level, p_gold) = (sheet.level, sheet.gold);
 
     // meta counters
     save.counters.kills += run.kills;
@@ -327,7 +339,7 @@ pub fn bank_results(
     save.counters.gold += run.gold_collected;
     save.counters.evolves += run.evolves;
     save.counters.best_level = save.counters.best_level.max(p_level);
-    save.counters.static_secs_best = save.counters.static_secs_best.max(run.static_timer);
+    save.counters.static_secs_best = save.counters.static_secs_best.max(run.static_secs_peak.max(run.static_timer));
     save.counters.runs_started += 1;
     if victory {
         save.counters.runs_won += 1;
@@ -335,11 +347,7 @@ pub fn bank_results(
 
     // silver payout: the §10 formula plus the Silver physically picked up this run
     let golden_tome = save.tome_rank_equipped(TomeKind::Golden);
-    let (cursed_rocks, silver_gain, static_silver) = q_ps
-        .single()
-        .map(|p| (p.item_count(ItemKind::CursedMoonRock), p.stats.silver_gain, p.stats.static_silver))
-        .unwrap_or((0, 1.0, 1.0));
-    let silver = silver_payout(&run, victory, golden_tome, cursed_rocks, silver_gain, static_silver);
+    let silver = silver_payout(&run, victory, golden_tome, sheet.cursed_rocks, sheet.silver_gain, sheet.static_silver);
     let payout = silver.total;
     save.silver += payout;
 

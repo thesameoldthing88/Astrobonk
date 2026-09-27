@@ -1935,7 +1935,8 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             crate::director::dev_miniboss_now
                 .run_if(crate::playing)
                 .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
-        );
+        )
+        .add_systems(Update, crate::director::snapshot_local_sheet);
 
     // enter InRun immediately
     app.insert_state(crate::AppState::InRun);
@@ -1990,6 +1991,18 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             .unwrap_or((0, 1.0, 1.0));
         crate::director::silver_payout(&run, false, golden, rocks, gain, static_silver)
     };
+    // H1: Results bank from `RunState::final_sheet` AFTER OnExit(InRun) has despawned the
+    // stage, astronaut included. Tear the stage down the same way and make sure what would
+    // be banked is still the live sheet, not a level-1 fallback.
+    {
+        use bevy::ecs::system::RunSystemOnce;
+        // (the snapshot's last in-run frame, so a gem banked on the final tick counts)
+        let _ = world.run_system_once(crate::director::snapshot_local_sheet);
+        let _ = world.run_system_once(crate::planet::despawn_stage);
+        world.flush();
+    }
+    let banked = world.resource::<RunState>().final_sheet;
+    let stale_bank = ps.as_ref().is_some_and(|p| banked.level != p.level || banked.gold != p.gold);
     let storm = world.resource::<crate::events_world::DustStorm>();
     let storm_state = format!("spawned={} active={}", storm.spawned_vis, storm.active);
 
@@ -2003,6 +2016,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     println!("silver={} [{}] chests_opened={} boss_kills={}", silver.total, lines.join(", "), run.chests_opened, run.boss_kills);
 
     let mut ok = true;
+    if stale_bank {
+        println!("FAIL: Results would bank level {} / gold {}, the run ended at level {p_level} / gold {p_gold} (H1)", banked.level, banked.gold);
+        ok = false;
+    }
     if silver.total == 0 && run.total_elapsed > SILVER_SURVIVAL_SECS_PER {
         println!("FAIL: the run banked zero Silver (§10: no run ever pays out zero)");
         ok = false;
