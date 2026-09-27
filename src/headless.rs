@@ -834,7 +834,8 @@ fn overflow_probe(
 ) {
     probe.ticks += 1;
     let Ok(me) = q_me.single() else { return };
-    let cap = crate::run::scaling::Scaling::for_run(&run, 1).live_cap;
+    // the party's cap, as `director_spawn` sizes it (co-op grows it)
+    let cap = crate::run::scaling::Scaling::for_run(&run, q_ps.iter().count()).live_cap;
     let mut rng = rand::thread_rng();
     let t = probe.ticks;
     let crowd = q_crowd.iter().count();
@@ -1584,7 +1585,6 @@ fn tally_xp(mut grants: MessageReader<crate::net::GrantOut>, mut tally: ResMut<X
     }
 }
 
-/// Fail-fast sanity checks each tick.
 /// `--enemydist`: histogram how far the horde actually is from each astronaut, in
 /// great-circle metres. This is the number the co-op streaming bandwidth budget rests on —
 /// interest management is only a win if most of the horde is genuinely out of view.
@@ -1701,6 +1701,8 @@ fn balance_probe(
     *win = BalanceWindow::default();
 }
 
+/// Fail-fast sanity checks each tick (cap breach, non-finite state) and the periodic
+/// progress line.
 fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
@@ -2218,7 +2220,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // `--staticnow` winds the run into The Static within seconds, and while it is up no
     // kill drops XP (`pickups::kill_drops` pays its ghosts' Silver instead): the XP pipeline
     // is judged on the runs that walk a horde, not on this one.
-    let xp_run = !std::env::args().any(|a| a == "--staticnow");
+    // `--overflow` ends in The Static the same way, after burying the bot's horizon in a
+    // staged flood, so it is left out too.
+    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--overflow");
     if xp_run && run.kills > 50 && xp_grants == 0 && gems_left == 0 {
         println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
