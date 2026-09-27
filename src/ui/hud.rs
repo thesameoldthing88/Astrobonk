@@ -6,7 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
-use crate::config::{HURT_TINT_PEAK, HURT_TINT_PEAK_REDUCED, HURT_TINT_SECS};
+use crate::config::{EDGE_MARKER_OCCLUDER_INSET, HURT_TINT_PEAK, HURT_TINT_PEAK_REDUCED, HURT_TINT_SECS};
 use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
@@ -799,9 +799,13 @@ pub fn update_edge_markers(
     q_charge: Query<(&Transform, &crate::interact::ChargeShrine)>,
     dial: Query<(&ComputedNode, &Visibility), With<AntipodeDial>>,
     mut markers: Query<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<EdgeMarker>>,
+    planet: Option<Res<crate::planet::CurrentPlanet>>,
 ) {
     use crate::interact::InteractKind;
     let Ok((cam, cam_tf)) = camera.single() else { return };
+    // The planet hides what is over its limb even when it projects inside the viewport (a
+    // boss or teleporter 40-200 m ahead does) — that is the marker's main job (M22).
+    let eye = cam_tf.translation();
     let Some(size) = cam.logical_viewport_size() else { return };
     let center = size / 2.0;
     let margin = 34.0;
@@ -845,11 +849,17 @@ pub fn update_edge_markers(
     for (world, color, px) in targets.into_iter().take(24) {
         let Some((mut node, mut bg, mut border)) = it.next() else { break };
 
-        // on-screen and in front? then no marker needed
+        // on-screen, in front and not behind the planet? then no marker needed
         let mut visible_on_screen = false;
         if let Ok(v) = cam.world_to_viewport(cam_tf, world) {
             if v.x >= 0.0 && v.y >= 0.0 && v.x <= size.x && v.y <= size.y {
-                visible_on_screen = true;
+                // The planet as a ball at its mean radius — or lower, where the target stands
+                // in a crater, so the ground it stands on never hides it.
+                let hidden = planet.as_ref().is_some_and(|p| {
+                    let r = p.radius.min(p.surface(world.normalize_or_zero())) - EDGE_MARKER_OCCLUDER_INSET;
+                    segment_hits_sphere(eye, world, r)
+                });
+                visible_on_screen = !hidden;
             }
         }
         if visible_on_screen {
@@ -895,6 +905,14 @@ pub fn update_edge_markers(
         node.top = Val::Px(-100.0);
         bg.0 = Color::NONE;
     }
+}
+
+/// The camera-to-target segment passes through the ball of radius `r` about the planet's
+/// centre (the origin).
+fn segment_hits_sphere(a: Vec3, b: Vec3, r: f32) -> bool {
+    let ab = b - a;
+    let t = (-a.dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+    (a + ab * t).length_squared() < r * r
 }
 
 /// Fade the dust haze in/out based on whether the player is inside the Mars storm.

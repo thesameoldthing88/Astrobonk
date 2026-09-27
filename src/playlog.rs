@@ -93,7 +93,8 @@ fn health_line(
     counts: (
         Query<(), With<crate::player::Player>>,
         Query<(), With<crate::netenemy::NetEnemy>>,
-        Query<(), With<crate::enemies::Enemy>>,
+        // the crowd, as the cap counts it: no pots, no bosses (L16)
+        Query<(), (With<crate::enemies::Enemy>, Without<crate::interact::Pot>, Without<crate::enemies::Boss>)>,
         Query<&crate::run::PlayerState, With<crate::player::LocalPlayer>>,
     ),
     run: Option<Res<crate::run::RunState>>,

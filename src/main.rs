@@ -58,7 +58,15 @@ pub fn playing(phase: Res<run::RunPhase>) -> bool {
 /// `--dev` is passed with it, so a shipped binary can't be talked into it (CLAUDE.md rule
 /// 10). P28 routes the older harness flags (`--bossnow`, `--stagenow`, …) through here too.
 pub fn dev_flag(name: &str) -> bool {
-    std::env::args().any(|a| a == "--dev") && std::env::args().any(|a| a == name)
+    dev_mode() && std::env::args().any(|a| a == name)
+}
+
+/// `--dev` was passed: the dev KEYS (B summons the stage boss, T replays the tutorial) and
+/// the `dev_flag` harness flags are live. Read once — it is a run condition, checked every
+/// frame.
+pub fn dev_mode() -> bool {
+    static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEV.get_or_init(|| std::env::args().any(|a| a == "--dev"))
 }
 
 fn main() {
@@ -139,6 +147,7 @@ fn main() {
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
+        .add_message::<messages::SlowMsg>()
         .add_message::<messages::PlayerHitMsg>()
         .add_message::<messages::KillMsg>()
         .add_message::<messages::NumberMsg>()
@@ -324,7 +333,8 @@ fn main() {
                 // adopts them from RunSnapMsg instead of running a second, drifting copy.
                 director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
-                enemies::debug_spawn_boss.run_if(net::is_simulating),
+                // M14: a dev key, not a shipped one (B is also the level-up Banish key)
+                enemies::debug_spawn_boss.run_if(net::is_simulating).run_if(dev_mode),
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
@@ -461,7 +471,8 @@ fn main() {
                 pickups::kill_drops.run_if(net::is_simulating),
                 combat::fader_update,
                 enemies::enemy_flash,
-                player::player_physics,
+                // after this frame's jump/slide presses are applied, never before (L3)
+                player::player_physics.after(player::player_input),
                 player::refit_astronaut_rigs,
                 player::animate_player,
                 // Regen, i-frames, shield recharge and powerup decay are all host-owned
@@ -477,6 +488,8 @@ fn main() {
                 // check over its own sheet and fires while the host plays on.
                 director::downed_watch.run_if(net::is_simulating),
                 director::death_watch.run_if(net::is_simulating),
+                // what Results banks, kept on RunState: the astronaut is gone by then (H1)
+                director::snapshot_local_sheet,
             )
                 .run_if(in_state(AppState::InRun)),
         )
@@ -724,7 +737,12 @@ fn enter_run(
     mut sync: ResMut<net::RunSync>,
     mine: Res<net::MyPlayerId>,
     mut storm: ResMut<events_world::DustStorm>,
+    mut banners: MessageWriter<messages::BannerMsg>,
 ) {
+    // M20: the host's address, where it will be read — its own HUD, as the run opens
+    if *role == net::NetRole::Host {
+        banners.write(messages::BannerMsg(format!("HOSTING: TEAMMATES JOIN AT {}", net::local_ip())));
+    }
     *comet_res = comet::Comet::default();
     *storm = events_world::DustStorm::default();
     // first-run onboarding, only for a brand-new player on a normal run
@@ -743,7 +761,6 @@ fn enter_run(
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
         &mut commands,
@@ -754,8 +771,10 @@ fn enter_run(
         &run::PlayerState::new(run_state.character, &save),
         &save,
         &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();

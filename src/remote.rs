@@ -113,7 +113,8 @@ fn spawn_remote_rigs(
         ));
         // No StageScoped: this entity belongs to the server. Letting despawn_stage reap it
         // would pull a replicated entity out from under replicon.
-        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor);
+        // a teammate's flashlight lights the ground but casts no shadow (L9)
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
         info!("NET remote visual: built rig for player {}", pid.0);
     }
 }
@@ -135,7 +136,8 @@ fn refit_remote_rigs(
         r.hero = want;
         let def = want.def();
         commands.entity(e).despawn_related::<Children>();
-        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor);
+        // a teammate's flashlight lights the ground but casts no shadow (L9)
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
         info!("NET remote visual: re-suited a teammate as {}", def.name);
     }
 }

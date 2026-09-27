@@ -5,6 +5,10 @@
 //! Vertex colors are a *multiplier* over the material's base color: pass `Color::WHITE`
 //! for a body part (shows the material color fully) and a darker shade for accents
 //! (visors, mouths, undersides) so each kind keeps one readable signal color + detail.
+//!
+//! Every shape is wound counter-clockwise seen from outside — Bevy's front face — so under
+//! default back-face culling the NEAR walls draw, lit by their own normals, and an inverted
+//! hull (front faces culled) shows the far ones. `winding_self_check` pins it.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
@@ -50,9 +54,10 @@ impl MeshData {
             (Vec3::NEG_Z, [Vec3::new(hx, -hy, -hz), Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, hy, -hz), Vec3::new(hx, hy, -hz)]),
         ];
         for (n, v) in faces {
-            // the ±Z quads above are listed counter-clockwise seen from outside, the ±X/±Y
-            // ones clockwise — wind each so its front face is its outside (KNOWN_ISSUES M12)
-            let tris = if n.z != 0.0 { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] };
+            // wind each quad so it faces out along its normal, whichever way the table
+            // lists its corners (the ±X/±Y rows run clockwise seen from outside)
+            let ccw = (v[1] - v[0]).cross(v[2] - v[0]).dot(n) > 0.0;
+            let tris = if ccw { [0, 1, 2, 0, 2, 3] } else { [0, 2, 1, 0, 3, 2] };
             self.push(&v, &[n; 4], &tris, tf, color);
         }
     }
@@ -98,6 +103,8 @@ impl MeshData {
             let _ = b;
         }
         // caps
+        // the ring runs counter-clockwise seen from +Y, so the top cap keeps its order and
+        // the bottom one (seen from -Y) reverses it
         for (yy, ny, flip) in [(hy, Vec3::Y, false), (-hy, Vec3::NEG_Y, true)] {
             let center = verts.len() as u32;
             verts.push(Vec3::new(0.0, yy, 0.0));
@@ -165,15 +172,6 @@ impl MeshData {
         self.add_sphere(r, 1, tf.with_translation(tf.translation - up), color);
     }
 
-    /// Every shape helper winds counter-clockwise seen from outside — Bevy's front face —
-    /// since KNOWN_ISSUES M12 was fixed (they used to wind clockwise, so back-face culling
-    /// showed a model's far walls, lit from behind; the toon cel bands made that glaring).
-    /// Kept as the name the §13 inverted-hull outlines were written against: those rely on
-    /// WHICH faces get culled, and now get the same CCW mesh as `build`.
-    pub fn build_ccw(self) -> Mesh {
-        self.build()
-    }
-
     pub fn build(self) -> Mesh {
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.pos);
@@ -235,27 +233,32 @@ pub fn icosphere(subdiv: u32) -> (Vec<Vec3>, Vec<u32>) {
     (verts, faces.into_iter().flatten().collect())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// KNOWN_ISSUES M12: every helper's triangles must face the way their normals do
-    /// (counter-clockwise seen from outside), or back-face culling shows the far walls.
-    #[test]
-    fn every_shape_winds_outward() {
-        let tf = Transform::from_xyz(0.3, -0.2, 0.1).with_rotation(Quat::from_rotation_z(0.4));
+/// Headless self-check (M12): every triangle of every shape faces the way its normals say,
+/// under an arbitrary rotation. The ±X/±Y box faces, cylinders and cones used to be wound
+/// clockwise, so back-face culling drew their far walls (lit from behind) and an inverted-
+/// hull outline built from them culled the wrong side.
+pub fn winding_self_check() -> Result<(), String> {
+    let tf = Transform::from_translation(Vec3::new(0.3, -1.2, 2.0))
+        .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.7, -1.1, 0.4));
+    let shapes: [(&str, fn(&mut MeshData, Transform)); 6] = [
+        ("box", |m, tf| m.add_box(Vec3::new(0.8, 1.3, 0.5), tf, Color::WHITE)),
+        ("cylinder", |m, tf| m.add_cylinder(0.4, 1.1, 9, tf, Color::WHITE)),
+        ("cone", |m, tf| m.add_cone(0.5, 0.9, 7, tf, Color::WHITE)),
+        ("sphere", |m, tf| m.add_sphere(0.6, 1, tf, Color::WHITE)),
+        ("ellipsoid", |m, tf| m.add_ellipsoid(Vec3::new(0.7, 0.3, 0.5), 1, tf, Color::WHITE)),
+        ("capsule", |m, tf| m.add_capsule(0.3, 0.8, tf, Color::WHITE)),
+    ];
+    for (name, add) in shapes {
         let mut m = MeshData::new();
-        m.add_box(Vec3::new(1.0, 2.0, 0.5), tf, Color::WHITE);
-        m.add_sphere(0.7, 1, tf, Color::WHITE);
-        m.add_ellipsoid(Vec3::new(1.0, 0.5, 0.8), 1, tf, Color::WHITE);
-        m.add_cylinder(0.4, 1.2, 8, tf, Color::WHITE);
-        m.add_cone(0.5, 1.0, 6, tf, Color::WHITE);
-        m.add_capsule(0.3, 0.8, tf, Color::WHITE);
+        add(&mut m, tf);
         for tri in m.idx.chunks(3) {
-            let p = |i: u32| Vec3::from(m.pos[i as usize]);
-            let face = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
-            let n = Vec3::from(m.nrm[tri[0] as usize]) + Vec3::from(m.nrm[tri[1] as usize]) + Vec3::from(m.nrm[tri[2] as usize]);
-            assert!(face.dot(n) > 0.0, "triangle {tri:?} winds against its normals");
+            let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| Vec3::from_array(m.pos[i as usize]));
+            let face = (b - a).cross(c - a);
+            let normal: Vec3 = [tri[0], tri[1], tri[2]].iter().map(|i| Vec3::from_array(m.nrm[*i as usize])).sum();
+            if face.length_squared() > 1e-12 && face.dot(normal) <= 0.0 {
+                return Err(format!("meshkit {name}: a triangle is wound clockwise seen from outside"));
+            }
         }
     }
+    Ok(())
 }

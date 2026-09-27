@@ -1057,7 +1057,7 @@ This section states the rules exactly as the code applies them. Design intent li
 
 ### 11.2 THE STATIC
 
-When the timer reaches 0, `static_active` becomes true and `run_clock` thereafter only advances `static_timer`, `elapsed` and `total_elapsed` and returns early (`src/director.rs:55-59`). Consequences: no further marks, and **a boss killed during the Static never opens the teleporter** (the teleporter check sits after the early return). The spawner emits only `Ghost` enemies at `10 + 0.15·static_timer` per second (times party scale); ghosts give no XP and drop 1 silver half the time (`src/pickups.rs:329-333`). The music detunes (section 17). `counters.static_secs_best` banks the longest Static of the **last** stage only (`src/director.rs:290`).
+When the timer reaches 0, `static_active` becomes true and `run_clock` thereafter only advances `static_timer`, `elapsed` and `total_elapsed` and returns early (`src/director.rs:55-59`). Consequences: no further marks, and **a boss killed during the Static never opens the teleporter** (the teleporter check sits after the early return). The spawner emits only `Ghost` enemies at `10 + 0.15·static_timer` per second (times party scale); ghosts give no XP and drop 1 silver half the time (`src/pickups.rs:329-333`). The music detunes (section 17). `counters.static_secs_best` banks the longest single Static stretch of the run, on any stage (`RunState::static_secs_peak`, P30; it used to bank the last stage only).
 
 ### 11.3 The spawn director
 
@@ -1071,9 +1071,9 @@ rate     = (1 + 2.1 · elapsed/60) · (1 + difficulty) · P                  nor
 spawn_bank += rate · dt ; every 0.25 s spawn floor(spawn_bank), limited to room = floor(1200·P) - live Enemy count
 ```
 
-- The cap counts every `Enemy`, so pots (60 on the Moon) and bosses use cap slots. Overflow is discarded, not banked.
+- **Superseded by P01/P30** (the formulas above are the pre-P01 ones; `run::scaling` holds the §3 model): the cap counts the crowd only (no pots, no bosses). At the cap the overflow valve (GDD §9) dissolves crowd enemies more than `STATIC_RECYCLE_ARC` from every astronaut into The Static, farthest first, and spawns the budget over the players' horizon; what still does not fit is banked per stage in `Director::static_backlog` and drains as extra ghosts once The Static rises. `--overflow` stages it headlessly.
 - Each spawn round-robins over the anchors, picks a uniform heading, and places the enemy 42-58 m of arc out (over the horizon). Burrowers instead appear 9-16 m away.
-- The kind is uniform over `EnemyKind::mix(elapsed)` (`src/content/enemies.rs:155-167`):
+- The kind is uniform over `EnemyKind::mix(..)` (`src/content/enemies.rs`). Since P30 its clock is `run::scaling::mix_secs` (the 10:00 countdown position plus 60 s per chain depth), not the per-stage `elapsed`, so a chained world no longer restarts at Shamblers:
 
 | `elapsed` (s) | Mix |
 |---|---|
