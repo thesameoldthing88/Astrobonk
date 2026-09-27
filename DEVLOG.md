@@ -1,5 +1,40 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — Wave 1: P01 Core rules conformance + P02 Co-op client parity
+- **P01:** new `run::scaling` is the one place enemy scaling is worked out (GDD §3 HP/DMG/spawn/
+  elite over chain-wide `t`, depth `d`, planet threat `T`, Difficulty `Δ`; spawn rate follows the
+  §3 run-arc beats and "breathes" around bosses). Choice economy: 2 free refreshes then
+  15·1.5^n Gold (Fortuna always free), Skip pays XP + Gold, 3 Banish charges. Evolution cap 1
+  (`evo_cap()` hook for Tome of Ascension). Guaranteed MINIBOSS CACHE after miniboss #1 (free
+  pick of 3 items, replicated via `RunSnapMsg.reward_chest`). §10 Silver payout with an itemised
+  results breakdown. Fixed never-incremented chest/evolve counters (Chests10 / EvolveWeapon
+  quests were uncompletable). Pause screen shows threat + economy.
+- **P02:** joiners get parity: per-astronaut Comet Combo (`NetComet`), Mars dust storm on clients
+  (`InStorm` hides a peer from ranged enemies), Anubot beam + Beamer aim lines drawn on clients,
+  teammates wear their own hero (`NetHero`, hero rides the connect token). Sessions outlive runs
+  (`RunOverMsg`, `run_gen`), clean leave/end-session paths with readable reasons, soft client
+  reconciliation, and fixes for the HOST CO-OP menu crash and the `--stagenow` co-op insert panic.
+- **Integration:** conflicts in `enemies.rs` (imports), `headless.rs` (P01 `balance_probe` + P02
+  `tally_xp`; P02's per-link XP-pipeline check kept, it already covers the fast-boss flake P01
+  skipped) and `net.rs` (both added `RunSnapMsg` fields). Both packages had bumped `PROTOCOL_ID`
+  to `0xA570B0_3` independently, so it is now `0xA570B0_4`. Cross-package fix: windowed
+  `--bossnow` (P02) now also winds `total_elapsed`, which P01's scaling reads, so the boss
+  arrives with the late-game horde at late-game HP as `--fast-boss`/`--minibossnow` already do.
+- **Verified:** build clean (33 warnings, all pre-existing). Smoke matrix 6/6 PASS, plain and with
+  `--choices`; every new P01/P02 headless flag passes (RULES OK, CHOICES, miniboss cache on
+  moon/darkmoon/coop2, COMETPEER, STORMPEER, PEERHERO, fortuna `--choices` no longer hangs);
+  `--fast-boss --coop2` 12/12. Windowed solo 56 s and main menu clean; level-up panel shows
+  Refresh/Banish/Skip; solo, co-op host and co-op client pause menus show P01's threat lines
+  with P02's session buttons. Real co-op 70 s: client streams proxies with `local_sim=0`;
+  `--dev --minibossnow --stagenow` co-op shows the cache on both machines in the same second,
+  client rebuilds stage 1 with a matching layout, the wipe ends the run and the session stays
+  open; Mars `--bossnow` co-op draws the Anubot beam, aim lines and storm on both sides.
+- **Known gaps:** balance not human-playtested (§3 curve is softer in late T1, harder in chained
+  worlds; `--balance` probe); Silver income outpaces v0.1 sinks until P05/P21/P26; co-op client
+  can't open the miniboss cache (P14); joiners bank nothing (host-only save; no owner yet);
+  version mismatch shows only after the ~15 s netcode timeout; several pre-existing UI strings
+  still use glyphs missing from the ASCII-only font.
+
 ## 2026-07-24 — Session 2k: exaggeration pass (the skill's own 1.5x rule, applied)
 - Crowd gaits pushed ~2x: waddle 0.13→0.26 (Bruiser 0.20→0.34, heavy rock), inter-footfall
   bob 0.10→0.20, Sprinter hop 0.30→0.55 (a real bound), flier bank 0.10→0.22 + bigger bob,

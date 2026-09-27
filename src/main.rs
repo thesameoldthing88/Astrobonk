@@ -576,6 +576,9 @@ fn dev_fast_boss(
         // Burrowers and UFOs in the horde. Without this the boss is fought among a
         // minute-one crowd of shamblers, which tests none of the late-game lanes.
         run.elapsed = config::STAGE_SECONDS[0] - run.timer;
+        // ...and the §3 run-time scaling term (run::scaling reads total_elapsed), exactly
+        // as the headless --fast-boss and --minibossnow wind it.
+        run.total_elapsed = run.total_elapsed.max(run.elapsed);
         // Winding past MINIBOSS_MARKS would fire BOTH minibosses on the next tick as well,
         // burying a level-1 test player under three bosses at once. Mark them done.
         run.minibosses_spawned = [true; 2];

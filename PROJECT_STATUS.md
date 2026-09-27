@@ -164,3 +164,9 @@ replication/input routing (+ NETCODE NOTES running log) · `remote.rs` drawing t
   which keeps the bot alive and prints spawns/s against kills/s and the live count every
   30 s. Don't tune against bot deaths: the bot dies to contact damage around minute 3-4
   whatever the curve.
+- **Co-op sessions (since P02).** A session outlives the host's runs: at run end the host
+  sends `RunOverMsg` and joiners return to the menu still connected, then follow the host into
+  its next run (`RunSnapMsg.run_gen` drops stragglers). Only the host banks; a joiner's Silver
+  lands in the shared run pot and the host's save. Per-player meta rewards for joiners have no
+  owning package yet. The pattern for new co-op features is a host-only SIM system plus an
+  ungated VISUALS system (see NETCODE NOTES 2e in `src/net.rs`); `--netlog` prints NETPARITY.

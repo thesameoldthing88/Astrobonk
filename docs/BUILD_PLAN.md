@@ -32,8 +32,8 @@ movement feel the GDD calls the skill ceiling.
 ## Status
 | Wave | Package | Status |
 |---|---|---|
-| 1 | P01 Core rules conformance | ☐ |
-| 1 | P02 Co-op client parity | ☐ |
+| 1 | P01 Core rules conformance | ✅ wave 1. Gaps: balance not human-playtested (tune with `--balance`); Tome of Banishment/Ascension are hooks only (P05); co-op client can see but not open the miniboss cache (P14); per-enemy/boss party HP scaling left to P18 |
+| 1 | P02 Co-op client parity | ✅ wave 1. Gaps: version mismatch surfaces only after netcode's ~15 s timeout; a joiner's Silver (comet or pickups) goes into the host's shared pot and save, and per-player meta rewards have no owning package yet; client pause still freezes its local view |
 | 2 | P03 Items 22 → ~40 | ☐ |
 | 2 | P04 Accessibility & display settings | ☐ |
 | 3 | P05 Tomes 8 → 23 + loadout | ☐ |
