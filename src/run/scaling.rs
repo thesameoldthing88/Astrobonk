@@ -11,7 +11,9 @@
 //! `SCALE_DMG_BASE` anchors in config.rs (which say why the anchor sits where it does).
 //!
 //! Every system that sizes an enemy, a boss or the spawn budget reads a [`Scaling`] built
-//! here instead of doing its own arithmetic. Later layers (Ascension Depth — P23, weekly
+//! here instead of doing its own arithmetic. The §13 enemy-density assist multiplies in
+//! here too (spawn rate and live cap); the enemy-damage assist is applied where a hit
+//! lands (`combat::apply_player_hits`) so it also covers shots already in flight. Later layers (Ascension Depth — P23, weekly
 //! mutators — P23, co-op per-enemy and boss HP — P18, Farside's elite bump — P07) multiply
 //! into the fields of `Scaling` inside [`Scaling::new`], never at call sites.
 //!
@@ -35,6 +37,8 @@ pub struct ScalingInputs {
     pub delta: f32,
     /// Astronauts in the run (1–4).
     pub party: usize,
+    /// The §13 enemy-density assist (1 = canon).
+    pub density: f32,
 }
 
 impl ScalingInputs {
@@ -45,6 +49,7 @@ impl ScalingInputs {
             planet: run.planet().def().threat,
             delta: difficulty_points(run),
             party: party.max(1),
+            density: run.assist.enemy_density,
         }
     }
 }
@@ -75,8 +80,10 @@ pub struct Scaling {
     pub boss_hp: f32,
     /// Boss/miniboss contact-damage multiplier (same reasoning as `boss_hp`).
     pub boss_dmg: f32,
-    /// Party multiplier alone — also sizes the live-enemy cap.
+    /// Party multiplier alone.
     pub party_spawn: f32,
+    /// Live-enemy ceiling: ENEMY_CAP grown with the party, shrunk with the density assist.
+    pub live_cap: usize,
 }
 
 impl Scaling {
@@ -89,18 +96,21 @@ impl Scaling {
         let delta_hp = 1.0 + SCALE_HP_DELTA * delta;
         let delta_dmg = 1.0 + SCALE_DMG_DELTA * delta;
         let party_spawn = PARTY_SPAWN_SCALE[i.party.clamp(1, PARTY_SPAWN_SCALE.len()) - 1];
+        let density = i.density.clamp(ASSIST_DENSITY_MIN, 1.0);
         Self {
             hp: SCALE_HP_BASE * (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp,
             dmg: SCALE_DMG_BASE * (1.0 + SCALE_DMG_T * t) * depth_dmg * i.planet * delta_dmg,
             spawn: (1.0 + SCALE_RATE_T * t)
                 * (1.0 + SCALE_RATE_D * d)
                 * (1.0 + SCALE_RATE_DELTA * delta)
-                * party_spawn,
+                * party_spawn
+                * density,
             elite_chance: (ELITE_CHANCE_T * t + ELITE_CHANCE_D * d + ELITE_CHANCE_DELTA * delta)
                 .clamp(0.0, ELITE_CHANCE_CAP),
             boss_hp: depth_hp * i.planet * delta_hp,
             boss_dmg: depth_dmg * i.planet * delta_dmg,
             party_spawn,
+            live_cap: (ENEMY_CAP as f32 * party_spawn * density) as usize,
         }
     }
 
@@ -141,9 +151,13 @@ pub fn beat_modifier(miniboss_alive: bool, exhale_left: f32) -> f32 {
     }
 }
 
+fn p_inputs(base: ScalingInputs) -> ScalingInputs {
+    ScalingInputs { t_min: 6.0, depth: 1.0, ..base }
+}
+
 /// Headless self-check: the curve SHAPES the GDD asks for. Returns the first violated rule.
 pub fn self_check() -> Result<(), String> {
-    let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1 };
+    let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1, density: 1.0 };
     let s0 = Scaling::new(base);
     if (s0.hp - SCALE_HP_BASE).abs() > 1e-4
         || (s0.dmg - SCALE_DMG_BASE).abs() > 1e-4
@@ -155,7 +169,7 @@ pub fn self_check() -> Result<(), String> {
         return Err("elite chance must start at 0".into());
     }
     // exact formula at a probe point: t=10, d=2, T=1.25, Δ=5
-    let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, party: 1 });
+    let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, party: 1, density: 1.0 });
     let want_hp = SCALE_HP_BASE * 2.1f32.powf(1.35) * 1.4 * 1.25 * 1.3;
     let want_dmg = SCALE_DMG_BASE * 1.8 * 1.3 * 1.25 * 1.25;
     let want_spawn = 2.4 * 1.2 * 1.2;
@@ -180,6 +194,20 @@ pub fn self_check() -> Result<(), String> {
     }
     if Scaling::new(ScalingInputs { t_min: 500.0, depth: 9.0, delta: 99.0, ..base }).elite_chance > ELITE_CHANCE_CAP {
         return Err("elite chance exceeded its cap".into());
+    }
+    // The §13 density assist thins the horde (rate and cap) and touches nothing else; it
+    // can never raise the canon numbers.
+    let half = Scaling::new(ScalingInputs { density: 0.5, ..p_inputs(base) });
+    let full = Scaling::new(p_inputs(base));
+    if (half.spawn - full.spawn * 0.5).abs() > 1e-4
+        || half.live_cap != full.live_cap / 2
+        || half.hp != full.hp
+        || half.dmg != full.dmg
+        || half.elite_chance != full.elite_chance
+        || Scaling::new(ScalingInputs { density: 7.0, ..base }).spawn > s0.spawn
+        || s0.live_cap != ENEMY_CAP
+    {
+        return Err("the density assist must scale spawn rate and live cap only".into());
     }
     // Rate_base walks the arc beats and never dips outside the breathing modifiers.
     if (spawn_rate_base(600.0, false, 0.0) - SPAWN_RATE_BEATS[0].1).abs() > 1e-4

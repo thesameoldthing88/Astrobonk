@@ -52,7 +52,9 @@ pub fn sync_choice_panel(
     panel: Res<ChoicePanel>,
     q_run: Query<&PlayerState, With<crate::player::LocalPlayer>>,
     q_root: Query<Entity, With<ChoiceRoot>>,
+    save: Res<MetaSave>,
 ) {
+    let palette = save.accessibility.palette;
     let should_show = matches!(*phase, RunPhase::LevelUp) || (matches!(*phase, RunPhase::Modal) && !panel.options.is_empty());
     if !should_show {
         for e in &q_root {
@@ -101,10 +103,10 @@ pub fn sync_choice_panel(
                                 ..default()
                             },
                             BackgroundColor(CARD_BG),
-                            BorderColor::all(rarity.color()),
+                            BorderColor::all(rarity.color(palette)),
                         ))
                         .with_children(|card| {
-                            card.spawn(txt(rarity.name(), FONT_SMALL, rarity.color()));
+                            card.spawn(txt(rarity.name(), FONT_SMALL, rarity.color(palette)));
                             card.spawn(txt(opt.title(), FONT_MED, Color::WHITE));
                             card.spawn(txt(opt.body(&run), FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
                             card.spawn(txt(format!("[{}]", i + 1), FONT_SMALL, Color::srgb(0.5, 0.55, 0.7)));
@@ -172,7 +174,7 @@ pub fn choice_input(
     mut phase: ResMut<RunPhase>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
-    mut hitstop: ResMut<crate::fx::Hitstop>,
+    (mut hitstop, mut screen_flash): (ResMut<crate::fx::Hitstop>, ResMut<crate::fx::ScreenFlash>),
 ) {
     if !matches!(*phase, RunPhase::LevelUp | RunPhase::Modal) || panel.options.is_empty() {
         return;
@@ -269,6 +271,8 @@ pub fn choice_input(
         banners.write(BannerMsg("WEAPON EVOLVED".into()));
         sfx.write(SfxMsg(Sfx::Evolve));
         hitstop.timer = 0.18;
+        // the evolution white-flash (§13: flash reduction removes it)
+        screen_flash.fire(Color::WHITE, &save);
     } else {
         sfx.write(SfxMsg(Sfx::Click));
     }
@@ -335,10 +339,10 @@ pub fn chest_panel(
                         ..default()
                     },
                     BackgroundColor(CARD_BG),
-                    BorderColor::all(d.rarity.color()),
+                    BorderColor::all(d.rarity.color(save.accessibility.palette)),
                 ))
                 .with_children(|card| {
-                    card.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
+                    card.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color(save.accessibility.palette)));
                     card.spawn(txt(d.name, FONT_MED, Color::WHITE));
                     card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
                     let stats: Vec<String> = d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
@@ -460,10 +464,10 @@ pub fn shop_panel(
                                     ..default()
                                 },
                                 BackgroundColor(if *sold { Color::srgba(0.05, 0.05, 0.06, 0.9) } else { CARD_BG }),
-                                BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { d.rarity.color() }),
+                                BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { d.rarity.color(save.accessibility.palette) }),
                             ));
                             card.with_children(|c| {
-                                c.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
+                                c.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color(save.accessibility.palette)));
                                 c.spawn(txt(d.name, FONT_MED, Color::WHITE));
                                 c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
                                 let cat = &cats[i];
@@ -611,6 +615,13 @@ pub fn pause_panel(
                     refresh,
                     ps.banishes
                 );
+                // §13 assists sit on top of the numbers above; say which are in force
+                let rules = if run.assisted {
+                    let now = run.assist.summary();
+                    format!("{rules}\nASSISTED: {}", if now.is_empty() { "earlier in this run" } else { now.as_str() })
+                } else {
+                    rules
+                };
                 commands
                     .spawn((PauseRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(20)))
                     .with_children(|root| {

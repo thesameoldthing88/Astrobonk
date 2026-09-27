@@ -162,6 +162,19 @@ impl MeshData {
         self.add_sphere(r, 1, tf.with_translation(tf.translation - up), color);
     }
 
+    /// `build`, with every triangle wound counter-clockwise seen from outside, which is what
+    /// Bevy treats as the front face. The shape helpers above wind clockwise; under default
+    /// back-face culling a model built with `build` shows its far walls instead of its near
+    /// ones — the silhouette is identical, which is why the crowd has always looked right.
+    /// Anything that relies on WHICH faces get culled (the §13 inverted-hull outlines) must
+    /// build with this.
+    pub fn build_ccw(mut self) -> Mesh {
+        for tri in self.idx.chunks_mut(3) {
+            tri.swap(1, 2);
+        }
+        self.build()
+    }
+
     pub fn build(self) -> Mesh {
         let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.pos);

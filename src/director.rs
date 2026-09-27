@@ -35,6 +35,23 @@ pub struct ResultsData {
     pub time: f32,
     pub quests_completed: Vec<String>,
     pub daily: Option<(String, u64, bool)>, // (world name, best score, is-new-best)
+    /// The run used §13 assists: what was on when it ended. Shown on results, and the daily
+    /// score went to the separate assisted board.
+    pub assisted: Option<String>,
+}
+
+/// HOST/SOLO: keep the run's assist options current with this machine's settings, so a
+/// slider moved in the pause menu applies mid-run (§13: every setting is reachable mid-run).
+/// Any assist, even for a moment, flags the run. A client never runs this — its run is the
+/// host's, adopted from `RunSnapMsg`.
+pub fn sync_assist_options(save: Res<MetaSave>, mut run: ResMut<RunState>) {
+    if run.assist != save.assist {
+        run.assist = save.assist;
+    }
+    if run.assist.is_assisted() && !run.assisted {
+        run.assisted = true;
+        info!("run flagged ASSISTED ({})", run.assist.summary());
+    }
 }
 
 /// Countdown, boss marks, The Static.
@@ -316,18 +333,21 @@ pub fn bank_results(
     let payout = silver.total;
     save.silver += payout;
 
-    // daily challenge: track today's best score
+    // daily challenge: track today's best score. An assisted run keeps its own board (§13:
+    // assists never touch the ranking, and still earn Silver).
     let daily = if run.is_daily {
         let day = crate::run::today();
         if save.daily_day != day {
             save.daily_day = day;
             save.daily_best = 0;
+            save.daily_best_assisted = 0;
         }
-        let new_best = payout > save.daily_best;
+        let best = if run.assisted { &mut save.daily_best_assisted } else { &mut save.daily_best };
+        let new_best = payout > *best;
         if new_best {
-            save.daily_best = payout;
+            *best = payout;
         }
-        Some((crate::run::daily_name(run.run_seed), save.daily_best, new_best))
+        Some((crate::run::daily_name(run.run_seed), *best, new_best))
     } else {
         None
     };
@@ -373,6 +393,10 @@ pub fn bank_results(
         time: run.total_elapsed,
         quests_completed,
         daily,
+        assisted: run.assisted.then(|| {
+            let now = run.assist.summary();
+            if now.is_empty() { "assists used earlier in the run".to_string() } else { now }
+        }),
     });
 
     *phase = RunPhase::Playing; // reset for next run

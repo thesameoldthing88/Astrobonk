@@ -4,6 +4,7 @@
 
 use crate::config::*;
 use crate::content::enemies::{BossKind, EliteMods, EnemyKind};
+use crate::content::palettes::Palette;
 use crate::events_world::InStorm;
 use crate::fx::{self, Pcolor, ParticleAssets, Shake};
 use crate::messages::*;
@@ -139,10 +140,38 @@ pub struct Beamer {
     pub target: Option<Entity>,
 }
 
-/// The visible aim line while a Beamer charges.
+/// The visible aim line while a Beamer charges: a row of dashes that MARCH toward the
+/// target while the beamer tracks, then freeze and thicken once it locks (§13: the tell
+/// reads by motion and shape, never by color alone).
 #[derive(Component)]
 pub struct AimLine {
     pub owner: Entity,
+    /// Dash phase, 0..1 of one dash period. Stored (not derived from the clock) so a lock
+    /// can freeze the pattern where it stands instead of snapping it.
+    pub march: f32,
+}
+
+/// A Burrower's approach: a crack decal spreading across the ground over the spot it will
+/// erupt from — the §13 "Burrower = cracking decal" tell. Host-spawned with the burrower,
+/// streamed to joiners on the hazard lane, integrated by `crack_decals` everywhere.
+#[derive(Component)]
+pub struct CrackDecal {
+    pub dir: Vec3,
+    pub timer: f32,
+    pub max: f32,
+}
+
+/// Presentation-only children that make a hazard readable without color: the sweep that
+/// fills a telegraph toward impact, the inner safe ring of a slam, and the white outline
+/// hull of high-contrast mode. Built by `decorate_hazards`; never simulated.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum HazardDecor {
+    /// Grows from the center (disc) or the safe edge (ring) to the lethal edge at impact.
+    Sweep,
+    /// A slam's inner edge: inside it is safe.
+    SafeRing,
+    /// White inverted hull (high-contrast "danger = white outline").
+    Outline,
 }
 
 /// Artillery: mortars the player's position with an AoE telegraph.
@@ -207,6 +236,21 @@ pub struct EnemyAssets {
     pub proj_mat: Handle<StandardMaterial>,
     pub ring_mesh: Handle<Mesh>,
     pub ring_mat: Handle<StandardMaterial>,
+    /// See-through fill for the sweep disc inside a telegraph ring.
+    pub ring_fill_mat: Handle<StandardMaterial>,
+    pub disc_mesh: Handle<Mesh>,
+    /// A Beamer's dashed aim line (and its outline hull).
+    pub aim_mesh: Handle<Mesh>,
+    pub aim_outline_mesh: Handle<Mesh>,
+    /// The Burrower's crack decal (and its outline hull).
+    pub crack_mesh: Handle<Mesh>,
+    pub crack_outline_mesh: Handle<Mesh>,
+    /// Outline hulls for the telegraph ring and enemy shots.
+    pub ring_outline_mesh: Handle<Mesh>,
+    pub proj_outline_mesh: Handle<Mesh>,
+    /// Flat white, front faces culled: drawn slightly larger than a hazard, only its far
+    /// side shows — a white rim around the shape (the inverted-hull outline).
+    pub outline_mat: Handle<StandardMaterial>,
 }
 
 /// Original material to restore after a hit-flash.
@@ -416,6 +460,84 @@ pub fn boss_mesh() -> Mesh {
     m.build()
 }
 
+/// A Beamer's aim line: AIM_DASHES dashes along local -Z (the `frame_quat` forward) over one
+/// unit of length, unit cross-section — the transform stretches it to the line's length and
+/// thickness, and slides it forward by the march phase. `pad` fattens every dash for the
+/// outline hull.
+fn aim_dash_mesh(pad: f32) -> Mesh {
+    let mut m = crate::meshkit::MeshData::new();
+    let period = 1.0 / AIM_DASHES as f32;
+    let dash = period * 0.55;
+    for i in 0..AIM_DASHES {
+        let z = -(i as f32 * period + dash * 0.5);
+        m.add_box(Vec3::new(1.0 + pad, 1.0 + pad, dash + pad * 0.02), crate::meshkit::at(Vec3::new(0.0, 0.0, z)), Color::WHITE);
+    }
+    m.build_ccw()
+}
+
+/// The Burrower's crack decal: seven jagged three-segment cracks radiating from a small
+/// hub, flat in the local XZ plane (the ground once `frame_quat` stands it on the surface),
+/// radius 1. Hand-laid rather than random so every machine draws the same crack.
+fn crack_mesh(width: f32) -> Mesh {
+    let mut m = crate::meshkit::MeshData::new();
+    const CRACKS: [(f32, [f32; 3]); 7] = [
+        (0.0, [0.25, -0.30, 0.20]),
+        (0.95, [-0.20, 0.35, -0.10]),
+        (1.75, [0.30, 0.10, -0.35]),
+        (2.60, [-0.25, -0.20, 0.30]),
+        (3.45, [0.15, 0.30, -0.25]),
+        (4.40, [-0.30, 0.05, 0.25]),
+        (5.35, [0.20, -0.25, -0.20]),
+    ];
+    for (base, bends) in CRACKS {
+        let mut from = Vec2::ZERO;
+        let mut ang = base;
+        for (k, bend) in bends.iter().enumerate() {
+            ang += bend;
+            let len = [0.38, 0.34, 0.28][k];
+            let to = from + Vec2::new(ang.cos(), ang.sin()) * len;
+            let mid = (from + to) * 0.5;
+            let w = width * (1.0 - 0.25 * k as f32); // cracks taper toward their tips
+            m.add_box(
+                Vec3::new(w, 0.02 + width * 0.2, len + w * 0.5),
+                Transform::from_translation(Vec3::new(mid.x, 0.0, mid.y))
+                    .with_rotation(Quat::from_rotation_y(std::f32::consts::FRAC_PI_2 - ang)),
+                Color::WHITE,
+            );
+            from = to;
+        }
+    }
+    m.add_cylinder(0.12 + width, 0.03 + width * 0.2, 7, crate::meshkit::at(Vec3::ZERO), Color::WHITE);
+    m.build_ccw()
+}
+
+/// Danger materials in a palette: (ring, ring fill, shot, beam charge, beam fire) as
+/// (base, emissive). The Standard palette keeps the exact canon look.
+fn danger_looks(p: Palette) -> [(Color, LinearRgba); 5] {
+    if p == Palette::Standard {
+        return [
+            (Color::srgb(1.0, 0.25, 0.1), LinearRgba::rgb(3.0, 0.5, 0.1)),
+            (Color::srgba(1.0, 0.25, 0.1, 0.2), LinearRgba::rgb(0.6, 0.1, 0.02)),
+            (Color::srgb(0.9, 0.3, 0.9), LinearRgba::rgb(2.4, 0.5, 2.4)),
+            (Color::srgba(1.0, 0.7, 0.2, 0.35), LinearRgba::rgb(1.2, 0.7, 0.1)),
+            (Color::srgb(1.0, 0.3, 0.15), LinearRgba::rgb(4.0, 0.8, 0.2)),
+        ];
+    }
+    // A white lift under the hue keeps a saturated blue glow from reading as dark.
+    let glow = |c: Color, k: f32, lift: f32| {
+        let l = c.to_linear();
+        LinearRgba::rgb(l.red * k + lift, l.green * k + lift, l.blue * k + lift)
+    };
+    let d = p.danger();
+    [
+        (d, glow(d, 3.0, 0.25)),
+        (d.with_alpha(0.2), glow(d, 0.6, 0.05)),
+        (p.danger_shot(), glow(p.danger_shot(), 2.4, 0.25)),
+        (p.danger_charge(), glow(d, 1.2, 0.1)),
+        (d, glow(d, 4.0, 0.4)),
+    ]
+}
+
 pub fn setup_enemy_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -513,11 +635,40 @@ pub fn setup_enemy_assets(
             ..default()
         }),
         ring_mesh: meshes.add(Mesh::from(Torus::new(0.9, 1.0))),
+        // Telegraph looks are (re)applied from the palette by `apply_danger_palette`; these
+        // are the canon values the Standard palette keeps. The depth bias keeps a flat ring
+        // readable where it crosses a bump in the terrain instead of vanishing into it.
         ring_mat: materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.25, 0.1),
             emissive: LinearRgba::rgb(3.0, 0.5, 0.1),
             unlit: true,
             alpha_mode: AlphaMode::Blend,
+            depth_bias: 40.0,
+            ..default()
+        }),
+        ring_fill_mat: materials.add(StandardMaterial {
+            base_color: Color::srgba(1.0, 0.25, 0.1, 0.2),
+            emissive: LinearRgba::rgb(0.6, 0.1, 0.02),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            double_sided: true,
+            cull_mode: None,
+            depth_bias: 20.0,
+            ..default()
+        }),
+        disc_mesh: meshes.add(Mesh::from(Cylinder::new(1.0, 0.004))),
+        aim_mesh: meshes.add(aim_dash_mesh(0.0)),
+        aim_outline_mesh: meshes.add(aim_dash_mesh(0.45)),
+        crack_mesh: meshes.add(crack_mesh(0.07)),
+        crack_outline_mesh: meshes.add(crack_mesh(0.11)),
+        ring_outline_mesh: meshes.add(Mesh::from(Torus::new(0.88, 1.02))),
+        proj_outline_mesh: meshes.add(Mesh::from(Sphere::new(0.38))),
+        outline_mat: materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::rgb(1.4, 1.4, 1.4),
+            unlit: true,
+            cull_mode: Some(bevy::render::render_resource::Face::Front),
+            depth_bias: 30.0,
             ..default()
         }),
     });
@@ -580,13 +731,17 @@ pub fn spawn_enemy(
         cmd.insert(Spitter { cd: rng.gen_range(1.0..3.0) });
     }
     if kind == EnemyKind::Burrower {
-        cmd.insert(Buried { timer: 1.3 });
+        cmd.insert(Buried { timer: BURROW_SECS });
     }
     if kind == EnemyKind::Beamer {
         cmd.insert(Beamer { cd: rng.gen_range(2.0..4.0), charging: 0.0, aim: Vec3::ZERO, target: None });
     }
     if kind == EnemyKind::Lobber {
         cmd.insert(Lobber { cd: rng.gen_range(2.5..5.0) });
+    }
+    if kind == EnemyKind::Burrower {
+        // the ground cracks over the burrow for exactly as long as it stays under
+        spawn_crack_decal(commands, assets, planet, dir, BURROW_SECS);
     }
 }
 
@@ -668,7 +823,7 @@ pub fn director_spawn(
     }
     director.spawn_bank -= budget as f32;
 
-    let cap = ((ENEMY_CAP as f32) * sc.party_spawn) as usize;
+    let cap = sc.live_cap;
     let room = cap.saturating_sub(alive);
     let n = budget.min(room);
     for i in 0..n {
@@ -1295,24 +1450,20 @@ pub fn burrower_emerge(
     for (e, enemy, mut b, mut tf) in &mut q {
         b.timer -= dt;
         // rumble under the surface
-        let depth = (b.timer / 1.3).clamp(0.0, 1.0);
+        let depth = (b.timer / BURROW_SECS).clamp(0.0, 1.0);
         tf.translation = planet.surface_point(enemy.dir) - enemy.dir * (depth * 1.2);
         if b.timer <= 0.0 {
             commands.entity(e).remove::<Buried>();
             // eruption damage to anyone standing on top of it
             for (pe, pp) in ppos.iter().copied() {
-                if tf.translation.distance(pp) < 2.6 {
+                if tf.translation.distance(pp) < BURROW_ERUPT_RADIUS {
                     writer.write(PlayerHitMsg { victim: pe, amount: enemy.damage, from: tf.translation, attacker: Some(e) });
                 }
             }
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(enemy.dir) + enemy.dir * 0.1)
-                    .with_rotation(sphere::frame_quat(enemy.dir, sphere::tangent_frame(enemy.dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.5)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: 0.25, max: 0.25, radius: 0.0, damage: 0.0, dir: enemy.dir, ring: false },
-                StageScoped,
             ));
         }
     }
@@ -1510,25 +1661,31 @@ pub fn beamer_attack(
             let v = ptf.pos - tf.translation;
             b.aim = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
             commands.spawn((
-                AimLine { owner: entity },
-                Mesh3d(assets.proj_mesh.clone()),
+                AimLine { owner: entity, march: 0.0 },
+                Mesh3d(assets.aim_mesh.clone()),
                 MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(tf.translation),
+                // zero-scaled until `aim_line_visuals` lays it along the aim
+                Transform::from_translation(tf.translation).with_scale(Vec3::ZERO),
                 StageScoped,
             ));
         }
     }
 }
 
-/// Stretch each live aim line from its beamer toward the current aim — thin and pulsing,
-/// thickening as the shot locks in. Shared by the host and a co-op client, so a joiner
-/// reads the exact tell the host would. Lines whose beamer is gone are cleared here.
+/// Lay each live aim line from its beamer along the current aim. While the beamer tracks,
+/// its dashes march toward the target and the line thickens with the charge; in the final
+/// BEAMER_LOCK_SECS they freeze and go fat — "it has stopped aiming, dodge now". Shared by
+/// the host and a co-op client, so a joiner reads the exact tell the host would. Lines whose
+/// beamer is gone are cleared here.
 pub fn aim_line_visuals(
     mut commands: Commands,
+    time: Res<Time>,
     q: Query<(&Enemy, &Beamer, &Transform)>,
-    mut q_lines: Query<(Entity, &AimLine, &mut Transform), Without<Enemy>>,
+    mut q_lines: Query<(Entity, &mut AimLine, &mut Transform), Without<Enemy>>,
 ) {
-    for (le, line, mut ltf) in &mut q_lines {
+    let dt = time.delta_secs();
+    let period = AIM_LINE_LEN / AIM_DASHES as f32;
+    for (le, mut line, mut ltf) in &mut q_lines {
         let Ok((e, b, tf)) = q.get(line.owner) else {
             commands.entity(le).try_despawn();
             continue;
@@ -1536,12 +1693,16 @@ pub fn aim_line_visuals(
         if b.aim == Vec3::ZERO {
             continue;
         }
-        let len = 24.0;
-        let mid = tf.translation + e.dir * 1.0 + b.aim * (len * 0.5);
-        ltf.translation = mid;
+        let locked = b.charging <= BEAMER_LOCK_SECS;
+        if !locked {
+            line.march = (line.march + dt * AIM_DASH_SPEED / period).fract();
+        }
+        let charge = 1.0 - (b.charging / BEAMER_CHARGE_SECS).clamp(0.0, 1.0);
+        let width = if locked { 0.26 } else { 0.09 + charge * 0.1 };
+        // The dash mesh runs from the origin along local -Z (frame_quat's forward).
+        ltf.translation = tf.translation + e.dir * 1.0 + b.aim * (line.march * period);
         ltf.rotation = sphere::frame_quat(e.dir, b.aim);
-        let lock = 1.0 - (b.charging / BEAMER_CHARGE_SECS).clamp(0.0, 1.0);
-        ltf.scale = Vec3::new(0.10 + lock * 0.16, 0.10 + lock * 0.16, len / 0.56);
+        ltf.scale = Vec3::new(width, width, AIM_LINE_LEN);
     }
 }
 
@@ -1578,14 +1739,10 @@ pub fn lobber_attack(
             l.cd = 4.5;
             let target = player.dir;
             let flight = 1.6;
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(target) + target * 0.15)
-                    .with_rotation(sphere::frame_quat(target, sphere::tangent_frame(target).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.1)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: flight, max: flight, radius: 3.2, damage: e.damage, dir: target, ring: false },
-                StageScoped,
             ));
             commands.spawn((
                 MortarShell { from: e.dir, to: target, t: 0.0, dur: flight },
@@ -1678,14 +1835,10 @@ pub fn boss_attacks(
         boss.burst_timer -= dt;
         if boss.attack_timer <= 0.0 {
             boss.attack_timer = 6.5;
-            commands.spawn((
-                Mesh3d(assets.ring_mesh.clone()),
-                MeshMaterial3d(assets.ring_mat.clone()),
-                Transform::from_translation(planet.surface_point(e.dir) + e.dir * 0.15)
-                    .with_rotation(sphere::frame_quat(e.dir, sphere::tangent_frame(e.dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
-                    .with_scale(Vec3::splat(0.1)),
+            commands.spawn(telegraph_bundle(
+                &assets,
+                &planet,
                 Telegraph { timer: 1.4, max: 1.4, radius: 7.0, damage: e.damage * 1.6, dir: e.dir, ring: true },
-                StageScoped,
             ));
             sfx.write(SfxMsg(Sfx::BossRoar));
         }
@@ -1707,10 +1860,70 @@ pub fn boss_attacks(
     }
 }
 
-/// Telegraphs expand, then detonate against the player.
+/// Everything a telegraph spawns with, laid flat on the ground at `tg.dir` — shared by the
+/// host's attacks and a client's streamed copy, so both draw the same ring in the same place.
+pub fn telegraph_bundle(assets: &EnemyAssets, planet: &CurrentPlanet, tg: Telegraph) -> impl Bundle {
+    let start = if tg.radius > 0.0 { tg.radius } else { 0.1 };
+    (
+        Mesh3d(assets.ring_mesh.clone()),
+        MeshMaterial3d(assets.ring_mat.clone()),
+        ground_decal(planet, tg.dir, TELEGRAPH_LIFT).with_scale(Vec3::splat(start)),
+        tg,
+        StageScoped,
+    )
+}
+
+/// A transform lying flat on the ground at `dir` (mesh local XZ = the ground, +Y = up).
+pub fn ground_decal(planet: &CurrentPlanet, dir: Vec3, lift: f32) -> Transform {
+    Transform::from_translation(planet.surface_point(dir) + dir * lift)
+        .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0))
+}
+
+/// Start a Burrower's crack decal (host at spawn, client from the hazard lane). Its spin is
+/// hashed from where it is, so two machines draw the same crack.
+pub fn spawn_crack_decal(commands: &mut Commands, assets: &EnemyAssets, planet: &CurrentPlanet, dir: Vec3, secs: f32) -> Entity {
+    let spin = ((dir.x * 37.13 + dir.y * 11.7 + dir.z * 91.71).fract().abs()) * std::f32::consts::TAU;
+    let mut tf = ground_decal(planet, dir, 0.12);
+    tf.rotation *= Quat::from_rotation_y(spin);
+    commands
+        .spawn((
+            CrackDecal { dir, timer: secs, max: secs },
+            Mesh3d(assets.crack_mesh.clone()),
+            MeshMaterial3d(assets.ring_mat.clone()),
+            tf.with_scale(Vec3::new(0.2 * BURROW_ERUPT_RADIUS, 1.0, 0.2 * BURROW_ERUPT_RADIUS)),
+            StageScoped,
+        ))
+        .id()
+}
+
+/// Cracks race outward from the burrow and creep to the eruption's full reach just as it
+/// breaks the surface. Runs everywhere a crack can exist (host, client, headless).
+pub fn crack_decals(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut CrackDecal, &mut Transform)>) {
+    let dt = time.delta_secs();
+    if dt <= 0.0 {
+        return;
+    }
+    for (e, mut c, mut tf) in &mut q {
+        c.timer -= dt;
+        if c.timer <= 0.0 {
+            commands.entity(e).despawn();
+            continue;
+        }
+        let t = 1.0 - (c.timer / c.max).clamp(0.0, 1.0);
+        let reach = BURROW_ERUPT_RADIUS * (0.2 + 0.8 * (1.0 - (1.0 - t) * (1.0 - t)));
+        tf.scale = Vec3::new(reach, 1.0, reach);
+    }
+}
+
+/// Telegraphs mark their TRUE lethal edge from the first frame and pulse inward from it,
+/// faster as impact nears (a rising chirp, held under 3/s in photosensitivity mode), then
+/// detonate against every astronaut. The eruption pop (radius 0) just blooms outward. The
+/// fill that counts down to impact is presentation (`animate_hazard_decor`).
+#[allow(clippy::too_many_arguments)]
 pub fn telegraphs(
     mut commands: Commands,
     time: Res<Time>,
+    save: Res<crate::save::MetaSave>,
     mut shake: ResMut<Shake>,
     particles: Option<Res<ParticleAssets>>,
     q_player: Query<(Entity, &Transform), With<Player>>,
@@ -1721,17 +1934,30 @@ pub fn telegraphs(
     if dt <= 0.0 {
         return;
     }
+    let (f0, f1) = if save.accessibility.photosensitive {
+        (TELEGRAPH_PULSE_HZ.0.min(TELEGRAPH_PULSE_HZ_PHOTO), TELEGRAPH_PULSE_HZ_PHOTO)
+    } else {
+        TELEGRAPH_PULSE_HZ
+    };
     let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
     for (e, mut tg, mut tf) in &mut q {
         tg.timer -= dt;
         let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
-        tf.scale = Vec3::splat(0.1 + t * tg.radius.max(0.6));
+        if tg.radius > 0.0 {
+            // phase of a chirp whose rate ramps f0 -> f1 across the telegraph's life
+            let phase = std::f32::consts::TAU * tg.max * (f0 * t + (f1 - f0) * t * t * 0.5);
+            // inward only: the ring never draws the lethal edge further out than it is
+            let pulse = 1.0 - TELEGRAPH_PULSE_AMP * (0.5 + 0.5 * phase.sin());
+            tf.scale = Vec3::splat(tg.radius * pulse);
+        } else {
+            tf.scale = Vec3::splat(0.1 + t * 0.6);
+        }
         if tg.timer <= 0.0 {
             if tg.damage > 0.0 {
                 for (pe, pp) in ppos.iter().copied() {
                     let d = tf.translation.distance(pp);
                     let hit = if tg.ring {
-                        d < tg.radius + 1.0 && d > tg.radius * 0.35
+                        d < tg.radius + 1.0 && d > tg.radius * SLAM_SAFE_FRACTION
                     } else {
                         d < tg.radius + 0.6
                     };
@@ -1741,7 +1967,7 @@ pub fn telegraphs(
                 }
                 shake.add(0.22);
                 if let Some(pa) = &particles {
-                    fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Red, 18, 9.0);
+                    fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Danger, 18, 9.0);
                 }
             }
             commands.entity(e).despawn();
@@ -1749,14 +1975,148 @@ pub fn telegraphs(
     }
 }
 
-/// Restore materials after hit-flash.
-pub fn enemy_flash(
+/// PRESENTATION: give each new hazard the parts that let it read without color (§13) — a
+/// fill that sweeps out to the lethal edge by impact, a slam's inner safe ring — and, in
+/// high-contrast mode, a white outline hull on every telegraph, aim line, crack, shot and
+/// the verdict beam. Children, so they move, scale and despawn with their hazard; there are
+/// at most a few dozen hazards alive, never one per crowd enemy.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn decorate_hazards(
+    mut commands: Commands,
     assets: Res<EnemyAssets>,
-    mut q: Query<(&Enemy, &BaseMat, &mut MeshMaterial3d<StandardMaterial>), Changed<Enemy>>,
+    save: Res<crate::save::MetaSave>,
+    tels: Query<(Entity, &Telegraph), Added<Telegraph>>,
+    lines: Query<Entity, Added<AimLine>>,
+    cracks: Query<Entity, Added<CrackDecal>>,
+    shots: Query<Entity, Or<(Added<EnemyProjectile>, Added<MortarShell>)>>,
+    beams: Query<Entity, Added<AnubotBeamVis>>,
 ) {
-    for (e, base, mut mat) in &mut q {
+    let hc = save.accessibility.high_contrast;
+    let outline = |mesh: &Handle<Mesh>, tf: Transform| {
+        (HazardDecor::Outline, Mesh3d(mesh.clone()), MeshMaterial3d(assets.outline_mat.clone()), tf)
+    };
+    for (e, tg) in &tels {
+        // `get_entity`: a hazard can be retired in the very frame it is first seen here.
+        let Ok(mut ec) = commands.get_entity(e) else { continue };
+        ec.with_children(|c| {
+            if tg.radius > 0.0 {
+                if tg.ring {
+                    let safe = Transform::from_scale(Vec3::splat(SLAM_SAFE_FRACTION));
+                    c.spawn((HazardDecor::SafeRing, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
+                    c.spawn((HazardDecor::Sweep, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
+                    if hc {
+                        c.spawn(outline(&assets.ring_outline_mesh, safe));
+                    }
+                } else {
+                    c.spawn((
+                        HazardDecor::Sweep,
+                        Mesh3d(assets.disc_mesh.clone()),
+                        MeshMaterial3d(assets.ring_fill_mat.clone()),
+                        Transform::from_scale(Vec3::new(0.0, 1.0, 0.0)),
+                    ));
+                }
+            }
+            if hc {
+                c.spawn(outline(&assets.ring_outline_mesh, Transform::IDENTITY));
+            }
+        });
+    }
+    if !hc {
+        return;
+    }
+    let hulls = lines
+        .iter()
+        .map(|e| (e, &assets.aim_outline_mesh, Transform::IDENTITY))
+        .chain(cracks.iter().map(|e| (e, &assets.crack_outline_mesh, Transform::IDENTITY)))
+        .chain(shots.iter().map(|e| (e, &assets.proj_outline_mesh, Transform::IDENTITY)))
+        .chain(beams.iter().map(|e| (e, &assets.beam_mesh, Transform::from_scale(Vec3::new(1.08, 1.6, 1.004)))));
+    for (e, mesh, tf) in hulls {
+        let Ok(mut ec) = commands.get_entity(e) else { continue };
+        ec.with_children(|c| {
+            c.spawn(outline(mesh, tf));
+        });
+    }
+}
+
+/// PRESENTATION: sweep each telegraph's fill out toward the lethal edge as impact nears —
+/// the countdown, told by motion. A disc fills from the center; a slam's band fills from
+/// its safe inner edge outward.
+pub fn animate_hazard_decor(
+    q_tel: Query<(&Telegraph, &Children)>,
+    mut q_decor: Query<(&HazardDecor, &mut Transform), Without<Telegraph>>,
+) {
+    for (tg, children) in &q_tel {
+        let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
+        for child in children.iter() {
+            let Ok((decor, mut tf)) = q_decor.get_mut(child) else { continue };
+            if *decor != HazardDecor::Sweep {
+                continue;
+            }
+            tf.scale = if tg.ring {
+                Vec3::splat(SLAM_SAFE_FRACTION + (1.0 - SLAM_SAFE_FRACTION) * t)
+            } else {
+                Vec3::new(t, 1.0, t)
+            };
+        }
+    }
+}
+
+/// PRESENTATION: put the danger materials in the viewer's palette, and the hit-flash glow at
+/// the flash-reduction setting. The materials are shared handles, so recoloring every
+/// telegraph, shot and beam on the planet is five asset writes — no per-entity work.
+pub fn apply_danger_palette(
+    save: Res<crate::save::MetaSave>,
+    assets: Option<Res<EnemyAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut applied: Local<Option<(Palette, bool)>>,
+) {
+    let want = (save.accessibility.palette, save.accessibility.flash_reduction);
+    if *applied == Some(want) {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    let targets = [&assets.ring_mat, &assets.ring_fill_mat, &assets.proj_mat, &assets.beam_charge_mat, &assets.beam_fire_mat];
+    for (handle, (base, glow)) in targets.into_iter().zip(danger_looks(want.0)) {
+        if let Some(m) = materials.get_mut(handle) {
+            m.base_color = base;
+            m.emissive = glow;
+        }
+    }
+    if let Some(m) = materials.get_mut(&assets.flash_mat) {
+        let k = if want.1 { HIT_FLASH_EMISSIVE_REDUCED } else { HIT_FLASH_EMISSIVE };
+        m.emissive = LinearRgba::rgb(k, k, k);
+    }
+    *applied = Some(want);
+}
+
+/// Swap the hit-flash material in and out. In photosensitivity mode an enemy may START a
+/// flash at most once per PHOTO_MIN_FLASH_INTERVAL: a crowd under an aura otherwise strobes
+/// white at the aura's tick rate. A held flash (hits landing faster than it fades) stays
+/// steadily white, which is not a flash at all.
+pub fn enemy_flash(
+    time: Res<Time<Real>>,
+    save: Res<crate::save::MetaSave>,
+    assets: Res<EnemyAssets>,
+    mut q: Query<(Entity, &Enemy, &BaseMat, &mut MeshMaterial3d<StandardMaterial>), Changed<Enemy>>,
+    // enemy -> when its current flash began; only enemies flashed in the last interval
+    mut recent: Local<HashMap<Entity, f32>>,
+) {
+    let photo = save.accessibility.photosensitive;
+    let now = time.elapsed_secs();
+    if photo {
+        recent.retain(|_, t| now - *t < PHOTO_MIN_FLASH_INTERVAL);
+    } else if !recent.is_empty() {
+        recent.clear();
+    }
+    for (entity, e, base, mut mat) in &mut q {
         if e.flash > 0.0 {
             if mat.0 != assets.flash_mat {
+                if photo {
+                    if recent.contains_key(&entity) {
+                        continue;
+                    }
+                    recent.insert(entity, now);
+                }
                 mat.0 = assets.flash_mat.clone();
             }
         } else if mat.0 != base.0 {

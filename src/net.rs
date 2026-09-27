@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime};
 /// desyncing in confusing ways. The refusal is a netcode handshake that never completes (a
 /// wrong id means the packets do not even decrypt), so `watch_client_connection` is what
 /// turns the resulting timeout into a readable "different version?" line.
-pub const PROTOCOL_ID: u64 = 0xA570B0_4; // bumped: miniboss cache (P01) + hero/slide/comet/storm/aim-line/session-end wire (P02)
+pub const PROTOCOL_ID: u64 = 0xA570B0_5; // bumped: §13 assists in RunSnapMsg, revives in PlayerVitals, burrow cracks on the hazard lane (P04)
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -107,6 +107,9 @@ pub struct PlayerVitals {
     pub max_hp: f32,
     pub level: u32,
     pub down: bool,
+    /// "One more chance" revives spent (§13). A counter, so a joiner's HUD sees the token
+    /// go and announces the revive even if a replication update in between was dropped.
+    pub revives: u8,
 }
 
 /// Host -> client: "you are player N". The client cannot infer this: replicon 0.40 exposes
@@ -165,6 +168,10 @@ pub struct RunSnapMsg {
     pub storm_dir: [f32; 3],
     pub storm_heading: [f32; 3],
     pub storm_radius: f32,
+    /// §13 "difficulty as options": the HOST's assists govern the whole squad's run, and a
+    /// joiner's HUD shows the ASSISTED tag and its "one more chance" token from these.
+    pub assist: crate::save::AssistOptions,
+    pub assisted: bool,
 }
 
 /// HOST -> CLIENT: the session is over. Sent just before the host drops the connection, so
@@ -362,6 +369,9 @@ pub enum HazardEvent {
     /// or the beamer died. A client also retires a line itself when the charge runs out, so
     /// an End that arrives late (this lane is unordered) never leaves one hanging.
     AimLineEnd { enemy: u16 },
+    /// A Burrower went under: its crack decal spreads over `dir` for `dur` seconds, then it
+    /// erupts (the eruption's own pop arrives as a Telegraph). §13's cracking-decal tell.
+    Crack { dir: [f32; 3], dur: f32 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -737,6 +747,8 @@ fn push_run_snapshot(
             storm_dir: storm.dir.to_array(),
             storm_heading: storm.heading.to_array(),
             storm_radius: storm.radius,
+            assist: run.assist,
+            assisted: run.assisted,
         },
     });
 }
@@ -787,6 +799,8 @@ fn apply_run_snapshot(
         storm.dir = Vec3::from(m.storm_dir);
         storm.heading = Vec3::from(m.storm_heading);
         storm.radius = m.storm_radius;
+        run.assist = m.assist;
+        run.assisted = m.assisted;
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
@@ -883,6 +897,8 @@ fn adopt_my_vitals(
     mine: Res<MyPlayerId>,
     vitals: Query<(&crate::player::PlayerId, &PlayerVitals), Without<crate::player::Player>>,
     mut q: Query<&mut crate::run::PlayerState, With<crate::player::LocalPlayer>>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
+    mut sfx: MessageWriter<crate::messages::SfxMsg>,
 ) {
     let Some(my_id) = mine.0 else { return };
     let Ok(mut ps) = q.single_mut() else { return };
@@ -890,6 +906,13 @@ fn adopt_my_vitals(
         if pid.0 == my_id {
             ps.hp = v.hp;
             ps.dead = v.down;
+            // The host spent our "one more chance": say so here, where the player is.
+            if v.revives as u32 > ps.revives {
+                banners.write(crate::messages::BannerMsg("ONE MORE CHANCE!".into()));
+                sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Shrine));
+                info!("NET the host spent our one-more-chance (hp {:.0})", v.hp);
+            }
+            ps.revives = v.revives as u32;
             break;
         }
     }
@@ -1605,6 +1628,7 @@ fn push_player_vitals(
         v.max_hp = ps.stats.max_hp;
         v.level = ps.level;
         v.down = ps.dead;
+        v.revives = ps.revives.min(u8::MAX as u32) as u8;
     }
 }
 
@@ -1951,6 +1975,10 @@ fn reset_after_session(
 //        windowed: host  --host --autodrop --botinput --autopick --netlog --planet mars --bossnow
 //                  client --join 127.0.0.1 --autodrop --botinput --autopick --netlog --hero valentina
 //    and compare the two sides' NETPARITY lines.
+//    §13 (P04): the host's assists ride RunSnapMsg (joiner HUD tag + token), a revive
+//    rides PlayerVitals.revives, and Burrower crack decals ride the hazard lane
+//    (HazardEvent::Crack). Accessibility settings are per-machine presentation and never
+//    cross the wire. Repro: coop.sh with `--dev --assist` on both instances.
 //    Client prediction now reconciles softly against the host's copy of us
 //    (`reconcile_own_astronaut`); a proper rewind-and-replay of unacknowledged inputs is
 //    still open, and is only worth it once latency beyond a LAN matters.

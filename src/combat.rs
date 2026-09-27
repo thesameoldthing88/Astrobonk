@@ -9,7 +9,7 @@ use crate::interact::Pot;
 use crate::messages::*;
 use crate::planet::{CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{PlayerState, RunPhase, RunState};
+use crate::run::{PlayerState, RunState};
 use crate::sphere;
 use bevy::prelude::*;
 use rand::Rng;
@@ -73,7 +73,7 @@ pub fn setup_weapon_assets(
             kind,
             materials.add(StandardMaterial {
                 base_color: c,
-                emissive: c.to_linear() * 3.0,
+                emissive: c.to_linear() * WEAPON_GLOW,
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 ..default()
@@ -207,13 +207,40 @@ fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32, bo
     (mult, crit)
 }
 
+/// The weapons whose visuals strobe: chain lightning re-zaps at the fire rate, and the
+/// DEATH RAY is the brightest bloom source in the game. Photosensitivity mode softens their
+/// glow (§13: "disables Storm Core strobe, softens Death Ray bloom").
+const STROBING_WEAPONS: [WeaponKind; 3] = [WeaponKind::Tesla, WeaponKind::StormCore, WeaponKind::DeathRay];
+
+/// PRESENTATION: retune the strobing weapons' shared materials when photosensitivity mode
+/// changes.
+pub fn apply_weapon_glow(
+    save: Res<crate::save::MetaSave>,
+    assets: Option<Res<WeaponAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut applied: Local<Option<bool>>,
+) {
+    let photo = save.accessibility.photosensitive;
+    if *applied == Some(photo) {
+        return;
+    }
+    let Some(assets) = assets else { return };
+    let k = if photo { WEAPON_GLOW_PHOTO } else { WEAPON_GLOW };
+    for kind in STROBING_WEAPONS {
+        if let Some(m) = assets.mats.get(&kind).and_then(|h| materials.get_mut(h)) {
+            m.emissive = kind.def().color.to_linear() * k;
+        }
+    }
+    *applied = Some(photo);
+}
+
 /// Tick weapon cooldowns and fire.
 #[allow(clippy::too_many_arguments)]
 pub fn weapon_fire(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<WeaponAssets>,
-    _planet: Res<CurrentPlanet>,
+    (save, mut flash_gate): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>),
     mut q_player: Query<(Entity, &Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>)>,
     enemies: Query<(Entity, &Transform, &Enemy), (Without<Buried>, Without<Player>)>,
     q_pots: Query<(), With<Pot>>,
@@ -449,24 +476,31 @@ pub fn weapon_fire(
                     from = pos;
                     max_d = link_range;
                 }
+                // Photosensitivity: one astronaut's zaps light up under 3/s, and linger
+                // as a soft fade instead of a 0.12 s strobe. Damage is unaffected.
+                let photo = save.accessibility.photosensitive;
+                let zap_life = if photo { 0.3 } else { 0.12 };
+                let show_zaps = !photo || flash_gate.allow(pe.to_bits(), time.elapsed_secs());
                 let mut prev = origin;
                 for (e, pos) in &chain {
                     let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
                     let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
                     hits.write(HitMsg { source: Some(pe), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO });
                     // zap segment visual
-                    let mid = (prev + *pos) / 2.0;
-                    let len = prev.distance(*pos);
-                    let dirv = (*pos - prev).normalize_or_zero();
-                    commands.spawn((
-                        Mesh3d(assets.beam_mesh.clone()),
-                        MeshMaterial3d(assets.mats[&wi.kind].clone()),
-                        Transform::from_translation(mid)
-                            .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
-                            .with_scale(Vec3::new(0.12, 0.12, len)),
-                        Fader { life: 0.12, max: 0.12 },
-                        StageScoped,
-                    ));
+                    if show_zaps {
+                        let mid = (prev + *pos) / 2.0;
+                        let len = prev.distance(*pos);
+                        let dirv = (*pos - prev).normalize_or_zero();
+                        commands.spawn((
+                            Mesh3d(assets.beam_mesh.clone()),
+                            MeshMaterial3d(assets.mats[&wi.kind].clone()),
+                            Transform::from_translation(mid)
+                                .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
+                                .with_scale(Vec3::new(0.12, 0.12, len)),
+                            Fader { life: zap_life, max: zap_life },
+                            StageScoped,
+                        ));
+                    }
                     prev = *pos;
                 }
                 if !chain.is_empty() {
@@ -974,23 +1008,30 @@ pub fn apply_hits(
     }
 }
 
-/// Resolve hits on the player: evasion -> shield -> armor -> hp, thorns reflect.
+/// Resolve hits on the player: evasion -> shield -> armor -> hp, thorns reflect. The §13
+/// enemy-damage assist scales every hit here, where it lands, so shots and telegraphs that
+/// were already in flight when the slider moved honour it too; a would-be-lethal hit is the
+/// "one more chance" token's to catch.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_player_hits(
     mut reader: MessageReader<PlayerHitMsg>,
-    mut run: ResMut<RunState>,
-    mut q_ps: Query<(&mut PlayerState, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    hash: Res<SpatialHash>,
+    mut q_ps: Query<(&mut PlayerState, &Player, &Transform, Has<crate::player::LocalPlayer>)>,
+    mut q_crowd: Query<&mut Enemy, (Without<Boss>, Without<Pot>)>,
     mut shake: ResMut<Shake>,
-    mut phase: ResMut<RunPhase>,
     mut hits: MessageWriter<HitMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
         // Address the hit to its actual victim. `continue`, never unwrap: messages are
         // double-buffered, so a victim CAN be despawned between the write and this read
         // (stage change, disconnect).
-        let Ok((mut run_ps, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
+        let Ok((mut run_ps, player, ptf, is_local)) = q_ps.get_mut(msg.victim) else { continue };
         if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
             continue;
         }
@@ -999,7 +1040,7 @@ pub fn apply_player_hits(
             numbers.write(NumberMsg { pos: ptf.translation, amount: 0.0, kind: NumKind::Dodge });
             continue;
         }
-        let mut amount = msg.amount * (1.0 - run_ps.effective_armor_fraction());
+        let mut amount = msg.amount * run.assist.enemy_damage * (1.0 - run_ps.effective_armor_fraction());
         // shield first
         if run_ps.shield > 0.0 {
             let absorbed = run_ps.shield.min(amount);
@@ -1023,7 +1064,27 @@ pub fn apply_player_hits(
 
         if run_ps.hp <= 0.0 {
             run_ps.hp = 0.0;
-            run_ps.dead = true;
+            if run_ps.try_revive_token(&run.assist) {
+                // Clear a breathing ring so the second chance does not open inside the same
+                // crowd that closed the first. Crowd only — bosses hold their ground.
+                for (e, _) in hash.near(ptf.translation, REVIVE_NOVA_RADIUS) {
+                    let Ok(mut en) = q_crowd.get_mut(e) else { continue };
+                    let arc = sphere::arc_dist(en.dir, player.dir, planet.radius);
+                    if arc >= REVIVE_NOVA_RADIUS {
+                        continue;
+                    }
+                    let away = en.dir - player.dir * en.dir.dot(player.dir);
+                    let away = away.try_normalize().unwrap_or_else(|| sphere::tangent_frame(player.dir).0);
+                    en.knock += away * REVIVE_NOVA_KNOCK * (1.0 - arc / REVIVE_NOVA_RADIUS).max(0.3);
+                }
+                if is_local {
+                    banners.write(BannerMsg("ONE MORE CHANCE!".into()));
+                }
+                sfx.write(SfxMsg(Sfx::Shrine));
+                info!("revive token spent (hp -> {:.0})", run_ps.hp);
+            } else {
+                run_ps.dead = true;
+            }
         }
     }
 }

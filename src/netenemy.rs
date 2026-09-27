@@ -32,7 +32,7 @@ use crate::content::enemies::EnemyKind;
 use crate::enemies::{Enemy, EnemyAssets};
 use crate::content::enemies::BossKind;
 use crate::enemies::{AnubotBeam, Boss, CraterpillarHead, CraterpillarSegment, WORM_SEGMENTS};
-use crate::enemies::{AimLine, Beamer, EnemyProjectile, MortarShell, Telegraph};
+use crate::enemies::{AimLine, Beamer, CrackDecal, EnemyProjectile, MortarShell, Telegraph};
 use crate::net::{
     BossRec, BossSnapMsg, EnemySnapMsg, HazardEvent, HazardEventMsg, MyPlayerId, NetRole,
     PeerSlots, PickupEvent, PickupEventMsg,
@@ -481,6 +481,7 @@ fn stream_hazards(
     added_tel: Query<&Telegraph, Added<Telegraph>>,
     added_mortar: Query<&MortarShell, Added<MortarShell>>,
     added_lines: Query<(Entity, &AimLine), Added<AimLine>>,
+    added_cracks: Query<&CrackDecal, (Added<CrackDecal>, Without<NetHazard>)>,
     beamers: Query<(&NetId, &Beamer)>,
     astronauts: Query<&PlayerId>,
     mut removed_lines: RemovedComponents<AimLine>,
@@ -528,6 +529,9 @@ fn stream_hazards(
             dur: m.dur,
         });
     }
+    for c in &added_cracks {
+        events.push(HazardEvent::Crack { dir: c.dir.to_array(), dur: c.timer });
+    }
     if events.is_empty() {
         return;
     }
@@ -563,11 +567,13 @@ fn receive_hazards(
                         NetAimTarget(target),
                     ));
                     commands.spawn((
-                        AimLine { owner: proxy },
+                        AimLine { owner: proxy, march: 0.0 },
                         NetHazard,
-                        Mesh3d(assets.proj_mesh.clone()),
+                        Mesh3d(assets.aim_mesh.clone()),
                         MeshMaterial3d(assets.ring_mat.clone()),
-                        Transform::from_translation(planet.surface_point(Vec3::Y)),
+                        // zero-scaled: the proxy's aim is unknown until drive_net_aim_lines
+                        // sweeps it, and a unit-sized line would sit at the pole meanwhile
+                        Transform::from_translation(planet.surface_point(Vec3::Y)).with_scale(Vec3::ZERO),
                         crate::planet::StageScoped,
                     ));
                 }
@@ -601,17 +607,17 @@ fn receive_hazards(
                 HazardEvent::Telegraph { dir, radius, max, ring } => {
                     let dir = Vec3::from(dir);
                     commands.spawn((
-                        Telegraph { timer: max, max, radius, damage: 0.0, dir, ring },
+                        crate::enemies::telegraph_bundle(
+                            &assets,
+                            &planet,
+                            Telegraph { timer: max, max, radius, damage: 0.0, dir, ring },
+                        ),
                         NetHazard,
-                        Mesh3d(assets.ring_mesh.clone()),
-                        MeshMaterial3d(assets.ring_mat.clone()),
-                        Transform::from_translation(planet.surface_point(dir) + dir * 0.15)
-                            .with_rotation(
-                                sphere::frame_quat(dir, sphere::tangent_frame(dir).0)
-                                    * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2),
-                            ),
-                        crate::planet::StageScoped,
                     ));
+                }
+                HazardEvent::Crack { dir, dur } => {
+                    let crack = crate::enemies::spawn_crack_decal(&mut commands, &assets, &planet, Vec3::from(dir), dur);
+                    commands.entity(crack).insert(NetHazard);
                 }
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);

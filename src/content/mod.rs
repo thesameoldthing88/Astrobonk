@@ -1,6 +1,7 @@
 pub mod characters;
 pub mod enemies;
 pub mod items;
+pub mod palettes;
 pub mod planets;
 pub mod quests;
 pub mod tomes;
@@ -17,14 +18,9 @@ pub enum Rarity {
 }
 
 impl Rarity {
-    pub fn color(&self) -> bevy::prelude::Color {
-        use bevy::prelude::Color;
-        match self {
-            Rarity::Common => Color::srgb(0.75, 0.78, 0.80),
-            Rarity::Rare => Color::srgb(0.30, 0.65, 1.00),
-            Rarity::Epic => Color::srgb(0.75, 0.35, 1.00),
-            Rarity::Legendary => Color::srgb(1.00, 0.72, 0.15),
-        }
+    /// The grade's signal color in the viewer's palette (colorblind palettes remap it).
+    pub fn color(&self, palette: palettes::Palette) -> bevy::prelude::Color {
+        palette.rarity(*self)
     }
     pub fn name(&self) -> &'static str {
         match self {

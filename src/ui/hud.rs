@@ -6,6 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
+use crate::config::{HURT_TINT_MAX, HURT_TINT_MAX_REDUCED};
 use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
@@ -47,6 +48,9 @@ pub struct Vignette;
 pub struct CometText;
 #[derive(Component)]
 pub struct DustOverlay;
+/// §13 assists in force (and the "one more chance" token), under the counters.
+#[derive(Component)]
+pub struct AssistText;
 /// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
 #[derive(Component)]
 pub struct EdgeMarker;
@@ -194,6 +198,7 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((GoldText, txt("GOLD 0", FONT_MED, Color::srgb(1.0, 0.85, 0.3))));
                     c.spawn((SilverText, txt("SILVER +0", FONT_MED, Color::srgb(0.75, 0.85, 1.0))));
                     c.spawn((PowerupText, txt("", FONT_SMALL, Color::srgb(0.85, 0.5, 1.0))));
+                    c.spawn((AssistText, txt("", FONT_SMALL, Color::srgb(0.55, 0.9, 1.0)), TextLayout::new_with_justify(Justify::Right)));
                 });
 
             // banner center
@@ -332,6 +337,7 @@ pub fn update_hud(
         Query<&mut Node, With<HpFill>>,
     )>,
     mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
+    save: Res<crate::save::MetaSave>,
 ) {
     let Ok(ps) = q_ps.single() else { return };
     if let Ok(mut t) = sets.p0().single_mut() {
@@ -378,7 +384,32 @@ pub fn update_hud(
         n.width = Val::Percent((ps.hp / ps.stats.max_hp * 100.0).clamp(0.0, 100.0));
     }
     if let Ok(mut bg) = vignette.single_mut() {
-        bg.0 = Color::srgba(1.0, 0.1, 0.1, (ps.iframes * 0.55).clamp(0.0, 0.4));
+        // The hurt tint rides the 0.4 s hit i-frames; longer ones are a revive's grace,
+        // which is good news and gets no red. Flash reduction keeps it to a faint wash.
+        let max = if save.accessibility.flash_reduction { HURT_TINT_MAX_REDUCED } else { HURT_TINT_MAX };
+        let a = if ps.iframes > 0.41 { 0.0 } else { (ps.iframes * 0.55).clamp(0.0, max) };
+        bg.0 = save.accessibility.palette.danger().with_alpha(a);
+    }
+}
+
+/// The assists in force, so nobody mistakes an eased run for a canon one — including a
+/// joiner, whose run is the host's (`RunState::assist` arrives in RunSnapMsg) — and the
+/// "one more chance" token while it is still in hand.
+pub fn update_assist_hud(
+    run: Res<RunState>,
+    q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
+    mut q: Query<&mut Text, With<AssistText>>,
+) {
+    let Ok(mut t) = q.single_mut() else { return };
+    let token = match q_ps.single() {
+        Ok(ps) if run.assist.revive_token => {
+            if ps.revive_token_ready(&run.assist) { "\nONE MORE CHANCE: READY" } else { "\nONE MORE CHANCE: USED" }
+        }
+        _ => "",
+    };
+    let line = if run.assisted { format!("ASSISTED{token}") } else { String::new() };
+    if t.0 != line {
+        t.0 = line;
     }
 }
 
@@ -386,15 +417,17 @@ pub fn update_hud(
 pub fn update_weapon_row(
     mut commands: Commands,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
-    mut cache: Local<Vec<(WeaponKind, u32)>>,
+    save: Res<crate::save::MetaSave>,
+    mut cache: Local<(Vec<(WeaponKind, u32)>, Option<crate::content::palettes::Palette>)>,
     q_row: Query<Entity, With<WeaponRow>>,
 ) {
     let Ok(run) = q_ps.single() else { return };
     let current: Vec<(WeaponKind, u32)> = run.weapons.iter().map(|w| (w.kind, w.level)).collect();
-    if *cache == current {
+    let palette = save.accessibility.palette;
+    if cache.0 == current && cache.1 == Some(palette) {
         return;
     }
-    *cache = current.clone();
+    *cache = (current.clone(), Some(palette));
     let Ok(row) = q_row.single() else { return };
     commands.entity(row).despawn_related::<Children>();
     commands.entity(row).with_children(|c| {
@@ -429,11 +462,11 @@ pub fn update_weapon_row(
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.05, 0.05, 0.1, 0.7)),
-                BorderColor::all(d.rarity.color()),
+                BorderColor::all(d.rarity.color(palette)),
             ))
             .with_children(|chip| {
                 let tag: String = d.name.chars().take(2).collect();
-                chip.spawn(txt(format!("{tag}{count}"), 11.0, d.rarity.color()));
+                chip.spawn(txt(format!("{tag}{count}"), 11.0, d.rarity.color(palette)));
             });
         }
     });
@@ -445,6 +478,8 @@ pub fn update_weapon_row(
 /// this is how you navigate to them.
 #[allow(clippy::type_complexity)]
 pub fn update_edge_markers(
+    ui_scale: Res<UiScale>,
+    save: Res<crate::save::MetaSave>,
     camera: Query<(&Camera, &GlobalTransform), With<crate::player::PlayerRig>>,
     q_boss: Query<&Transform, With<crate::enemies::Boss>>,
     q_inter: Query<(&Transform, &crate::interact::Interactable)>,
@@ -460,7 +495,7 @@ pub fn update_edge_markers(
     // collect targets: (world pos, color, marker px size), priority order
     let mut targets: Vec<(Vec3, Color, f32)> = Vec::new();
     for tf in &q_boss {
-        targets.push((tf.translation, Color::srgb(1.0, 0.25, 0.2), 16.0));
+        targets.push((tf.translation, save.accessibility.palette.danger(), 16.0));
     }
     for (tf, inter) in &q_inter {
         if inter.used {
@@ -513,7 +548,8 @@ pub fn update_edge_markers(
         let half = center - Vec2::splat(margin);
         let scale_x = if d.x.abs() > 1e-4 { half.x / d.x.abs() } else { f32::MAX };
         let scale_y = if d.y.abs() > 1e-4 { half.y / d.y.abs() } else { f32::MAX };
-        let pos = center + d * scale_x.min(scale_y);
+        // Logical pixels -> UI units: UiScale multiplies every Val::Px.
+        let pos = (center + d * scale_x.min(scale_y)) / ui_scale.0.max(0.01);
 
         node.left = Val::Px(pos.x - px / 2.0);
         node.top = Val::Px(pos.y - px / 2.0);
@@ -570,11 +606,13 @@ pub fn update_comet_hud(
 }
 
 pub fn update_boss_bar(
+    save: Res<crate::save::MetaSave>,
     q_boss: Query<(&Enemy, &Boss)>,
     mut wrap: Query<&mut Visibility, With<BossBarWrap>>,
-    mut fill: Query<&mut Node, With<BossBarFill>>,
-    mut name: Query<&mut Text, With<BossBarName>>,
+    mut fill: Query<(&mut Node, &mut BackgroundColor), With<BossBarFill>>,
+    mut name: Query<(&mut Text, &mut TextColor), With<BossBarName>>,
 ) {
+    let danger = save.accessibility.palette.danger();
     let Ok(mut vis) = wrap.single_mut() else { return };
     // show the beefiest live boss
     let mut best: Option<(f32, f32, &'static str)> = None;
@@ -587,11 +625,13 @@ pub fn update_boss_bar(
     match best {
         Some((hp, max, n)) => {
             *vis = Visibility::Visible;
-            if let Ok(mut f) = fill.single_mut() {
+            if let Ok((mut f, mut bg)) = fill.single_mut() {
                 f.width = Val::Percent((hp / max * 100.0).clamp(0.0, 100.0));
+                bg.0 = danger;
             }
-            if let Ok(mut t) = name.single_mut() {
+            if let Ok((mut t, mut c)) = name.single_mut() {
                 t.0 = n.to_string();
+                c.0 = danger.mix(&Color::WHITE, 0.35);
             }
         }
         None => {

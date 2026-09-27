@@ -167,7 +167,7 @@ pub fn spawn_player(
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false },
-                crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
+                crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false, revives: 0 },
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 bevy_replicon::prelude::Replicated,

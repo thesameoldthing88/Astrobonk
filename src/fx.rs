@@ -1,6 +1,12 @@
-//! Juice: screenshake, hitstop, and a tiny pooled particle system.
+//! Juice: screenshake, hitstop, a tiny pooled particle system — and the §13 guards on all
+//! of it: the evolution screen flash (gone under flash reduction), the bloom clamp, and the
+//! photosensitivity gate that keeps anything strobing under three flashes a second.
 
+use crate::config::*;
 use crate::planet::StageScoped;
+use crate::save::MetaSave;
+use bevy::platform::collections::HashMap;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use rand::Rng;
 
@@ -43,6 +49,121 @@ pub fn hitstop_system(
     }
 }
 
+// ---------------------------------------------------------------- flash guards
+
+/// Photosensitivity mode's rate limiter (§13: "throttles ... flicker to <3 flashes/sec").
+/// Each strobing source asks before it lights up, under its own key — one astronaut's chain
+/// zaps, the horde's death bursts — and is refused until PHOTO_MIN_FLASH_INTERVAL has passed
+/// since that source last flashed. Only consulted in photosensitivity mode.
+#[derive(Resource, Default)]
+pub struct FlashGate {
+    last: HashMap<u64, f32>,
+}
+
+/// FlashGate key for the horde's death bursts (one shared budget: a wave dying at once is
+/// exactly the strobe the mode exists to stop).
+pub const GATE_KILL_BURSTS: u64 = u64::MAX;
+
+impl FlashGate {
+    pub fn allow(&mut self, key: u64, now: f32) -> bool {
+        match self.last.get(&key) {
+            Some(t) if now - *t < PHOTO_MIN_FLASH_INTERVAL => false,
+            _ => {
+                self.last.insert(key, now);
+                // keys are per-astronaut and a handful of globals, but never let it grow
+                if self.last.len() > 64 {
+                    self.last.retain(|_, t| now - *t < PHOTO_MIN_FLASH_INTERVAL);
+                }
+                true
+            }
+        }
+    }
+}
+
+/// A full-screen color flash (the evolution white-flash). Flash reduction suppresses it at
+/// the source, so nothing downstream has to know the setting.
+#[derive(Resource, Default)]
+pub struct ScreenFlash {
+    pub color: Color,
+    pub alpha: f32,
+}
+
+impl ScreenFlash {
+    pub fn fire(&mut self, color: Color, save: &MetaSave) {
+        if save.accessibility.flash_reduction {
+            return;
+        }
+        self.color = color;
+        self.alpha = EVOLVE_FLASH_ALPHA;
+    }
+}
+
+#[derive(Component)]
+pub struct ScreenFlashOverlay;
+
+pub fn spawn_screen_flash(mut commands: Commands) {
+    commands.spawn((
+        ScreenFlashOverlay,
+        Node {
+            position_type: PositionType::Absolute,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        BackgroundColor(Color::NONE),
+        // over the HUD, under the modal panels
+        GlobalZIndex(5),
+        Pickable::IGNORE,
+    ));
+}
+
+pub fn update_screen_flash(
+    time: Res<Time<Real>>,
+    mut flash: ResMut<ScreenFlash>,
+    mut q: Query<&mut BackgroundColor, With<ScreenFlashOverlay>>,
+) {
+    if flash.alpha <= 0.0 && !flash.is_changed() {
+        return;
+    }
+    flash.alpha = (flash.alpha - time.delta_secs() * EVOLVE_FLASH_ALPHA / EVOLVE_FLASH_SECS).max(0.0);
+    for mut bg in &mut q {
+        bg.0 = flash.color.with_alpha(flash.alpha);
+    }
+}
+
+/// Flash reduction clamps the camera's bloom; it and the palette also retune the particle
+/// glow (and the danger-colored sparks). Shared material handles and one camera, so a
+/// settings change costs a handful of writes.
+pub fn apply_fx_settings(
+    save: Res<MetaSave>,
+    particles: Option<Res<ParticleAssets>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut blooms: Query<&mut Bloom>,
+    mut applied: Local<Option<(bool, crate::content::palettes::Palette)>>,
+) {
+    let want = (save.accessibility.flash_reduction, save.accessibility.palette);
+    if *applied == Some(want) && blooms.iter().all(|b| b.intensity == bloom_for(want.0)) {
+        return;
+    }
+    for mut b in &mut blooms {
+        b.intensity = bloom_for(want.0);
+    }
+    let Some(pa) = particles else { return };
+    let k = if want.0 { PARTICLE_EMISSIVE_REDUCED } else { PARTICLE_EMISSIVE };
+    for (kind, handle) in &pa.mats {
+        let base = if *kind == Pcolor::Danger { want.1.danger() } else { kind.color() };
+        if let Some(m) = materials.get_mut(handle) {
+            m.base_color = base;
+            m.emissive = base.to_linear() * k;
+        }
+    }
+    *applied = Some(want);
+}
+
+fn bloom_for(flash_reduction: bool) -> f32 {
+    if flash_reduction { BLOOM_INTENSITY_REDUCED } else { BLOOM_INTENSITY }
+}
+
 /// Pause/unpause virtual time when the phase changes.
 pub fn phase_time_control(phase: Res<crate::run::RunPhase>, mut virt: ResMut<Time<Virtual>>) {
     use crate::run::RunPhase;
@@ -69,6 +190,35 @@ pub enum Pcolor {
     Blue,
     Purple,
     Cyan,
+    /// Telegraph detonations: follows the colorblind palette's danger color.
+    Danger,
+}
+
+impl Pcolor {
+    const ALL: [Pcolor; 8] = [
+        Pcolor::White,
+        Pcolor::Gold,
+        Pcolor::Green,
+        Pcolor::Red,
+        Pcolor::Blue,
+        Pcolor::Purple,
+        Pcolor::Cyan,
+        Pcolor::Danger,
+    ];
+
+    /// Canon color (Danger's is the Standard palette's; `apply_fx_settings` retints it).
+    fn color(&self) -> Color {
+        match self {
+            Pcolor::White => Color::srgb(1.0, 1.0, 1.0),
+            Pcolor::Gold => Color::srgb(1.0, 0.85, 0.2),
+            Pcolor::Green => Color::srgb(0.4, 1.0, 0.5),
+            Pcolor::Red => Color::srgb(1.0, 0.3, 0.25),
+            Pcolor::Blue => Color::srgb(0.4, 0.6, 1.0),
+            Pcolor::Purple => Color::srgb(0.8, 0.4, 1.0),
+            Pcolor::Cyan => Color::srgb(0.4, 1.0, 1.0),
+            Pcolor::Danger => crate::content::palettes::Palette::Standard.danger(),
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -100,23 +250,15 @@ pub fn setup_particles(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let colors = [
-        (Pcolor::White, Color::srgb(1.0, 1.0, 1.0)),
-        (Pcolor::Gold, Color::srgb(1.0, 0.85, 0.2)),
-        (Pcolor::Green, Color::srgb(0.4, 1.0, 0.5)),
-        (Pcolor::Red, Color::srgb(1.0, 0.3, 0.25)),
-        (Pcolor::Blue, Color::srgb(0.4, 0.6, 1.0)),
-        (Pcolor::Purple, Color::srgb(0.8, 0.4, 1.0)),
-        (Pcolor::Cyan, Color::srgb(0.4, 1.0, 1.0)),
-    ];
-    let mats = colors
+    let mats = Pcolor::ALL
         .iter()
-        .map(|(k, c)| {
+        .map(|k| {
+            let c = k.color();
             (
                 *k,
                 materials.add(StandardMaterial {
-                    base_color: *c,
-                    emissive: c.to_linear() * 2.5,
+                    base_color: c,
+                    emissive: c.to_linear() * PARTICLE_EMISSIVE,
                     unlit: true,
                     ..default()
                 }),

@@ -2,6 +2,7 @@
 
 use crate::config;
 use crate::content::characters::AstronautKind;
+use crate::content::palettes::Palette;
 use crate::content::planets::PlanetKind;
 use crate::content::quests::{QuestKind, Reward};
 use crate::content::tomes::TomeKind;
@@ -28,6 +29,123 @@ pub struct Counters {
     pub cleared: HashSet<(PlanetKind, u32)>,
 }
 
+/// How floating damage numbers are drawn (GDD §13 "Toggle: Full / Merged-only /
+/// Crits-only / Off"). Heal and DODGE readouts are about the player, not damage dealt, so
+/// only Off hides them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NumberMode {
+    /// Every hit, coalescing only per the §13 rule (0.3 m / 0.1 s) or when the screen is
+    /// crowded.
+    #[default]
+    Full,
+    /// Every nearby hit folds into a running sum — totals, never individual hits.
+    Merged,
+    CritsOnly,
+    Off,
+}
+
+impl NumberMode {
+    pub const ALL: [NumberMode; 4] = [NumberMode::Full, NumberMode::Merged, NumberMode::CritsOnly, NumberMode::Off];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            NumberMode::Full => "FULL",
+            NumberMode::Merged => "MERGED ONLY",
+            NumberMode::CritsOnly => "CRITS ONLY",
+            NumberMode::Off => "OFF",
+        }
+    }
+}
+
+/// Accessibility settings (GDD §13). Presentation only — each machine reads its own, so in
+/// co-op every player sees the game their way; none of it touches the simulation.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Accessibility {
+    /// Colorblind palette for the colors that carry meaning (danger, rarity).
+    pub palette: Palette,
+    /// "Danger = white outline": every telegraph, aim line and enemy shot gets a white hull.
+    pub high_contrast: bool,
+    /// Kills the evolution white-flash, clamps bloom, softens hit-flash glow and hurt tint.
+    pub flash_reduction: bool,
+    /// Nothing strobes faster than 3/s: hit-flashes, chain zaps, death bursts, telegraph
+    /// pulses; DEATH RAY / STORM CORE glow softened.
+    pub photosensitive: bool,
+    /// Bevy `UiScale`, `UI_SCALE_MIN..=UI_SCALE_MAX`.
+    pub ui_scale: f32,
+    pub numbers: NumberMode,
+    /// Damage-number size multiplier, `NUMBER_SIZE_MIN..=NUMBER_SIZE_MAX`.
+    pub number_size: f32,
+}
+
+impl Default for Accessibility {
+    fn default() -> Self {
+        Self {
+            palette: Palette::Standard,
+            high_contrast: false,
+            flash_reduction: false,
+            photosensitive: false,
+            ui_scale: 1.0,
+            numbers: NumberMode::Full,
+            number_size: 1.0,
+        }
+    }
+}
+
+/// "Difficulty as options, not menus" (GDD §13): independent sliders layered on top of the
+/// canon Difficulty/Cursed systems. They only ever EASE the run, and a run that used any of
+/// them is flagged (`RunState::assisted`) — it still earns Silver, but its daily score is
+/// kept apart from the unassisted board. In co-op the HOST's options govern the run.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(default)]
+pub struct AssistOptions {
+    /// Spawn-rate and live-cap multiplier, `ASSIST_DENSITY_MIN..=1`.
+    pub enemy_density: f32,
+    /// Multiplier on every hit an astronaut takes, `ASSIST_DAMAGE_MIN..=1`.
+    pub enemy_damage: f32,
+    /// "One more chance": each astronaut survives one would-be-lethal hit per run.
+    pub revive_token: bool,
+}
+
+impl Default for AssistOptions {
+    fn default() -> Self {
+        Self { enemy_density: 1.0, enemy_damage: 1.0, revive_token: false }
+    }
+}
+
+impl AssistOptions {
+    /// Any option away from canon — the test that flags a run.
+    pub fn is_assisted(&self) -> bool {
+        self.enemy_density < 0.999 || self.enemy_damage < 0.999 || self.revive_token
+    }
+
+    /// Into range. The sliders cannot leave it, but a hand-edited save (or a future build's
+    /// save opened by this one) can.
+    pub fn clamped(self) -> Self {
+        let fix = |v: f32, min: f32| if v.is_finite() { v.clamp(min, 1.0) } else { 1.0 };
+        Self {
+            enemy_density: fix(self.enemy_density, config::ASSIST_DENSITY_MIN),
+            enemy_damage: fix(self.enemy_damage, config::ASSIST_DAMAGE_MIN),
+            revive_token: self.revive_token,
+        }
+    }
+
+    /// One line for the results screen and the HUD tag, e.g. "density 50% · damage 70%".
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if self.enemy_density < 0.999 {
+            parts.push(format!("enemy density {:.0}%", self.enemy_density * 100.0));
+        }
+        if self.enemy_damage < 0.999 {
+            parts.push(format!("enemy damage {:.0}%", self.enemy_damage * 100.0));
+        }
+        if self.revive_token {
+            parts.push("one more chance".to_string());
+        }
+        parts.join(" / ")
+    }
+}
+
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)] // missing fields (e.g. from older saves) fall back to Default — never wipe progress
 pub struct MetaSave {
@@ -45,10 +163,14 @@ pub struct MetaSave {
     pub music_volume: f32,
     pub sfx_volume: f32,
     pub sensitivity: f32, // camera-sensitivity multiplier
-    pub shake_scale: f32, // screenshake intensity multiplier
+    pub shake_scale: f32, // screenshake slider, 0..=1 (§13 "0–100%")
+    pub accessibility: Accessibility,
+    pub assist: AssistOptions,
     // --- daily seeded planet ---
     pub daily_day: u64,   // day-number of the last daily played
     pub daily_best: u64,  // best score on that day
+    /// Best ASSISTED score on that day — kept apart so assists never touch the real board.
+    pub daily_best_assisted: u64,
     pub tutorial_done: bool, // first-run onboarding seen
 }
 
@@ -97,8 +219,11 @@ impl Default for MetaSave {
             sfx_volume: 1.0,
             sensitivity: 1.0,
             shake_scale: 1.0,
+            accessibility: Accessibility::default(),
+            assist: AssistOptions::default(),
             daily_day: 0,
             daily_best: 0,
+            daily_best_assisted: 0,
             tutorial_done: false,
         }
     }
@@ -142,6 +267,17 @@ impl MetaSave {
         if self.counters.runs_started > 0 {
             self.tutorial_done = true;
         }
+        // The shake slider was 0–150% before §13 pinned it to 0–100% (100% is the canon
+        // budget that keeps the camera inside its 1.8° clamp).
+        self.shake_scale = if self.shake_scale.is_finite() { self.shake_scale.clamp(0.0, 1.0) } else { 1.0 };
+        let a = &mut self.accessibility;
+        a.ui_scale = if a.ui_scale.is_finite() { a.ui_scale.clamp(config::UI_SCALE_MIN, config::UI_SCALE_MAX) } else { 1.0 };
+        a.number_size = if a.number_size.is_finite() {
+            a.number_size.clamp(config::NUMBER_SIZE_MIN, config::NUMBER_SIZE_MAX)
+        } else {
+            1.0
+        };
+        self.assist = self.assist.clamped();
     }
 
     pub fn save(&self) {
@@ -237,4 +373,46 @@ impl MetaSave {
             _ => return None,
         })
     }
+}
+
+/// Headless self-check: a save written before the settings existed must load with every
+/// new setting at its default (nothing wiped), and the out-of-range values an old build or
+/// a hand edit can leave behind must come back in range.
+pub fn settings_self_check() -> Result<(), String> {
+    let legacy = r#"{"silver": 321, "shake_scale": 1.5, "volume": 0.4}"#;
+    let mut s: MetaSave = serde_json::from_str(legacy).map_err(|e| format!("legacy save rejected: {e}"))?;
+    s.migrate();
+    if s.silver != 321 || (s.volume - 0.4).abs() > 1e-6 {
+        return Err("a legacy save lost its progress/settings".into());
+    }
+    if s.accessibility != Accessibility::default() || s.assist != AssistOptions::default() || s.daily_best_assisted != 0 {
+        return Err("new settings did not default on a legacy save".into());
+    }
+    if s.shake_scale != 1.0 {
+        return Err(format!("legacy 150% shake should clamp to 100%, got {}", s.shake_scale));
+    }
+    let wild = r#"{"accessibility": {"ui_scale": 9.0, "number_size": 0.0, "palette": "Tritanopia"},
+                   "assist": {"enemy_density": -3.0, "enemy_damage": 4.0}}"#;
+    let mut w: MetaSave = serde_json::from_str(wild).map_err(|e| format!("partial settings rejected: {e}"))?;
+    w.migrate();
+    let a = &w.accessibility;
+    if a.ui_scale != config::UI_SCALE_MAX || a.number_size != config::NUMBER_SIZE_MIN || a.palette != Palette::Tritanopia {
+        return Err(format!("accessibility not clamped: {a:?}"));
+    }
+    if w.assist.enemy_density != config::ASSIST_DENSITY_MIN || w.assist.enemy_damage != 1.0 || w.assist.revive_token {
+        return Err(format!("assists not clamped: {:?}", w.assist));
+    }
+    if !w.assist.is_assisted() || AssistOptions::default().is_assisted() {
+        return Err("is_assisted() disagrees with the options".into());
+    }
+    // and a full round trip keeps every field
+    let mut r = MetaSave::default();
+    r.accessibility.palette = Palette::Deuteranopia;
+    r.accessibility.numbers = NumberMode::CritsOnly;
+    r.assist.revive_token = true;
+    let back: MetaSave = serde_json::from_str(&serde_json::to_string(&r).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    if back.accessibility != r.accessibility || back.assist != r.assist {
+        return Err("settings did not survive a save/load round trip".into());
+    }
+    Ok(())
 }

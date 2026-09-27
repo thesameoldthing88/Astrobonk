@@ -113,6 +113,9 @@ fn main() {
         .init_resource::<tutorial::Tutorial>()
         .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
+        .init_resource::<ui::settings::SettingsTab>()
+        .init_resource::<fx::FlashGate>()
+        .init_resource::<fx::ScreenFlash>()
         .init_resource::<ui::menus::Selected>()
         .init_resource::<ui::menus::MenuTab>()
         .init_resource::<ui::hud::BannerQueue>()
@@ -134,6 +137,7 @@ fn main() {
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
+                fx::spawn_screen_flash,
                 boot,
             ),
         )
@@ -236,12 +240,26 @@ fn main() {
                 // KEPT on clients: these three integrate the hazards the host streamed as
                 // spawn events. Gating them would freeze every shot and telegraph mid-air.
                 enemies::mortar_shells,
+                enemies::crack_decals,
                 enemies::enemy_projectiles,
                 enemies::boss_attacks.run_if(net::is_simulating),
                 enemies::telegraphs,
+                // PRESENTATION (§13): the readable-without-color parts of every hazard.
+                enemies::animate_hazard_decor,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (
+                // Presentation only, on every machine: children for new hazards, and the
+                // viewer's palette / flash settings on the shared hazard materials.
+                enemies::decorate_hazards,
+                enemies::apply_danger_palette,
+                combat::apply_weapon_glow,
+            )
+                .run_if(in_state(AppState::InRun)),
         )
         .add_systems(
             Update,
@@ -338,6 +356,7 @@ fn main() {
                 ui::hud::update_comet_hud,
                 ui::hud::update_dust_overlay,
                 ui::hud::update_edge_markers,
+                ui::hud::update_assist_hud,
                 tutorial::tutorial_system.run_if(playing),
                 ui::hud::update_banners,
                 ui::panels::sync_choice_panel,
@@ -371,6 +390,12 @@ fn main() {
                 // runs after pause_panel so a single ESC closes settings without also resuming
                 ui::settings::settings_panel.after(ui::panels::pause_panel),
                 ui::button_hover,
+                ui::settings::apply_ui_scale,
+                fx::apply_fx_settings,
+                fx::update_screen_flash,
+                // The host's (or solo player's) assist options are the run's; a client
+                // adopts the host's from RunSnapMsg instead.
+                director::sync_assist_options.run_if(net::is_simulating),
             ),
         )
         .run();
@@ -424,7 +449,7 @@ fn client_follow_host_run(
 
 /// Load the save; a placeholder RunState keeps Res<RunState> alive in menus.
 fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
-    let save = save::MetaSave::load();
+    let mut save = save::MetaSave::load();
     // --stagenow needs a MULTI-planet chain to advance into: tier 1 is Moon-only, so
     // advancing from it hits the victory branch instead. Tier 3 gives Moon -> Mars ->
     // DarkMoon, which also exercises the planet RADIUS change (140 -> 160) that would
@@ -443,6 +468,7 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
         Some("darkmoon") => content::planets::PlanetKind::DarkMoon,
         _ => content::planets::PlanetKind::Moon,
     };
+    dev_settings(&mut save, &args);
     let run_state = run::RunState::new(hero, planet, dev_tier, &save);
     commands.insert_resource(save);
     commands.insert_resource(run_state);
@@ -456,6 +482,51 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     } else {
         next.set(AppState::MainMenu);
     }
+}
+
+/// Test harness (needs `--dev`, CLAUDE.md rule 10) for the §13 settings, so a windowed or
+/// two-instance co-op run can exercise them without clicking through the settings panel in
+/// every window:
+///   `--dev --assist`       density 50%, damage 50%, one more chance
+///   `--dev --a11y LIST`    comma list of deut|prot|trit, outline, flash, photo, ui=PCT,
+///                          numbers=full|merged|crits|off, numsize=X
+/// In memory only; the save on disk changes only if the settings panel saves over it.
+fn dev_settings(save: &mut save::MetaSave, args: &[String]) {
+    if dev_flag("--assist") {
+        save.assist = save::AssistOptions { enemy_density: 0.5, enemy_damage: 0.5, revive_token: true };
+    }
+    if !dev_flag("--a11y") {
+        return;
+    }
+    let list = args.iter().position(|a| a == "--a11y").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    let a = &mut save.accessibility;
+    for tok in list.split(',') {
+        use content::palettes::Palette;
+        match tok.split_once('=') {
+            Some(("ui", v)) => a.ui_scale = v.parse::<f32>().map(|p| p / 100.0).unwrap_or(1.0),
+            Some(("numsize", v)) => a.number_size = v.parse().unwrap_or(1.0),
+            Some(("numbers", v)) => {
+                a.numbers = match v {
+                    "merged" => save::NumberMode::Merged,
+                    "crits" => save::NumberMode::CritsOnly,
+                    "off" => save::NumberMode::Off,
+                    _ => save::NumberMode::Full,
+                }
+            }
+            _ => match tok {
+                "deut" => a.palette = Palette::Deuteranopia,
+                "prot" => a.palette = Palette::Protanopia,
+                "trit" => a.palette = Palette::Tritanopia,
+                "outline" => a.high_contrast = true,
+                "flash" => a.flash_reduction = true,
+                "photo" => a.photosensitive = true,
+                _ => {}
+            },
+        }
+    }
+    a.ui_scale = a.ui_scale.clamp(config::UI_SCALE_MIN, config::UI_SCALE_MAX);
+    a.number_size = a.number_size.clamp(config::NUMBER_SIZE_MIN, config::NUMBER_SIZE_MAX);
+    info!("DEV settings: {:?} {:?}", save.accessibility, save.assist);
 }
 
 fn enter_run(

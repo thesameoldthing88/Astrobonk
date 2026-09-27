@@ -174,10 +174,12 @@ pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
             // Daily seeded planet — same tiny world for everyone today.
             let day = crate::run::today();
             let dname = crate::run::daily_name(crate::run::daily_seed(day));
-            let dbest = if save.daily_day == day { save.daily_best } else { 0 };
+            let (dbest, dassisted) = if save.daily_day == day { (save.daily_best, save.daily_best_assisted) } else { (0, 0) };
+            // The assisted board only shows once it has a score — most players never see it.
+            let assisted_best = if dassisted > 0 { format!(", assisted {dassisted}") } else { String::new() };
             root.spawn((DailyBtn, MenuBtn::Daily, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.55, 0.85))))
                 .with_children(|b| {
-                    b.spawn(txt(format!("DAILY: {dname}   (best today: {dbest})"), FONT_MED, Color::WHITE));
+                    b.spawn(txt(format!("DAILY: {dname}   (best today: {dbest}{assisted_best})"), FONT_MED, Color::WHITE));
                 });
 
             root.spawn((Node { column_gap: Val::Px(10.0), ..default() },)).with_children(|row| {
@@ -700,9 +702,14 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                         }
                     });
             }
+            // §13: an assisted run still earns its Silver, but says so — and ranks apart.
+            if let Some(summary) = &data.assisted {
+                root.spawn(txt(format!("ASSISTED RUN: {summary}"), FONT_MED, Color::srgb(0.55, 0.9, 1.0)));
+            }
             if let Some((name, best, new_best)) = &data.daily {
+                let board = if data.assisted.is_some() { "assisted best" } else { "best" };
                 root.spawn(txt(
-                    format!("DAILY {name} — score {}   (best today: {best})", data.silver_earned),
+                    format!("DAILY {name} — score {}   ({board} today: {best})", data.silver_earned),
                     FONT_MED,
                     Color::srgb(1.0, 0.6, 0.85),
                 ));
