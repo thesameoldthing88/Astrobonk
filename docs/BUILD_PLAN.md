@@ -61,7 +61,7 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P09 Planetary events (2 per world) | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P10 Glitched elite affixes | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P11 New enemies batch 2 | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
-| P12 Weapon depth, evolution fanfare, hitstop canon | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P12 Weapon depth, evolution fanfare, hitstop canon | ✅ (landed by the lead after the weekly agent limit, no independent review). Six Tier-1 weapons with their own behaviours (arsenal.rs), fanfare, sparse hitstop, stuns. Fixed on landing: slab-shaped melee swing → crescent; one cryo-slow path; fanfare relative to the toon grade. Gaps: teammates' Tier-1 weapon visuals are not streamed to other machines; numbers not playtested |
 | P13 Bosses: Hollow Cosmonaut + canon phases | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P14 Co-op peer interactables + loot split | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P15 World 4: PEBBLE + THE HAND | ☐ |

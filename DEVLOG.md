@@ -1,5 +1,22 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P12 lands: the Tier-1 weapons play as §6 describes
+- **P12:** `arsenal.rs` gives the six newest weapons their own behaviours — lobbed Meatball Comet
+  (RAGÙ RAIN splits x3), Static Cling's hug field (FULL DISCHARGE's periodic nova), the Ricochet
+  Disc bouncing enemy to enemy and lapping the planet (THE OMNIDISC), the Whoopee's cone shove +
+  stun (THE BROWN NOTE's repulsor ring), the Bell's 4 s tolls marking foes for +crit (THE
+  ANGELUS's friendly wisps), the un-hit-combo Yo-Yo (SWORD-YO's garrote) with a HUD combo. The
+  §12 evolution fanfare runs on every machine; §13 hitstop only on the local player's kills,
+  sparse (50/90/130 ms, evolved +20 ms); the 1.8° shake clamp holds at the camera; stunned foes
+  cannot attack. `--weapons base|evo|evolve|<names>` and `--dev --evolvenow` probes.
+- **Reconciled/fixed on landing:** one cryo-slow path (`HitMsg.weapon`; P30's `SlowMsg` removed);
+  the camera's grade comes from the toon bundle and the fanfare dips relative to it; the melee
+  swing is a see-through, shadowless crescent over the arc that hit instead of a solid orange
+  slab; the weapon probe judges close-range hits only on runs that brought foes into reach.
+- **Verified:** smoke 6/6; `--weapons` base/evo/evolve solo and co-op, with `--fast-boss` (nova
+  134 hits, repulsor 117); windowed swings (via a temporary 2 s swing life) and the fanfare;
+  co-op 60 s (client 107 proxies, `local_sim=0`).
+
 ## 2026-09-27 — P07 lands: the turning sun, night rules and the world gimmicks
 - **P07:** `daynight.rs` — ONE sun (`Sun::of`) replacing the fixed `sunward`/`is_night`; the host
   turns it and eats it (Devoured Sun Shard + Cursed Δ every 60 s toward night-lock), both on
