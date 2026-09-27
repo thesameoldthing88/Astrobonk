@@ -1,5 +1,21 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P36 lands: the toon art style
+- **P36:** `toon.rs` patches bevy_pbr's own lighting module once it loads (3 cel steps, a hard
+  specular, a two-step flashlight cone) — every material in every lane gets the look with no
+  per-site changes, and crowd enemies keep one draw per kind — plus one fullscreen pass between
+  tonemapping and FXAA that inks silhouettes (depth second-difference) and creases (normal
+  prepass) and rims sun-facing edges. Per-world `ToonLook` (ink, night fill, saturation,
+  exposure, sky); stepped terrain height colours; sparer bloom; thicker ink in high-contrast.
+  `--dev --warp noon|dusk|night` gives windowed checks a lit view.
+- **Fixed while landing:** charge-shrine rings stood on their edge since v0.1 (an extra
+  quarter-turn on top of `frame_quat`) — they now lie flat and outline the 4.2 m zone; props now
+  keep 12 m (`START_CLEAR_ARC`) clear of the drop point, so a stage never opens with the camera
+  inside a boulder. The sky colour has one writer (`toon::apply_world_look`). P30's meshkit
+  winding fix kept over P36's duplicate.
+- **Verified:** build, smoke 6/6 (incl. the winding self-check), windowed Moon/Mars/Dark Moon at
+  noon, three fresh layouts with a clear start, co-op 50 s with identical layout checksums.
+
 ## 2026-09-27 — P30 lands: the solo/save/world/combat known-issues sweep
 - **Context:** the second container wipe lost the first builds of P07/P08/P10/P12/P14/P22/P30/P32
   and the partial P11/P13/P36. Rebuilt with GitHub backup branches (`claude/pensive-keller-0cood4-PXX`,

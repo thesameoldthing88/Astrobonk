@@ -84,7 +84,7 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P33 The Journey: planets as levels, crash site, Hades-style persistence | ☐ |
 | P34 Suit upgrades you can see | ☐ |
 | P35 Story, the turtle, and the cartoon-spooky tone | ☐ |
-| P36 Toon art style | ☐ |
+| P36 Toon art style | ✅ (landed by the lead after the weekly agent limit, no independent review). Cel lighting via a patch of bevy_pbr's lighting module + one ink/rim post pass; per-world ToonLook. Also fixed on landing: upright charge-shrine rings, props in the drop zone. Gaps: flash-reduction/photosensitivity interplay with bloom only eyeballed; relies on bevy_pbr 0.18.1's lighting anchors (the patch refuses whole and logs if they move) |
 | P29 Final audit + docs | ☐ |
 
 ---
