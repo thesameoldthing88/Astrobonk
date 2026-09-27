@@ -21,6 +21,21 @@ and global ghost replays (no backend), localization translations, per-hero voice
 without it, and changing the integration step without a human playtest would silently retune the
 movement feel the GDD calls the skill ceiling.
 
+## Creative direction — LOCKED by the user on 2026-09-26 (wins over the 2026-07 GDD)
+Recorded in `PROJECT_STATUS.md` §2. Where the 2026-07 GDD conflicts with it, **the direction wins**:
+1. Improve on Megabonk's addictive traits in every way (match every loop, then better it).
+2. **The planets are the levels** — a journey, not a map picked from a menu.
+3. **ONE astronaut hero trying to get home to his PET TURTLE**; his suit **visibly upgrades planet to planet**.
+4. **The 12 existing astronauts become 12 SUITS**, keeping their signature weapons and passives.
+5. **Roguelite journey:** death sends you back to the **crash site**; suit upgrades and story
+   **persist, Hades-style**.
+6. **Cartoon-spooky tone** — funny AND frightening, E10+.
+7. **Toon art style** (still zero external assets).
+Carries over unchanged: tiny-planet sphere mechanics, movement as the skill, the horde + boss arc
+per stage, co-op as a pillar. Packages P32–P36 implement the direction; P19 is superseded by P33.
+Defects verified by the 2026-09-26 audit live in `docs/KNOWN_ISSUES.md` (stable IDs H*/M*/L*);
+P30/P31 sweep them, and every package that fixes one marks it there.
+
 ## Rules every package follows
 - Read the GDD sections named in the package first; the GDD is the spec, this file is the scope.
 - Check what already exists before building (several systems are partial).
@@ -30,37 +45,47 @@ movement feel the GDD calls the skill ceiling.
 - Co-op: anything a client must SEE gets a wire path; anything that SIMULATES is host-only.
 
 ## Status
-| Wave | Package | Status |
-|---|---|---|
-| 1 | P01 Core rules conformance | ✅ wave 1. Gaps: balance not human-playtested (tune with `--balance`); Tome of Banishment/Ascension are hooks only (P05); co-op client can see but not open the miniboss cache (P14); per-enemy/boss party HP scaling left to P18 |
-| 1 | P02 Co-op client parity | ✅ wave 1. Gaps: version mismatch surfaces only after netcode's ~15 s timeout; a joiner's Silver (comet or pickups) goes into the host's shared pot and save, and per-player meta rewards have no owning package yet; client pause still freezes its local view |
-| 2 | P03 Items 22 → ~40 | ✅ wave 2 (22 → 38). Gaps: Boomerang Insurance kept out of the pools until P06 fills `items::antipode_escape`; Warden Solongo death-save slot is a hook (hero #20 post-1.0); Devoured Sun Shard dims the sun as a stand-in until P07 shrinks the day side from `RunState.sun_shrink`; a joiner doesn't see a teammate's ghost/Anti-Grav volleys (teammate fire isn't streamed); grade/cursed/proc numbers not playtested |
-| 2 | P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
-| 3 | P05 Tomes 8 → 23 + loadout | ☐ |
-| 3 | P06 Movement techs + Antipode Blink | ☐ |
-| 4 | P07 Day/night cycle, world gimmicks, diegetic difficulty | ☐ |
-| 4 | P08 New enemies batch 1 | ☐ |
-| 5 | P09 Planetary events (2 per world) | ☐ |
-| 5 | P10 Glitched elite affixes | ☐ |
-| 6 | P11 New enemies batch 2 | ☐ |
-| 6 | P12 Weapon depth, evolution fanfare, hitstop canon | ☐ |
-| 7 | P13 Bosses: Hollow Cosmonaut + canon phases | ☐ |
-| 7 | P14 Co-op peer interactables + loot split | ☐ |
-| 8 | P15 World 4: PEBBLE + THE HAND | ☐ |
-| 8 | P16 Interactables & lore objects | ☐ |
-| 9 | P17 World 5: BRRRR-9 + THE ZAMBONI | ☐ |
-| 9 | P18 Co-op revive, scaling, drop-in, co-op ultimates | ☐ |
-| 10 | P19 Branching campaign & tiers | ☐ |
-| 10 | P20 Bespoke minibosses (2 per world) | ☐ |
-| 11 | P21 Quests ~50 + mission wall + unlock gating | ☐ |
-| 11 | P22 Audio: per-world music + meme SFX | ☐ |
-| 12 | P23 Ascension Depth I–X, weekly mutator, endless | ☐ |
-| 12 | P24 VFX & HUD pass | ☐ |
-| 13 | P25 NG+ "The Copy" + the Static as your dead runs | ☐ |
-| 13 | P26 Codex, mastery & skins, Unlock Web, daily lives | ☐ |
-| 14 | P27 Gamepad parity, remapping, rumble, aim assist | ☐ |
-| 14 | P28 Performance, robustness, dev gating | ☐ |
-| 15 | P29 Final audit + docs | ☐ |
+Packages run in parallel tracks (each on its own branch, adversarially reviewed, then merged
+into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID, not by wave.
+
+| Package | Status |
+|---|---|
+| P01 Core rules conformance | ✅ wave 1. Gaps: balance not human-playtested (tune with `--balance`); Tome of Banishment/Ascension are hooks only (P05); co-op client can see but not open the miniboss cache (P14); per-enemy/boss party HP scaling left to P18 |
+| P02 Co-op client parity | ✅ wave 1. Gaps: version mismatch surfaces only after netcode's ~15 s timeout; a joiner's Silver (comet or pickups) goes into the host's shared pot and save, and per-player meta rewards have no owning package yet; client pause still freezes its local view |
+| P03 Items 22 → ~40 | ✅ wave 2 (22 → 38). Gaps: Boomerang Insurance kept out of the pools until P06 fills `items::antipode_escape`; Warden Solongo death-save slot is a hook (hero #20 post-1.0); Devoured Sun Shard dims the sun as a stand-in until P07 shrinks the day side from `RunState.sun_shrink`; a joiner doesn't see a teammate's ghost/Anti-Grav volleys (teammate fire isn't streamed); grade/cursed/proc numbers not playtested |
+| P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
+| P05 Tomes 8 → 23 + loadout | 🔨 building (main line, wave 3) |
+| P06 Movement techs + Antipode Blink | 🔨 building (main line, wave 3) |
+| P07 Day/night cycle, world gimmicks, diegetic difficulty | 🔨 building (track C, then P09 on top) |
+| P08 New enemies batch 1 | 🔀 built + reviewed; staging into main via `stage/B` |
+| P09 Planetary events (2 per world) | 🔨 building (track C, on P07) |
+| P10 Glitched elite affixes | 🔀 built + reviewed; staging into main via `stage/B` |
+| P11 New enemies batch 2 | 🔨 building (track C) |
+| P12 Weapon depth, evolution fanfare, hitstop canon | 🔀 built + reviewed; staging into main via `stage/B` |
+| P13 Bosses: Hollow Cosmonaut + canon phases | 🔨 building (track C) |
+| P14 Co-op peer interactables + loot split | 🔨 building (track C) |
+| P15 World 4: PEBBLE + THE HAND | ☐ |
+| P16 Interactables & lore objects | ☐ |
+| P17 World 5: BRRRR-9 + THE ZAMBONI | ☐ |
+| P18 Co-op revive, scaling, drop-in, co-op ultimates | ☐ |
+| P19 Branching campaign & tiers | ↪ superseded by P33 (planets are the levels) |
+| P20 Bespoke minibosses (2 per world) | ☐ |
+| P21 Quests ~50 + mission wall + unlock gating | ☐ |
+| P22 Audio: per-world music + meme SFX | 🔀 built + reviewed; staging into main via `stage/B` |
+| P23 Ascension Depth I–X, weekly mutator, endless | ☐ |
+| P24 VFX & HUD pass | ☐ |
+| P25 NG+ "The Copy" + the Static as your dead runs | ☐ |
+| P26 Codex, mastery & skins, Unlock Web, daily lives | ☐ |
+| P27 Gamepad parity, remapping, rumble, aim assist | ☐ |
+| P28 Performance, robustness, dev gating | ☐ |
+| P30 Known issues sweep — solo, save, world, combat | ☐ |
+| P31 Known issues sweep — co-op | ☐ |
+| P32 One hero, twelve suits | ☐ |
+| P33 The Journey: planets as levels, crash site, Hades-style persistence | ☐ |
+| P34 Suit upgrades you can see | ☐ |
+| P35 Story, the turtle, and the cartoon-spooky tone | ☐ |
+| P36 Toon art style | ☐ |
+| P29 Final audit + docs | ☐ |
 
 ---
 
@@ -255,7 +280,9 @@ rules as P15. `--planet brrrr9`.
 - Opposite-pole ultimates: STATIC CASCADE (two Tesla/Storm Core owners on opposite hemispheres
   wrap the sphere in lightning) + the named duo combos surfaced on the results screen.
 
-### P19 — Branching campaign & tiers (GDD §3, §8 campaign map)
+### P19 — Branching campaign & tiers (GDD §3, §8 campaign map) — SUPERSEDED by P33
+*Superseded 2026-09-27: the locked direction makes the planets the levels of one journey. P33 owns the
+campaign structure; the branch-at-teleporter idea below survives only as P33 chooses to keep it.*
 Teleporter destination is a branch choice at each boss kill (Luck widens options), using the 5
 worlds: T1 Moon; T2 Moon → {Mars | Pebble}; T3 Moon → Mars → {Dark Moon | Brrrr-9}; add T4/T5
 chains using available worlds. Planet-select shows unlocked tiers/worlds; co-op: host picks, the
@@ -267,7 +294,8 @@ Brrrr-9 (and PROSPECTOR-9 as Mars alt boss per §9). Unique mesh, one signature 
 7:00/2:00 cadence, guaranteed chest after #1. Streamed via the boss lane.
 
 ### P21 — Quests ~50 + mission wall + unlock gating (GDD §10, §5 unlock column)
-~50 quests in the six categories (Milestone, Hero Trials, Build Puzzles, Planet Lore, Cursed,
+Under the locked direction quests unlock **suits** (P32), not heroes, and feed journey/story
+progress (P33/P35). ~50 quests in the six categories (Milestone, Hero Trials, Build Puzzles, Planet Lore, Cursed,
 Hidden) including the §10 named examples; counters tracked from data already in the sim; hero
 unlocks per the §5 unlock column for the 6 recruits (existing saves keep what they have);
 "Devoured" (9 fragments) unlocks NG+; loadout-slot rewards for tomes. Mission-wall UI with
@@ -309,7 +337,7 @@ derived from your own best runs. Co-op: host's records drive the Static; ghost a
 
 ### P26 — Codex, mastery & skins, Unlock Web, daily lives (GDD §10)
 Codex: a card per enemy/boss/item/weapon/hero/world with flavor + lore fragment, revealed on
-encounter. Character mastery: 10 ranks per hero (kills as that hero) → palette recolors +
+encounter. Suit mastery (locked direction: heroes are suits, P32): 10 ranks per suit (kills in that suit) → palette recolors +
 procedural hats + rank-10 Mastery Perk. Unlock Web: Silver-bought branching node map as the
 cosmetic/unlock Silver sink. Daily: three lives + local best board.
 
@@ -327,4 +355,76 @@ across every world/ascension without panic.
 
 ### P29 — Final audit + docs
 Whole-game audit against GDD 1.0 scope; fix gaps; update `PROJECT_STATUS.md`, `DEVLOG.md`,
-GDD §15 ledger counts, and a README with how to build, play, host/join co-op, and controls.
+`docs/TECHNICAL_REFERENCE.md`, `docs/CONTENT_CATALOG_v0.1.md` (or a new catalog for the built
+game), `docs/KNOWN_ISSUES.md` statuses, GDD §15 ledger counts (do NOT rewrite GDD.md's design — the user is
+rebuilding it from `plan/`), and a README with how to build, play, host/join co-op, and controls.
+
+### P30 — Known issues sweep: solo, save, world, combat (`docs/KNOWN_ISSUES.md`)
+Re-verify EVERY solo/save/world/combat/economy item in `docs/KNOWN_ISSUES.md` against the CURRENT code
+(many lines moved; some items were already fixed by P01–P12 — confirm, don't assume). Fix every item
+still open unless a later package in this plan explicitly owns it (then note the owner). In scope:
+H1–H3 (save counters: best level, chests, evolutions — Overachiever/Cache Money/Ascension must be
+completable), M12 (meshkit winding), M13 (`#[serde(default)]` on `Counters` and every save struct —
+do this FIRST), M14 (dev key B/T gating), M16/M17 (spawn ramp/stage scaling — reconcile with P01's
+scaling module and the user's 2026-09-26 playtest: cap reached, kill rate collapsed; take pots out of
+the cap and decide overflow → The Static per GDD §9), M18, M19 (ABANDON RUN overlay leak), M20, M22,
+L1, L3–L9, L14–L16, L24–L30, and the headless harness bug (unfiltered `PlayerState` query in the
+smoke summary). Update each item's status in `docs/KNOWN_ISSUES.md` (fixed-in commit / owner package).
+
+### P31 — Known issues sweep: co-op (`docs/KNOWN_ISSUES.md`)
+Same method for the co-op items: H4 (latched jump/slide/interact bits), H5 (joiner prediction never
+reconciled — add a soft reconciliation toward the host's copy), H6 (host pause > 2 s blanks the
+joiner's horde), H7 (HOST CO-OP before any run panics), H8 (joining while the host is in menus builds
+the wrong world), H9/H10 and M3, M4, M5, M6, M8–M11, M15, M21, M23, L2, L10–L13, L17–L23 — verify
+each against current code (P02/P14 already closed several), fix what is open unless P14/P18 own it.
+Also M1 (Shady Guy stock rolls desync the layout RNG). Verify with coop.sh two-instance runs,
+including a join while the host sits in menus and a host pause > 2 s. Update statuses in the tracker.
+
+### P32 — One hero, twelve suits (locked direction #3, #4)
+The 12 astronauts become 12 **suits** worn by ONE protagonist (the astronaut going home to his pet
+turtle). Keep every suit's signature weapon + passive exactly. Rename the concept end-to-end
+(character select → **Suit Wardrobe**, hero unlocks → suit unlocks, HUD/results text, quest text,
+save fields with a migration that keeps existing unlocks), keep one consistent protagonist identity
+(name, silhouette) while each suit changes palette/helmet/trim and the kit. Co-op: each player is
+their own astronaut in their own suit (remote rigs wear the right suit — P02 replicated the kind).
+Content data stays in `src/content/characters.rs` (rename types only where it clarifies; avoid churn
+that breaks every other package — a type alias or staged rename is fine).
+
+### P33 — The Journey: planets are the levels, the crash site, Hades-style persistence (direction #2, #5)
+Replace "pick a planet + tier from a menu" with ONE journey home: an ordered sequence of planet
+levels (Moon → Mars → Pebble → Brrrr-9 → Dark Moon → … home; use the worlds that exist and make it
+data-driven so P15/P17 slot in; keep the teleporter-at-boss cadence between levels; a branch choice
+at a teleporter is allowed if it serves the journey). **The crash site** is the hub you wake at: a
+small diegetic space (or first-planet landing zone) where the suit wardrobe, tomes/suit upgrades,
+quests and journey map live. **Death returns you to the crash site**; persistent progress = suit
+upgrades, story beats, unlocks, and the furthest planet reached (with a way to resume/skip ahead
+to a reached checkpoint that does not trivialize the run). Daily, co-op host/join, settings stay
+reachable. Co-op: host drives the journey; a joiner's own suit/story progress persists on the
+joiner's machine (decide per-player vs host-run outcomes and document it). Save migration from the
+old tier/unlock data. Headless `--journey` path.
+
+### P34 — Suit upgrades you can see (direction #3, #5)
+The suit **visibly upgrades from planet to planet**: each cleared planet (and persistent suit-upgrade
+purchases) adds a visible, procedural piece to the rig (e.g. reinforced pauldrons, antenna, jetpack
+fins, visor glow, trim lights) with a real gameplay effect, persistent across deaths (Hades-style
+mirror/upgrade layer, bought with Silver or earned per planet). Works with every suit's palette,
+replicates to co-op clients (teammates see your upgrades), cached meshes/materials (don't regress L9).
+
+### P35 — Story, the turtle, and the cartoon-spooky tone (direction #3, #5, #6)
+The narrative spine: a lone astronaut crashes far from home and fights planet by planet to get back
+to his **pet turtle**. Story beats per planet (Mission Control / the turtle cam / radio logs /
+diegetic text — no voice), delivered at the crash site and on arrival/boss/teleporter moments, with
+progress that **persists across deaths** Hades-style (new lines after deaths, reactions to how you
+died). An ending: reaching home and the turtle reunion. Tone pass over player-facing text (names,
+banners, lore, tutorial, results) to **cartoon-spooky, funny AND frightening, E10+** — no gore, dread
+over shock. Keep the existing meme humor where it fits. Codex/lore (P26) and NG+ (P25) align with it.
+
+### P36 — Toon art style (direction #7)
+Move from vertex-coloured PBR to a **toon** look with zero external assets: cel-banded lighting
+(2–3 steps), rim light, and ink outlines (post-process edge detection from depth/normals, or
+inverted-hull on hero/boss meshes), tuned so 1,200 instanced enemies stay cheap. Prefer ONE
+central mechanism (a toon material/extension or a post-process pass) over touching every material
+site. Re-grade per-world palettes and the night side so it reads toon-spooky; keep bloom sparing;
+respect P04's flash-reduction/photosensitivity settings and colorblind palettes; verify with
+windowed screenshots on every world and in co-op.
+

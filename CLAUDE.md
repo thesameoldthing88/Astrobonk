@@ -5,6 +5,12 @@ external assets (procedural meshes in `meshkit.rs`, in-code WAV synth in `audio.
 Design bible: `GDD.md` (§15 Canon Ledger wins on conflicts). Build plan: `docs/BUILD_PLAN.md`.
 Status/history: `PROJECT_STATUS.md`, `DEVLOG.md`, and the NETCODE NOTES at the bottom of `src/net.rs`.
 
+**Creative direction (locked by the user 2026-09-26, wins over the 2026-07 GDD):** one astronaut going
+home to his pet turtle; the 12 astronauts are 12 suits; the planets are the levels; death returns you
+to the crash site with Hades-style persistence; cartoon-spooky tone (E10+); toon art style. See
+`PROJECT_STATUS.md` §2 and `docs/BUILD_PLAN.md`. Verified defects with stable IDs: `docs/KNOWN_ISSUES.md`
+(mark an item fixed there when you fix it). How the code works: `docs/TECHNICAL_REFERENCE.md`.
+
 ## Build & verify
 - `cargo build` — must stay free of **errors**; don't add new warnings in code you touch.
 - Headless smoke (no window; prints `SMOKE OK`/`SMOKE FAIL`):
