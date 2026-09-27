@@ -242,11 +242,11 @@ pub fn comet_presentation(
                 comet.fires += 1;
                 comet.flash = 0.8;
                 shake.add(0.8);
-                // Hitstop slows the SIMULATION clock, so only the machine that owns the
-                // sim takes it: on a client it would stall our own prediction and leave us
-                // out of step with the host for the rest of the run.
-                if role.simulates() {
-                    hitstop.timer = 0.22;
+                // Hitstop slows the SIMULATION clock, so only a solo game takes it: on a
+                // client it would stall our own prediction and leave us out of step with
+                // the host, and on a host it would stall every teammate (`fx::Hitstop`).
+                if fx::freezes(&role) {
+                    hitstop.stop(0.22);
                 }
                 // ASCII only: the game font has no comet glyph (see update_comet_hud)
                 banners.write(BannerMsg(format!("COMET x{}!", nc.peak)));

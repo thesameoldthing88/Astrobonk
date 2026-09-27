@@ -4,7 +4,7 @@ The known-issues tracker for the current build of ASTROBONK. It is written for a
 
 - **Build covered:** branch `main` at HEAD `99d012f` (committed 2026-07-26). Nothing has been committed since.
 - **Tracker date:** 2026-09-26.
-- **Status:** every item below is **Open**. Nothing listed here has been fixed yet.
+- **Status:** items carry their own Status. Items fixed on branch `claude/pensive-keller-0cood4` say `Fixed (<commit>, <package>)`; P30 (the solo/save/world/combat sweep, 2026-09-27) re-verified and closed H1-H3, M12-M14, M16-M20, M22, L1, L3-L9, L14-L16, L24-L30 and L57.
 - **Ground truth:** the code in `src/`. Every item in sections 2 to 4 was confirmed by reading `src/` at `99d012f`. Items tagged LIVE were also seen in a real play session: the user's solo run of 2026-09-26, its session log and its `save.json`.
 
 Related documents:
@@ -201,7 +201,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### H1. Results and the save bank level 1 and gold 0
 
-- **Severity:** High · **Area:** solo, economy (also a co-op host) · **Evidence:** LIVE · **Status:** Open
+- **Severity:** High · **Area:** solo, economy (also a co-op host) · **Evidence:** LIVE · **Status:** Fixed (0970452, P30)
 - **Where:**
   - `src/director.rs:272-280`: `bank_results` queries `Query<&PlayerState, With<LocalPlayer>>` and falls back with `.unwrap_or((1, 0))` at :280.
   - `src/director.rs:289`: `best_level`.
@@ -231,11 +231,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
      - ABANDON (`src/ui/panels.rs:577-581`).
   4. `bank_results` then reads `RunState`. It needs no ordering against `despawn_stage`.
   5. Verify: a solo run to level 2 or higher, then check the Results screen and `save.json`.
-- **Status:** Open.
+- **Status:** Fixed (0970452, P30). **Resolution:** Re-verified open at the P30 base (`bank_results` still read the despawned LocalPlayer). `director::snapshot_local_sheet` copies the local sheet (level, gold, Cursed Moon Rocks, Silver gain, Static Silver) into `RunState::final_sheet` every in-run frame, and `bank_results` reads that, so every exit path banks the real numbers. The headless summary now tears the stage down the way OnExit(InRun) does and fails if the banked sheet differs from the live one.
 
 ### H2. Chest opens are never counted (Chests10 impossible, chest price stuck at 25)
 
-- **Severity:** High · **Area:** economy, solo · **Evidence:** LIVE · **Status:** Open
+- **Severity:** High · **Area:** economy, solo · **Evidence:** LIVE · **Status:** Fixed (67bf6ca, P01)
 - **Where:**
   - `src/ui/panels.rs:341-361`: the chest "take" branch. It writes no counter.
   - `src/ui/panels.rs:265`: `global: Res<RunState>` is read-only.
@@ -255,11 +255,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   - Make `global` a `ResMut<RunState>` in `chest_panel`.
   - In the take branch, after the gold check, increment both `chest_opens` and `chests_opened`.
   - Co-op note: `chest_panel` is ungated, so it also runs on clients. A client's counters are never banked (M7), and its `chest_opens` is not in `RunSnapMsg`. When docket item 5 lets joiners open chests, decide whether the chest price escalates per opener or per run (see §8, item 5).
-- **Status:** Open.
+- **Status:** Fixed (67bf6ca, P01). **Resolution:** Verified in current code: `ui::panels::chest_panel` takes `ResMut<RunState>` and advances `chest_opens` and `chests_opened` on a take; the miniboss cache (P01) also counts toward `chests_opened`.
 
 ### H3. Weapon evolutions are never counted (EvolveWeapon impossible)
 
-- **Severity:** High · **Area:** economy, solo · **Evidence:** CODE · **Status:** Open
+- **Severity:** High · **Area:** economy, solo · **Evidence:** CODE · **Status:** Fixed (67bf6ca, P01)
 - **Where:**
   - `src/run.rs:608-617`: the `Evolve` arm of `apply_upgrade` only sets `evolved = true`.
   - `src/ui/panels.rs:233-238`: the caller writes only the banner, SFX and hitstop.
@@ -274,7 +274,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   2. Pick the EVOLVE card. The "WEAPON EVOLVED" banner shows.
   3. After Results, `counters.evolves` is still 0.
 - **Suggested fix:** In `choice_input`, when `apply_upgrade` returns `evolved == true` (`src/ui/panels.rs:233`), increment `RunState.evolves`. This needs `global` to become a `ResMut<RunState>`.
-- **Status:** Open.
+- **Status:** Fixed (67bf6ca, P01). **Resolution:** Verified in current code: `ui::panels::choice_input` increments `RunState::evolves` when `apply_upgrade` reports an evolution.
 
 ### H4. Host latches a joiner's jump, slide and interact bits
 
@@ -678,7 +678,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### M12. meshkit boxes, cylinders and cones have inverted winding
 
-- **Severity:** Medium · **Area:** solo (visual) · **Evidence:** CODE + COMPUTED. The on-screen effect has not been looked at (U2). · **Status:** Open
+- **Severity:** Medium · **Area:** solo (visual) · **Evidence:** CODE + COMPUTED. The on-screen effect has not been looked at (U2). · **Status:** Fixed (80a6711, P30)
 - **Where:**
   - `src/meshkit.rs:44-51`: the `add_box` face table; the ±X and ±Y faces are affected.
   - `src/meshkit.rs:77-116`: `add_cylinder`; all triangles are affected.
@@ -693,11 +693,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   - The ±Z faces and `icosphere()` are counter-clockwise, which is correct. So is Bevy's own `Cuboid`.
 - **Repro:** In a windowed build, look at the astronaut from the side. Then set `cull_mode: None` on the rig material and compare.
 - **Suggested fix:** Reverse the index order (`0,2,1, 0,3,2`) for the affected box faces and for the cylinder and cone triangles, then compare against Bevy's `Cuboid`.
-- **Status:** Open.
+- **Status:** Fixed (80a6711, P30). **Resolution:** Each meshkit helper now winds its own triangles outward (box faces pick their order from their normal; cylinder and cone triangles were reversed). P04's `build_ccw` workaround (which flipped every triangle, so it broke the already-correct ±Z faces and spheres) is removed. `meshkit::winding_self_check` pins it in the headless rules. U2 settled: windowed screenshots show the daylit astronaut's backpack, limbs and torso were rendering near-black and now shade white with a terminator.
 
 ### M13. Save format is fragile: one new counter wipes progress
 
-- **Severity:** Medium · **Area:** dev-hygiene, economy · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium · **Area:** dev-hygiene, economy · **Evidence:** CODE · **Status:** Fixed (0b58234, P30)
 - **Where:**
   - `src/save.rs:14-29`: `Counters` derives `Deserialize` with no `#[serde(default)]`.
   - `src/save.rs:32`: only `MetaSave` has `#[serde(default)]`.
@@ -716,11 +716,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   - On a parse failure, rename the bad file to `save.json.bak-<unix>` instead of overwriting it.
   - Write to `save.json.tmp`, then rename.
   - Consider a `version` field and tolerant enum loading.
-- **Status:** Open. See also SH8.
+- **Status:** Fixed (0b58234, P30). **Resolution:** `Counters` has `#[serde(default)]` (every save struct now does); the name-keyed sets, maps, the loadout and the palette/number-mode fields load leniently (an unknown hero, weapon, planet, tome, quest or palette drops only that entry); an unreadable file is renamed to `save.json.bak-<unix secs>` before a fresh profile starts; writes go to `save.json.tmp` and are renamed into place. `MetaSave.version` exists since P05. `save::format_self_check` pins all four in the headless rules.
 
 ### M14. DEV key B (summon boss) ships ungated
 
-- **Severity:** Medium (two verifiers rated it Low) · **Area:** dev-hygiene, solo, co-op · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium (two verifiers rated it Low) · **Area:** dev-hygiene, solo, co-op · **Evidence:** CODE · **Status:** Fixed (b5c192f, P30; the `is_simulating` gate was P02's)
 - **Where:**
   - `src/enemies.rs:913-936`: `debug_spawn_boss`. Its doc comment says "Remove before ship".
   - `src/main.rs:244`: it is registered in the in-run playing chain, with no `#[cfg]`, no dev flag and no `is_simulating` gate.
@@ -731,7 +731,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Root cause:** A dev tool was left in the shipping build.
 - **Repro:** Solo, press B.
 - **Suggested fix:** Delete it, or put it behind a dev feature or flag (see SH1), and add `.run_if(net::is_simulating)`.
-- **Status:** Open.
+- **Status:** Fixed (b5c192f, P30; the `is_simulating` gate was P02's). **Resolution:** B (summon boss) and T (replay tutorial) only work with `--dev` (`main::dev_mode`, read once). P28 still owns the wider dev-CLI gating (L56).
 
 ### M15. Downed teammates stay downed on every later stage
 
@@ -749,7 +749,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### M16. Spawn ramp is about 15x the GDD's and caps out the horde
 
-- **Severity:** Medium · **Area:** solo, economy (balance) · **Evidence:** LIVE (the 2026-09-26 log matches the model) + CODE · **Status:** Open (design decision D2)
+- **Severity:** Medium · **Area:** solo, economy (balance) · **Evidence:** LIVE (the 2026-09-26 log matches the model) + CODE · **Status:** Fixed (6eaf5f8, P30, on top of P01's §3 curve)
 - **Where:**
   - `src/enemies.rs:570-576`: the rate is `(1 + 2.1·e/60) · (1 + D) · P` per second. During The Static it is `10 + 0.15·static_timer`.
   - `src/enemies.rs:590-594`: the whole budget is withdrawn, but only `min(budget, room)` spawn. Overflow is discarded.
@@ -767,11 +767,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Suggested fix:** Decide the curve (D2), then:
   - add a far-enemy cull or recycle, or merge overflow into The Static as the GDD says;
   - take pots out of the cap.
-- **Status:** Open.
+- **Status:** Fixed (6eaf5f8, P30, on top of P01's §3 curve). **Resolution:** D2 decided by P01 (the GDD's `(1 + 0.14·t)` shape with §3 run-arc beats) and GDD §9 for the overflow. P30: the cap counts the crowd only (L16); at the cap, crowd enemies more than `STATIC_RECYCLE_ARC` (100 m) from every astronaut (never elites or buried Burrowers) dissolve into The Static, farthest first, and the budget spawns fresh over the players' horizon; what still does not fit is banked per stage (`Director::static_backlog`, max 300), told once ("THE STATIC IS GATHERING"), and pours out as extra ghosts when The Static rises. `--overflow` stages all three paths. Measured with `--headless 21000 --balance` (the bot is kept alive; the smoke is not deterministic): on the P01 curve neither the base nor P30 reached the cap during a Moon T1 stage (seeds 1-2 solo peak alive 245-563 base / 245-508 P30; `--coop2` 595 max), kills/s kept pace with spawns/s through 10:00 (about 16-23/s solo, 40-49/s co-op at 9:00-10:00). The cap is reached in The Static: a 32,000-tick run (seed 3) averaged 31.6 kills/s at 917 alive (base, pots in the cap) vs 30.3 kills/s at 994 alive with 5,583 far stragglers recycled (P30) over 750-1,050 s. No human playtest yet.
 
 ### M17. No stage or tier scaling: stages 2 and 3 restart at minute-zero pressure
 
-- **Severity:** Medium · **Area:** solo, economy (balance) · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium · **Area:** solo, economy (balance) · **Evidence:** CODE · **Status:** Fixed (P01 chain-wide scaling; 6eaf5f8, P30, the mix)
 - **Where:**
   - `src/director.rs:197`: `run.elapsed = 0.0` on each stage change.
   - `src/enemies.rs:563`, `:610`: `time_scaling` and `mix` read `run.elapsed`.
@@ -787,11 +787,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Suggested fix:** Add a stage or tier term, for example:
   - feed `time_scaling` and `mix` with `elapsed + stage_offset`, or
   - multiply by a per-planet or per-tier factor (a new `PlanetDef` field), per the GDD.
-- **Status:** Open.
+- **Status:** Fixed (P01 chain-wide scaling; 6eaf5f8, P30, the mix). **Resolution:** P01 made HP/damage/spawn/elite scale on chain-wide run time `t`, depth `d` and planet threat `T`. The remaining reset, the spawn MIX keyed on `run.elapsed`, now reads `scaling::mix_secs`: the countdown (a shorter chained stage joins the arc mid-way) plus `MIX_DEPTH_HEAD_START_SECS` per depth, so stage 3 opens with Sprinters and Spitters and its miniboss #1 meets Bruisers.
 
 ### M18. `SpatialHash::near` scans a full cube of cells
 
-- **Severity:** Medium · **Area:** perf · **Evidence:** CODE + COMPUTED (not measured; U7) · **Status:** Open
+- **Severity:** Medium · **Area:** perf · **Evidence:** CODE + COMPUTED (not measured; U7) · **Status:** Fixed (4bf90fc, P30)
 - **Where:**
   - `src/enemies.rs:190-203`: `near()` uses `r = ceil(radius / 2.2)` and loops x, y and z over `−r..=r`.
   - `src/config.rs:31`: the cell is 2.2 m.
@@ -806,11 +806,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
   - visit only cells within the query sphere and near the planet surface;
   - use a coarser grid for large radii;
   - cache one nearest-target query per projectile group.
-- **Status:** Open.
+- **Status:** Fixed (4bf90fc, P30). **Resolution:** `SpatialHash::near` walks only the cells that touch the query ball (exact per-column z range) and cross the members' shell (min/max radius measured at each rebuild). `enemies::spatial_hash_self_check` compares it with brute force over a 1,200-member crowd and reports probes: 14 m 684 (was 3,375), 22 m 1,613 (was 9,261), the per-enemy 2.2 m separation query 17 (was 27). Wall-clock not profiled (U7).
 
 ### M19. ABANDON RUN leaks the PAUSED overlay over Results and menus
 
-- **Severity:** Medium · **Area:** solo, UI · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium · **Area:** solo, UI · **Evidence:** CODE · **Status:** Fixed (0486601, P02 for Results/menus; b5c192f, P30 for the death beat)
 - **Where:**
   - `src/ui/panels.rs:577-581`: ABANDON sets `result = Death` and `phase = Dead`.
   - `src/ui/panels.rs:584`: the `_ => {}` arm, so the Dead phase never despawns `PauseRoot`.
@@ -821,11 +821,11 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Root cause:** Only the Playing arm of `pause_panel` despawns the overlay.
 - **Repro:** Solo. Press ESC, then ABANDON RUN.
 - **Suggested fix:** Despawn `PauseRoot` in every phase except `Paused` (move the despawn loop out of the Playing arm), and also on OnExit(InRun).
-- **Status:** Open.
+- **Status:** Fixed (0486601, P02 for Results/menus; b5c192f, P30 for the death beat). **Resolution:** P02's `despawn_panels` strips the overlay on OnExit(InRun). `pause_panel` now also clears it in every phase but Paused, so it no longer lingers over the 1.6 s Dead beat after ABANDON.
 
 ### M20. HOST CO-OP's LAN-address note is effectively never shown
 
-- **Severity:** Medium · **Area:** co-op, UI · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium · **Area:** co-op, UI · **Evidence:** CODE · **Status:** Fixed (7334b28, P30)
 - **Where:**
   - `src/ui/menus.rs:265-270`: the note is written, then `next.set(CharSelect)` runs in the same click.
   - `src/ui/menus.rs:164`: `CoopNoteText` exists only under the main menu root, which is despawned on OnExit(MainMenu) (`src/main.rs:135`).
@@ -835,7 +835,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Root cause:** The note widget lives on a screen that is torn down in the same frame the note is written.
 - **Repro:** Click HOST CO-OP.
 - **Suggested fix:** Show `CoopNote` on CharSelect and PlanetSelect, and on the host's in-run HUD. Also write the IP to the session log.
-- **Status:** Open. This is part of pre-fix 0b in §8.
+- **Status:** Fixed (7334b28, P30). **Resolution:** While hosting, the hero and world pickers show the hosting line, the run opens with a "HOSTING: TEAMMATES JOIN AT <ip>" banner, the host's pause menu repeats the address, and the session log records it. Seen windowed.
 
 ### M21. A failed or unreachable join needs a game restart
 
@@ -857,13 +857,13 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### M22. Edge markers vanish for over-horizon targets that project on screen
 
-- **Severity:** Medium · **Area:** UI · **Evidence:** COMPUTED (not observed) · **Status:** Open
+- **Severity:** Medium · **Area:** UI · **Evidence:** COMPUTED (not observed) · **Status:** Fixed (7334b28, P30)
 - **Where:** `src/ui/hud.rs:488-499`. A target counts as "visible" whenever `world_to_viewport` lands inside the viewport; there is no occlusion test.
 - **Symptom:** Computed for the Moon (R = 140) with the default camera (`CAM_DISTANCE` 7.5, pitch 0.55, FOV π/4): targets about 16-92° of arc ahead, roughly 40-225 m, are hidden behind the planet's limb but still project inside the viewport. They get no edge marker, and that is the main case the markers exist for: a boss, teleporter or shrine over the horizon.
 - **Root cause:** A viewport-rectangle test is used as a visibility test.
 - **Repro:** Not observed. Stand so that a shrine is about 60-150 m ahead over the horizon and look for its marker.
 - **Suggested fix:** Treat a target as visible only if the camera-to-target segment does not intersect the planet sphere. Otherwise draw the marker clamped to the screen edge in the target's direction.
-- **Status:** Open.
+- **Status:** Fixed (7334b28, P30). **Resolution:** A target counts as in view only if the camera-to-target segment clears the planet (a ball at the mean radius, or at the target's own ground if lower, minus `EDGE_MARKER_OCCLUDER_INSET`); otherwise it gets the edge marker.
 
 ### M23. Joiner combat and boss feedback is largely missing
 
@@ -894,13 +894,13 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ## 4. Low
 
-Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
+Evidence is CODE unless stated otherwise. Each item carries its own Status.
 
 ### 4.1 Movement and simulation
 
 #### L1. Air-hopping reaches the 2.1x speed cap without sliding
 
-- **Severity:** Low (the world verifier lowered it from Medium) · **Area:** solo · **Status:** Open
+- **Severity:** Low (the world verifier lowered it from Medium) · **Area:** solo · **Status:** Fixed (a0e0ca9 / 889fafa, P06)
 - **Where:**
   - `src/player.rs:434-453`: air acceleration is `55 × 0.35 = 19.25 m/s²`, with no per-direction limit. The hard cap applies unless the astronaut is grounded, not sliding and past `BHOP_WINDOW`.
   - `src/config.rs:4-8`, `:16`: the movement constants and `SPEED_HARD_CAP`.
@@ -911,6 +911,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 - **Root cause:** Air control is uncapped up to the hard cap.
 - **Repro:** Solo. Hold W and hold Space.
 - **Suggested fix:** Design question D3. If it is not intended, cap in-air acceleration at the run speed and let only slide landings exceed it.
+- **Resolution:** D3 decided by P06: `player::steer` lets a wish steer above run speed but never add to it, so plain hops keep run speed and only slides, slopes and rails bank more.
 
 #### L2. Jump and slide edges are sent once, on an unreliable channel
 
@@ -926,23 +927,25 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L3. `player_input` and `player_physics` have no ordering
 
-- **Severity:** Low · **Area:** solo · **Status:** Open
+- **Severity:** Low · **Area:** solo · **Status:** Fixed (b5c192f, P30)
 - **Where:** `src/main.rs:219` (in a chained group) and `src/main.rs:274` (in an unchained group). No `.before` or `.after` relates the two.
 - **Symptom:** Whether a jump or slide is applied before or after this frame's integration and landing detection is decided by the scheduler. That can add or remove a frame of latency, or change bunny-hop timing, between runs.
 - **Root cause:** Both take `&mut Player`, so they never run in parallel, but their order is unspecified.
 - **Suggested fix:** Add `player_physics.after(player_input)`.
+- **Resolution:** `player_physics.after(player_input)`.
 
 #### L4. Coyote time is dead logic
 
-- **Severity:** Low · **Area:** solo, dev-hygiene · **Status:** Open
+- **Severity:** Low · **Area:** solo, dev-hygiene · **Status:** Resolved (b5c192f, P30)
 - **Where:** `src/player.rs:458`, `:485`, `:536`, `:578`.
 - **Symptom:** Coyote time never extends a jump. `coyote` is set to 0.12 only while grounded and is zeroed on a jump. Height is measured relative to the terrain, so the only way to become airborne is to jump.
 - **Root cause:** Coyote time is a platformer feature with no ledges to walk off here.
 - **Suggested fix:** Remove it, or document it as reserved for props with height.
+- **Resolution:** No longer dead: P06's Grind-Lines ride `GRIND_RAIL_LIFT` above the ground and set `coyote`, so running off a rail's end is a real coyote window. The field's doc now says so.
 
 #### L5. `InputIntent.forward` and `.interact` are never read; comments are false
 
-- **Severity:** Low · **Area:** dev-hygiene · **Status:** Open
+- **Severity:** Low · **Area:** dev-hygiene · **Status:** Comments fixed (b5c192f, P30); routing E through `InputIntent` is P14's
 - **Where:**
   - `src/player.rs:73`, `:76`: the fields. The comment at :73 says `forward` "drives facing/aim"; it does not.
   - `src/player.rs:380-381`: the comment says this is "the only place hardware input is read".
@@ -950,12 +953,13 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 - **Symptom:** None at runtime. The comments mislead anyone routing input over the network.
 - **Root cause:** Aim uses auto-target or `Player.facing` (`src/combat.rs:294-301`). Interact reads the keyboard directly.
 - **Suggested fix:** Either route aim and interact through `InputIntent`, which docket item 3 needs for interact anyway, or correct the comments.
+- **Resolution:** `forward` is read now (P06's Antipode Blink turns momentum about it); the comments say what the fields do and which inputs still read hardware. Routing the local E press through `InputIntent.interact` belongs to P14 (co-op peer interactables, docket items 2-3).
 
 ### 4.2 World and visuals
 
 #### L6. Per-planet sky colour and `meteor_showers` are unused (gray backdrop)
 
-- **Severity:** Low · **Area:** solo, UI · **Status:** Open
+- **Severity:** Low · **Area:** solo, UI · **Status:** Sky fixed (e4404df, P30); meteor showers are P09's
 - **Where:**
   - `src/content/planets.rs:35`: `sky`.
   - `src/content/planets.rs:44`: `meteor_showers`.
@@ -963,10 +967,11 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 - **Symptom:** Every planet's space backdrop is Bevy's default clear colour `srgb_u8(43,44,47)`, a mid gray after tonemapping, not the near-black per-planet sky. There is no meteor system.
 - **Root cause:** The fields were defined but never wired up. The build's `dead_code` warning at `src/content/planets.rs:23` flags them.
 - **Suggested fix:** Insert `ClearColor(planet.sky)` in `enter_run` and at stage changes (host and client). Track meteor showers as content (§7).
+- **Resolution:** `planet::spawn_stage` sets `ClearColor(def.sky)` on every machine. `meteor_showers` stays unread until P09 builds the Moon's METEOR SHOWER event.
 
 #### L7. Interactables can spawn inside large boulders
 
-- **Severity:** Low · **Area:** solo · **Status:** Open
+- **Severity:** Low · **Area:** solo · **Status:** Fixed (e4404df, P30)
 - **Where:**
   - `src/interact.rs:124-132`: `place_dir` avoids only the player's spawn.
   - `src/interact.rs:134-144`: `spawn_interactables` never sees `PropColliders`.
@@ -976,24 +981,27 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 - **Root cause:** No overlap check between props and interactables.
 - **Repro:** Rare; the frequency is unknown (U6).
 - **Suggested fix:** Pass `PropColliders` into `spawn_interactables` and retry placements that fall inside a collider. The extra draws must stay deterministic, so see M1 first.
+- **Resolution:** `interact::place_dir` keeps every pot and interactable `INTERACT_PROP_CLEARANCE` off each solid prop (a machine-independent stream: props come from the stage seed); the headless summary fails if any is inside one. U6 moot.
 
 #### L8. Terrain mesh is rebuilt synchronously on every stage entry
 
-- **Severity:** Low · **Area:** perf · **Evidence:** CODE (the hitch is unmeasured; U7) · **Status:** Open
+- **Severity:** Low · **Area:** perf · **Evidence:** CODE (the hitch is unmeasured; U7) · **Status:** Fixed (e4404df, P30)
 - **Where:** `src/planet.rs:98-130`; `src/meshkit.rs:182-224` (`icosphere(7)`).
 - **Symptom:** Each stage entry, on host and client, builds 163,842 vertices and 327,680 triangles with a HashMap midpoint cache. That includes `Terrain::height` per vertex (about 23 `sin` calls plus crater terms) and `compute_smooth_normals`. Expect a hitch at stage transitions.
 - **Root cause:** Synchronous generation inside a system.
 - **Suggested fix:** Cache the mesh per planet kind, since terrain comes from a constant `PlanetDef` seed rather than the run seed. Or build it on `AsyncComputeTaskPool` during the transition.
+- **Resolution:** The terrain mesh is cached per session under a `Handle::Uuid` keyed by the terrain constants, so re-entering a world (every retry, every later chain) reuses it. The first visit per world per session still builds synchronously.
 
 #### L9. Every astronaut rig allocates its own meshes, materials and a shadowed spotlight
 
-- **Severity:** Low · **Area:** perf · **Status:** Open
+- **Severity:** Low · **Area:** perf · **Status:** Fixed (e4404df, P30)
 - **Where:**
   - `src/player.rs:183-313`: `build_astronaut_rig` creates 8 meshes and 5 materials, plus a `SpotLight` with range 55 and `shadows_enabled: true` (:298-307).
   - It is called from `spawn_player` (`src/player.rs:174`) and from `src/remote.rs:109`.
 - **Symptom:** The allocations repeat on every stage respawn, for every astronaut. With four players, four spot shadow maps render on top of the directional cascade. The NETCODE NOTES already list this as open (`src/net.rs:1247-1251`).
 - **Root cause:** No shared rig assets, and shadows are on for every flashlight.
 - **Suggested fix:** Build rig meshes and materials once, as a resource per hero. Disable shadows on remote flashlights.
+- **Resolution:** Rig meshes and colour-keyed materials are shared `Handle::Uuid` assets; only the per-astronaut flashlight lens (its own F switch) is allocated per rig. Only the local astronaut's spotlight casts shadows.
 
 #### L10. Craterpillar Jr looks different on host and joiner
 
@@ -1037,7 +1045,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L14. Owning a cryo weapon adds a flat slow to all of that player's hits
 
-- **Severity:** Low · **Area:** solo · **Status:** Open
+- **Severity:** Low · **Area:** solo · **Status:** Fixed (ccadf44, P30)
 - **Where:**
   - `src/combat.rs:277`: `let _ = slow; // applied in apply_hits via kind check`.
   - `src/combat.rs:894-902`: `has_cryo` is true if the shooter owns CryoVent or AbsoluteZero.
@@ -1045,19 +1053,21 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
   - `src/content/weapons.rs:327`, `:339`: the per-weapon slows, 0.45 and 0.75, which are unused.
 - **Symptom:** Every weapon of a cryo owner slows enemies by a flat 0.25. The two cryo weapons do not differ in slow.
 - **Suggested fix:** Carry the slow on the `HitMsg` from the aura that produced it, and apply only that value.
+- **Resolution:** The aura pulse sends `SlowMsg { target, slow }` with its weapon's slow; `apply_hits` raises the enemy's slow to at least that. Other weapons no longer slow.
 
 #### L15. The aura bubble is drawn smaller than its damage radius
 
-- **Severity:** Low · **Area:** solo, UI · **Status:** Open
+- **Severity:** Low · **Area:** solo, UI · **Status:** Fixed (ccadf44, P30)
 - **Where:**
   - `src/combat.rs:252-265`: the damage radius is `radius × aura_scale × size`, where `size = (1 + 0.06 × (lvl − 1)) × stats.size`.
   - `src/combat.rs:571`, `:851`: the visual scale is `radius × aura_scale` only.
 - **Symptom:** As the weapon levels up or the Size stat grows, the bubble understates the real area. At weapon level 7 the damage area is 36% wider than drawn.
 - **Suggested fix:** Scale the visual by the same `size` factor.
+- **Resolution:** `aura_follow` scales by the weapon level's size and the Size stat, like the damage radius.
 
 #### L16. Pots and bosses count toward the enemy cap and the `enemies=` figure
 
-- **Severity:** Low · **Area:** solo, perf · **Evidence:** LIVE (the log's first line: `enemies=64` = 60 pots + 4 enemies) · **Status:** Open
+- **Severity:** Low · **Area:** solo, perf · **Evidence:** LIVE (the log's first line: `enemies=64` = 60 pots + 4 enemies) · **Status:** Fixed (6eaf5f8, P30)
 - **Where:**
   - `src/interact.rs:161-193`: a pot is `Pot` plus `Enemy { speed 0, contact_cd INF, hp 1 }`.
   - `src/enemies.rs:548`, `:562`: the cap count is `Query<(), With<Enemy>>`.
@@ -1066,6 +1076,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
   - `src/music.rs:286-287`: the music "density" also counts pots.
 - **Symptom:** The effective horde cap is about 1140 on the Moon. The `enemies=` log figure and the music intensity include static pots, and on clients they also include proxies.
 - **Suggested fix:** Count `(With<Enemy>, Without<Pot>, Without<Boss>)` for the cap, the log and the music. Consider taking pots out of `Enemy` altogether (they still need the hash for hits).
+- **Resolution:** The live cap, the session log's `enemies=` and the music density count `(With<Enemy>, Without<Pot>, Without<Boss>)`. Pots stay `Enemy` (they need the hash for hits).
 
 #### L17. Downed astronauts still anchor spawns, party scale and boss placement
 
@@ -1142,55 +1153,61 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L24. Chests and shops can exceed an item's max stacks
 
-- **Severity:** Low · **Area:** economy · **Status:** Open
+- **Severity:** Low · **Area:** economy · **Status:** Fixed (3e8660c, P03; ccadf44, P30)
 - **Where:**
   - `src/ui/panels.rs:345-349` (chest) and `:463-469` (shop): the item is pushed or incremented with no cap check.
   - `src/interact.rs:241-249`: shop stock is rolled once at stage entry, and duplicates are possible.
   - `src/interact.rs:471`: the chest item is memoised on first open.
 - **Symptom:** An item can go past its cap. For example, SplitterChip can reach 3/2, giving +3 projectiles.
 - **Suggested fix:** Check `item_count < max_stacks` at purchase and take time; show the offer as "MAXED".
+- **Resolution:** P03 guards the shop purchase and re-rolls a chest item that became unavailable; P30 shows a capped offer as MAXED with no BUY.
 
 #### L25. The microwave is used up even when nothing fits
 
-- **Severity:** Low · **Area:** economy · **Status:** Open
+- **Severity:** Low · **Area:** economy · **Status:** Fixed (73dec7c)
 - **Where:** `src/interact.rs:516-531`: `run.microwave_used = true` is set at :519, before the "NOTHING FITS" early return at :528-530.
 - **Symptom:** Using the microwave while every owned item is maxed shows "NOTHING FITS IN THE MICROWAVE" and still consumes it for the stage.
 - **Suggested fix:** Set `microwave_used` only after at least one option exists.
+- **Resolution:** Verified: the use is spent only after at least one option exists.
 
 #### L26. The `roll_item` fallback ignores bans and stack caps
 
-- **Severity:** Low · **Area:** economy · **Status:** Open
+- **Severity:** Low · **Area:** economy · **Status:** Fixed (3e8660c, P03)
 - **Where:** `src/interact.rs:104-110`: the fallback filters only on `item_count < max_stacks`, not `banned_items`, and then `unwrap_or(&ItemKind::SpaceBorgar)` with no stack check.
 - **Symptom:** Banished items can come back from chests, shops, shrines or the Moai. When everything is maxed, SpaceBorgar is offered past its cap.
 - **Suggested fix:** Apply the ban filter in the fallback. If nothing is available, offer gold or silver instead.
+- **Resolution:** Verified: `run::roll_item` filters bans and caps (`item_available`); its last resort is the uncapped Space Borgar. Residual edge: a banished Borgar can still be that last resort when every other item is capped or banished.
 
 #### L27. `static_secs_best` only counts the final stage
 
-- **Severity:** Low · **Area:** economy · **Status:** Open
+- **Severity:** Low · **Area:** economy · **Status:** Fixed (0970452, P30)
 - **Where:** `src/director.rs:202`: `static_timer` is zeroed on each non-final stage change. `src/director.rs:290`: only the final value is banked.
 - **Symptom:** Time survived in The Static on earlier stages never counts toward SurviveStatic2Min.
 - **Suggested fix:** Track a per-run maximum in `RunState` that `stage_transition` does not reset.
+- **Resolution:** `RunState::static_secs_peak` keeps the longest Static stretch on any stage; banking takes the max of it and the final stage's timer.
 
 #### L28. Tutorial promises a boss chest; its step 5 never fires on a joiner
 
-- **Severity:** Low · **Area:** solo, UI · **Status:** Open
+- **Severity:** Low · **Area:** solo, UI · **Status:** Fixed (ccadf44, P30; the chest is P01's cache)
 - **Where:**
   - `src/tutorial.rs:26`: "It'll drop a chest."
   - `src/pickups.rs:338-364`: minibosses give elite drops, and stage bosses drop 14 gold piles. Nothing drops a chest.
   - `src/tutorial.rs:78`: step 5 waits on `run.minibosses_spawned[0]`, which is not in `RunSnapMsg`.
 - **Symptom:** The tutorial's last line is false. On a joiner with a fresh save, the tutorial stops before that line.
 - **Suggested fix:** Change the text, or make minibosses drop a chest. Add `minibosses_spawned` to `RunSnapMsg`, or key the step on the boss bar.
+- **Resolution:** P01's guaranteed miniboss cache makes "It'll drop a chest" true. Step 5 now waits for any `Boss` on the field (the host's or a joiner's streamed proxy) instead of host-only `minibosses_spawned`.
 
 #### L29. Tutorial says Shift slides; slide is Ctrl or C
 
-- **Severity:** Low · **Area:** UI · **Status:** Open
+- **Severity:** Low · **Area:** UI · **Status:** Fixed (a0e0ca9, P06)
 - **Where:** `src/tutorial.rs:24` ("Shift to slide"); `src/player.rs:412` (`ControlLeft` or `KeyC`). Nothing binds Shift.
 - **Symptom:** New players are told the wrong key.
 - **Suggested fix:** Fix the text, or bind Shift as well. See also SH13.
+- **Resolution:** Shift (and Ctrl, C) slide.
 
 #### L30. Lady Fortuna's rerolls are unlimited; her +2 refreshes are dead
 
-- **Severity:** Low · **Area:** economy · **Status:** Open
+- **Severity:** Low · **Area:** economy · **Status:** Fixed (ccadf44, P30)
 - **Where:**
   - `src/run.rs:229-232`: Fortuna starts with +2 refreshes.
   - `src/ui/panels.rs:190-196`: Fortuna never spends a refresh and may reroll without limit.
@@ -1198,6 +1215,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
   - `GDD.md:411`: "Free level-up reroll each level".
 - **Symptom:** Fortuna can reroll every level-up without limit, and the +2 refreshes are never used.
 - **Suggested fix:** Design question D8. One free reroll per level-up per the GDD, then paid refreshes.
+- **Resolution:** D8 decided per GDD §5: one free reroll per level-up hand (`PlayerState::level_reroll`), spent before the run's free refreshes, then Gold. Pinned by the rules self-check and `--choices`.
 
 #### L31. S is both move-back and level-up Skip
 
@@ -1435,6 +1453,13 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 - **Symptom:** On the joiner, completed rings keep their markers, there is never a teleporter marker, and chests the host opened keep theirs.
 - **Suggested fix:** Replicate ring completion and chest use (planned as out of scope for the playtest; see §8), and add the teleporter via docket item 4.
 
+#### L66. The UI font has no em dash (or other non-ASCII glyphs)
+
+- **Severity:** Low · **Area:** UI · **Evidence:** SCREENSHOT (windowed run, 2026-09-27) · **Status:** Open (owner: P24/P35)
+- **Where:** Any UI string with a character outside the bundled font's range, e.g. the `YOU — THE HORDE` stage banner.
+- **Symptom:** The em dash draws as a tofu box: "YOU □ THE HORDE". Other typographic characters (curly quotes, ellipsis, accented letters such as RAGÙ) are at risk the same way.
+- **Suggested fix:** Audit `src/ui/` and `src/content/` strings for non-ASCII characters; either ship a font with the glyphs (generated in code, per the zero-asset rule) or substitute ASCII (" - ", "...") at the text-building boundary.
+
 ### 4.7 Dev tooling and debt
 
 #### L56. The dev CLI is compiled into release and re-scans args every frame
@@ -1455,7 +1480,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L57. The headless smoke drifts from the real app; its summary query is unfiltered
 
-- **Severity:** Low · **Area:** dev-hygiene · **Evidence:** SMOKE · **Status:** Open
+- **Severity:** Low · **Area:** dev-hygiene · **Evidence:** SMOKE · **Status:** Fixed (0486601, P02)
 - **Where:**
   - `src/headless.rs:190-301`: a hand-copied system list with no `NetPlugin`, no `NetRole`, no `phase_time_control`, no `gather_local_input` or `player_input`, and no `aura_follow`, `enemy_flash`, `gem_merge`, `interact_system` or `death_watch`.
   - `src/headless.rs:105-106`: the bot writes `vel_t` directly.
@@ -1466,6 +1491,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
   - `--headless 1200 --fast-boss --coop2` fails about 1 run in 3 with "FAIL: XP pipeline dead". The summary reports the peer, which died at level 1, instead of the local astronaut. In one failing run the watchdog printed lvl=4 and the summary level=1.
   - The smoke cannot exercise the wire path, the pause model or `InputIntent`, so H4, H6 and the other wire bugs are invisible to it.
 - **Suggested fix:** Add `With<LocalPlayer>` to the :317 query; this is untested (U4). Longer term, build both apps from shared system-set functions.
+- **Resolution:** The summary and the watchdog read the LocalPlayer (U4 settled by P02's 12/12 fast-boss co-op runs). P30 also makes `--balance` print the local build and moves the misplaced "fail-fast" doc comment onto `bot_watchdog`. Building both apps from shared system sets remains open.
 
 #### L58. `--fast-boss` spawns all three bosses together; the solo check passes weakly
 
@@ -1580,12 +1606,12 @@ These are open questions. They are not confirmed defects. Do not file them as bu
 | ID | What is uncertain | Related | How to settle it |
 |---|---|---|---|
 | U1 | The runtime magnitude of the code-derived co-op bugs: how far the joiner drifts (H5); whether H7 really panics (it should, under Bevy 0.18's default handler); how often H8 happens in the real flow; the size of M1's ring displacement; which targets lose their markers in M22. Nothing in co-op was run live in the 2026-09-26 session. | H5-H8, M1, M22 | Run two instances with `--netlog` and follow each item's Repro. |
-| U2 | Whether M12's inverted winding is visible on screen. The winding itself is confirmed by computing the cross products. | M12 | Look at the rig in a windowed build, with and without `cull_mode: None`. |
+| U2 | Whether M12's inverted winding is visible on screen. The winding itself is confirmed by computing the cross products. | M12 | Look at the rig in a windowed build, with and without `cull_mode: None`. **Settled (P30):** visible; see M12. |
 | U3 | In the `stream_pickups` race, whether the ghost gem or the panic happens in practice. It depends on command-buffer apply order. | L34 | Force a pickup to spawn inside the collect radius and watch for both outcomes. |
-| U4 | Whether the headless summary query in the `--fast-boss --coop2` flake always returns the peer or varies by run. Whether adding `With<LocalPlayer>` fixes the flake is untested. | L57 | Apply the filter, then run the smoke 20 times. |
+| U4 | Whether the headless summary query in the `--fast-boss --coop2` flake always returns the peer or varies by run. Whether adding `With<LocalPlayer>` fixes the flake is untested. | L57 | Apply the filter, then run the smoke 20 times. **Settled (P02).** |
 | U5 | Whether air-hopping to 2.1x without sliding is intended tuning. | L1, D3 | The owner decides. |
-| U6 | How often an interactable lands inside a boulder with scale above 5.8. About 6.7% of boulders are that large; how often an interactable is placed inside one is unknown. | L7 | Sample `spawn_interactables` against `PropColliders` over many seeds. |
-| U7 | Perf magnitudes: the terrain rebuild hitch (L8), the `SpatialHash::near` cost (M18), and host streaming cost at the cap. Bandwidth figures (about 3.9-4.6 KB/s) come from old commit messages and were not re-measured. | L8, M18, L21 | Profile a release build at the 1200 cap, solo and hosting. |
+| U6 | How often an interactable lands inside a boulder with scale above 5.8. About 6.7% of boulders are that large; how often an interactable is placed inside one is unknown. | L7 | Sample `spawn_interactables` against `PropColliders` over many seeds. **Moot (P30):** placement now avoids props (L7). |
+| U7 | Perf magnitudes: the terrain rebuild hitch (L8), the `SpatialHash::near` cost (M18), and host streaming cost at the cap. Bandwidth figures (about 3.9-4.6 KB/s) come from old commit messages and were not re-measured. | L8, M18, L21 | Profile a release build at the 1200 cap, solo and hosting. **Partly measured (P30):** probe counts in M18; the terrain rebuild is now cached (L8). |
 | U8 | Cross-OS determinism. The terrain, props and interactable layout depend on `f32` `sin`/`cos`/`acos` and on `rand` sequences. Whether a Windows host and a Linux or macOS joiner build identical worlds is unverified. | H8, M1 | Compare `--netlog` `layout_sum` across OSes. |
 | U9 | `local_ip()` routes a UDP socket toward 8.8.8.8 to find the LAN address (`src/net.rs:1051-1060`). Behind a VPN it can report the wrong interface. | M20 | Test on a VPN'd machine. |
 | U10 | The source of the difficulty rise at about timer 372 in the 2026-09-26 run. Spawns plus kills ran about 1.15x the D = 0 prediction right after the level 18-19 pick, which fits a Cursed Moon Rock (+0.15 D, `src/content/items.rs:215-221`) or a Greed Shrine (+0.12). The log records no difficulty, items or shrine events. | M16, L48 | Add D and the item list to the health line. |
@@ -1603,13 +1629,13 @@ The owner must decide these. They are listed so that nobody "fixes" them unilate
 | ID | Question | Code | Canon or context |
 |---|---|---|---|
 | D1 | A stage boss killed after The Static begins never opens the teleporter, because `run_clock` returns before the check. Is that intended, and does a late kill pay anything? | `src/director.rs:55-58` returns before `:99-103`. The comment at `:112` says "if it was never beaten the teleporter never opens". `boss_dead` is still set (`src/combat.rs:960`). | Almost certainly intended. `GDD.md:117` and `GDD.md:694` say that if you miss a boss, The Static swallows that world. |
-| D2 | The spawn curve: keep the code's `(1 + 2.1·t)` or move toward the GDD's `(1 + 0.14·t)`? Add a cull, or merge overflow into The Static? Exclude pots from the cap? | M16, L16 | `GDD.md:263`, `GDD.md:705` |
-| D3 | Is air-hopping to 2.1x without sliding intended? | L1 | `GDD.md:321-322` |
+| D2 | The spawn curve: keep the code's `(1 + 2.1·t)` or move toward the GDD's `(1 + 0.14·t)`? Add a cull, or merge overflow into The Static? Exclude pots from the cap? | M16, L16 | `GDD.md:263`, `GDD.md:705` **Decided:** P01 (GDD §3 curve) + P30 (overflow valve into The Static; pots out of the cap). See M16. |
+| D3 | Is air-hopping to 2.1x without sliding intended? | L1 | `GDD.md:321-322` **Decided (P06):** a hop steers but never adds speed. See L1. |
 | D4 | The co-op chest rule: opener-only (the docket's model) or the GDD's "contested-but-generous" (a card for everyone, the opener rolls at +1 Luck)? | Docket item 5 | `GDD.md:902` |
 | D5 | Should joiners bank any meta progress from co-op, and which numbers? | M7 | Not decided. |
 | D6 | The co-op pause model: which panels may pause the shared world, and what happens to an astronaut whose player is in a panel? | M4, H6 | Not decided. |
 | D7 | The level-up card count. The GDD says three; the code deals four. | `src/run.rs:566`, `:573` (`opts.len() >= 4`, `while opts.len() < 4`) | `GDD.md:283` |
-| D8 | Lady Fortuna: one free reroll per level (the GDD) or unlimited (the code)? | L30 | `GDD.md:411` |
+| D8 | Lady Fortuna: one free reroll per level (the GDD) or unlimited (the code)? | L30 | `GDD.md:411` **Decided (P30):** the GDD: one free reroll per level. See L30. |
 | D9 | When should the ship-hygiene items go (the B and T keys, Mars and recruit unlocks, the dev CLI)? Re-gating unlocks needs an explicit removal migration. | §9 | Not decided. |
 | D10 | Revive design, and whether a stage change revives the downed. | M15 | The GDD's M5 milestone (revives), the Tumbling Beacon. **Settled by P18:** the §11 Tumbling Beacon (3 s teammate revive at 50% HP, no self-revive, a 40 s Static Meter that claims until the next teleporter) — and yes, a teleporter brings every downed or claimed teammate back at 50% HP. |
 
@@ -1859,19 +1885,19 @@ These are the things that must not ship in a public build. Each one is confirmed
 
 | ID | Item | Where | What to do |
 |---|---|---|---|
-| SH1 | **DEV key B summons the stage boss.** It is ungated in release and on clients, is a progression shortcut, and shares the Banish key. See M14. | `src/enemies.rs:913-936` (doc: "Remove before ship"); `src/main.rs:244` | Delete it, or compile it only with a `dev` Cargo feature. If kept for dev builds, add `.run_if(net::is_simulating)`. |
+| SH1 | **DEV key B summons the stage boss.** It is ungated in release and on clients, is a progression shortcut, and shares the Banish key. See M14. | `src/enemies.rs:913-936` (doc: "Remove before ship"); `src/main.rs:244` | Delete it, or compile it only with a `dev` Cargo feature. If kept for dev builds, add `.run_if(net::is_simulating)`. **Done (b5c192f, P30):** B needs `--dev`. |
 | SH2 | **DEV key T replays the tutorial** in any run. | `src/tutorial.rs:42-45` (comment: "DEV: press T to replay"); registered at `src/main.rs:299` | Remove it, or move it to a "Replay tutorial" button in Settings. |
 | SH3 | **Mars is unlocked by default** ("dev: Mars selectable for playtesting"). `migrate` folds every default unlock into every loaded save, so every save regains Mars on load. As a result, ClearMoonT2's `UnlockPlanet(Mars)` reward and the locked Mars card ("Clear MOON Tier 2 to chart this world") are dead, and Yuki (unlocked by ClearMarsT1) is reachable early. | `src/save.rs:84`; `migrate` at `src/save.rs:130-145`; `src/content/quests.rs:79`; `src/ui/menus.rs:566-568` | Removing line 84 stops new saves from getting Mars, but **existing saves keep it** (it is persisted in `unlocked_planets`). Re-gating needs an explicit removal migration, for example a save `version` bump that removes Mars unless ClearMoonT2 is in `quests_done`. Decide whether to grandfather playtesters. |
 | SH4 | **All six recruits start unlocked**, and their unlock conditions are not implemented. `starts_unlocked` excludes only B0nk, Yuki, ChimpO and Doug. Conditions such as "Land 500 crits in one run", "Circle a planet 3x in under 40s" and "Open 20 Legendary chests" have no counters or quests (`src/save.rs:15-29`, `src/content/quests.rs:7-24`). | `src/content/characters.rs:237-244`; `unlock_desc` at `src/content/characters.rs:152-212` | Implement the counters and quests, change `starts_unlocked`, and add a removal migration as for SH3. `migrate` only ever adds. |
 | SH5 | **The dev CLI and headless harness are compiled into release** (L56): `--headless`, `--fast-boss`, `--hero`, `--planet`, `--seed`, `--autodrop`, `--autopick` (free upgrades), `--stagenow` (skips stages, forces tier 3), `--bossnow`, `--botinput`, `--netlog`, `--coop2`, `--enemydist`, and the multiplayer `--host`, `--join` and `--port`. Two run conditions re-scan `std::env::args()` every frame. | `src/main.rs:52-69`, `:159-171`, `:385`, `:398-399`, `:451-520`; `src/net.rs:1141-1172`; `src/headless.rs` | Parse args once into a resource. Put the dev flags and the headless app behind a `dev` feature. Keep only the player-facing `--host`, `--join` and `--port` if wanted. |
 | SH6 | **The release exe in `target/` is stale.** `target/release/astrobonk.exe` (01:19) predates HEAD `99d012f` (01:23). It lacks the `inter_sum=` string that commit added, so it very likely lacks all three of the commit's fixes. The 2026-09-26 playtest ran on it. | Build artifact, not code | Before any playtest or release, run `cargo build --release` from a clean tree with the game closed, then run the four smokes against **that** binary. Never hand out an exe you did not just build from a known commit. Record the commit hash in the build (see SH7). |
 | SH7 | **There is no build identity check between peers.** `PROTOCOL_ID` has not been bumped since Stage 4, and replicon's `ProtocolCheck` does not detect field-layout changes (L46). | `src/net.rs:34-36` | Bump `PROTOCOL_ID` on every wire change. Better, derive it from a hash of the wire types or the git commit at build time (a `build.rs`), and show the version on the main menu and in the session log. |
-| SH8 | **The save can be wiped by a schema change**, and writes are not atomic (M13). | `src/save.rs:14`, `:115-122`, `:147-160` | Add `#[serde(default)]` on `Counters`, back up on a parse failure, write to a temp file then rename, and add a `version` field. Do this before adding any counter, and before SH3 or SH4. |
+| SH8 | **The save can be wiped by a schema change**, and writes are not atomic (M13). | `src/save.rs:14`, `:115-122`, `:147-160` | Add `#[serde(default)]` on `Counters`, back up on a parse failure, write to a temp file then rename, and add a `version` field. Do this before adding any counter, and before SH3 or SH4. **Done (0b58234, P30):** see M13. |
 | SH9 | **A console window opens alongside the game on Windows.** There is no `#![windows_subsystem = "windows"]` in `src/main.rs`, so the release exe is a console-subsystem binary. | `src/main.rs:1` | Add `#![cfg_attr(not(feature = "dev"), windows_subsystem = "windows")]`. Note that `--netlog` output and all `info!` logging go to the console (Bevy writes them to stderr), so keep the console in dev builds, or mirror what matters to the session log (L48). |
 | SH10 | **The save and log paths fall back to `.` when `APPDATA` is unset**, which is every non-Windows OS. A Linux or macOS build would write `./astrobonk/save.json` and `./astrobonk/logs/` relative to the working directory. | `src/save.rs:107-111`; `src/playlog.rs:33-37` | Use the platform data directory (for example with the `directories` crate). |
 | SH11 | **Session logs are never rotated.** Every launch creates `session-<unix>.log`, and nothing deletes old ones. | `src/playlog.rs:56-60`; there is no `remove_file` or `read_dir` in `src/` | Keep the last N logs, or cap their total size. |
 | SH12 | **Netcode is unauthenticated and unencrypted.** `ServerAuthentication::Unsecure` and `ClientAuthentication::Unsecure`; `client_id` is the join time in milliseconds. Anyone who can reach UDP port 5011 can join, up to three joiners (`max_clients: MAX_PLAYERS - 1`). This is fine for LAN playtests. | `src/net.rs:1081`, `:1114-1115`, `:1079`, `:37-38` | For internet play use secure connect tokens or a relay (Steam), and add a host-side accept or kick list. |
-| SH13 | **Player-facing text errors:** "Shift to slide" (L29); "It'll drop a chest" (L28); the "[DEV] … SUMMONED" banner (`src/enemies.rs:935`); "already in a co-op session — restart to change role" (M21). | `src/tutorial.rs:24`, `:26`; `src/enemies.rs:935`; `src/ui/menus.rs:252-257`, `:749-752` | Fix them with their items. Do a full text pass before 1.0. |
+| SH13 | **Player-facing text errors:** "Shift to slide" (L29); "It'll drop a chest" (L28); the "[DEV] … SUMMONED" banner (`src/enemies.rs:935`); "already in a co-op session — restart to change role" (M21). | `src/tutorial.rs:24`, `:26`; `src/enemies.rs:935`; `src/ui/menus.rs:252-257`, `:749-752` | Fix them with their items. Do a full text pass before 1.0. **P30:** "Shift to slide" is true since P06 (L29); the chest line is true since P01's cache (L28); the [DEV] banner needs `--dev` (M14). The full text pass is still open. |
 | SH14 | **35 compiler warnings, no unit tests, no CI** (L65). | Crate-wide | Get to zero warnings, add tests for the save, placement determinism and wire codecs, and add CI running the build, tests and smokes. |
 | SH15 | **No LICENSE file** in the public GitHub repository (`git ls-files` shows none). | Repo root | The owner should choose a license, or state "all rights reserved", before inviting contributions. |
 | SH16 | **Leftover dev markers in code.** | `src/enemies.rs:913-935`; `src/tutorial.rs:42`; `src/save.rs:84`; `src/main.rs:498`, `:517` (DEV log lines) | Before 1.0, a search for `DEV`, `dev:` and `Remove before ship` in `src/` should return nothing that ships. |

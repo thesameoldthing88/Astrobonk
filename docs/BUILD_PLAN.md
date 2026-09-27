@@ -56,12 +56,12 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
 | P05 Tomes 8 → 23 + loadout | ✅ wave 3. Gaps: Nightfall reads a fixed sun (`planet::sunward`/`is_night`) until P07 turns it; Duplication's free Microwave use and Salvage's Microwave discount wait for P16's Gold price; Duplication/Salvage do nothing for joiners until P14 (host-only interactables); Golden Tome max is ×1.5 per the GDD formula (old saves were ×2.0 at L20) — design call; per-rank numbers not playtested |
 | P06 Movement techs + Antipode Blink | ✅ wave 3. Gaps: Antipode Blink mastery/quest ladder is P21/P26 (MoveTech counts slams/grinds/blinks for them); antipode tell is a HUD dial until P24's threat ring; no gamepad binds (P27); §4 jump hang ~0.73 s vs GDD ~1.2 s left for a playtest; slam/rail/blink numbers not playtested; `CLAUDE.md` module map lacks `techs` and `tomes` |
-| P07 Day/night cycle, world gimmicks, diegetic difficulty | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
-| P08 New enemies batch 1 | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P07 Day/night cycle, world gimmicks, diegetic difficulty | ✅ (landed by the lead after the weekly agent limit, no independent review). One turning sun (`daynight::Sun`), night rules, Earthside/Farside, thorns, spore caps, The Crawl; sun phase + shrink on RunSnapMsg. Fixed on landing: toon rim/ambient reconciled with P36, the Crawl lagging the clock by a frame per level-up. Gaps: night/day balance not playtested (P08's custom movers were wired to `Sun::enemy_speed` when P08 landed) |
+| P08 New enemies batch 1 | ✅ (landed by the lead after the weekly agent limit, no independent review). Rollo, Trencher, Aegis Drone, Sunskimmer, Beacon Tick, Mimic Chest (14% of chests), Longshot Beamer Prime; per-world spawn tables; kind codes 9-15, an enemy-state lane, five hazard events; `--bestiary`/`--dev --enemies` probes. Fixed on landing: the custom movers take P07's night pace; P12 stuns hold every new attacker (a stunned Sunskimmer mid-dive fizzles). Gaps: spawn weights/caps not playtested; the UI font lacks the em dash (L66) |
 | P09 Planetary events (2 per world) | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P10 Glitched elite affixes | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P11 New enemies batch 2 | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
-| P12 Weapon depth, evolution fanfare, hitstop canon | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P12 Weapon depth, evolution fanfare, hitstop canon | ✅ (landed by the lead after the weekly agent limit, no independent review). Six Tier-1 weapons with their own behaviours (arsenal.rs), fanfare, sparse hitstop, stuns. Fixed on landing: slab-shaped melee swing → crescent; one cryo-slow path; fanfare relative to the toon grade. Gaps: teammates' Tier-1 weapon visuals are not streamed to other machines; numbers not playtested |
 | P13 Bosses: Hollow Cosmonaut + canon phases | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P14 Co-op peer interactables + loot split | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P15 World 4: PEBBLE + THE HAND | ☐ |
@@ -78,13 +78,13 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P26 Codex, mastery & skins, Unlock Web, daily lives | ☐ |
 | P27 Gamepad parity, remapping, rumble, aim assist | ☐ |
 | P28 Performance, robustness, dev gating | ☐ |
-| P30 Known issues sweep — solo, save, world, combat | ☐ |
+| P30 Known issues sweep — solo, save, world, combat | ✅ (landed by the lead after the weekly agent limit hit, before an independent review ran). Closed H1-H3, M12-M14, M16-M20, M22, L1, L3-L9, L14-L16, L24-L30 (see KNOWN_ISSUES). Gaps: overflow/cap numbers not human-playtested; the wrench sweep visual is an opaque flash (P12/P24) |
 | P31 Known issues sweep — co-op | ☐ |
 | P32 One hero, twelve suits | ☐ |
 | P33 The Journey: planets as levels, crash site, Hades-style persistence | ☐ |
 | P34 Suit upgrades you can see | ☐ |
 | P35 Story, the turtle, and the cartoon-spooky tone | ☐ |
-| P36 Toon art style | ☐ |
+| P36 Toon art style | ✅ (landed by the lead after the weekly agent limit, no independent review). Cel lighting via a patch of bevy_pbr's lighting module + one ink/rim post pass; per-world ToonLook. Also fixed on landing: upright charge-shrine rings, props in the drop zone. Gaps: flash-reduction/photosensitivity interplay with bloom only eyeballed; relies on bevy_pbr 0.18.1's lighting anchors (the patch refuses whole and logs if they move) |
 | P29 Final audit + docs | ☐ |
 
 ---

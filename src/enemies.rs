@@ -39,6 +39,25 @@ pub struct Enemy {
     pub stride: f32,
 }
 
+/// Reeling from a Sonic Whoopee / BROWN NOTE shove (`combat::apply_hits`): a stunned foe
+/// neither advances nor attacks — every attacker query filters it out — though it still
+/// slides with its knockback. HOST-only (a joiner sees its proxy stop). Bosses are immune.
+#[derive(Component)]
+pub struct Stunned {
+    pub secs: f32,
+}
+
+/// HOST: stuns wear off.
+pub fn tick_stuns(mut commands: Commands, time: Res<Time>, mut q: Query<(Entity, &mut Stunned)>) {
+    let dt = time.delta_secs();
+    for (e, mut s) in &mut q {
+        s.secs -= dt;
+        if s.secs <= 0.0 {
+            commands.entity(e).remove::<Stunned>();
+        }
+    }
+}
+
 #[derive(Component)]
 pub struct Boss {
     pub kind: BossKind,
@@ -229,6 +248,9 @@ pub struct EnemyAssets {
     pub worm_mat: Handle<StandardMaterial>,
     pub anubot_mesh: Handle<Mesh>,
     pub anubot_mat: Handle<StandardMaterial>,
+    /// §4 "The Static is near-invisible at night": a ghost of The Static standing in the
+    /// night wears this faint copy of its material (`daynight::night_static`).
+    pub ghost_night_mat: Handle<StandardMaterial>,
     pub beam_mesh: Handle<Mesh>,
     pub beam_charge_mat: Handle<StandardMaterial>,
     pub beam_fire_mat: Handle<StandardMaterial>,
@@ -257,31 +279,105 @@ pub struct EnemyAssets {
 #[derive(Component)]
 pub struct BaseMat(pub Handle<StandardMaterial>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SpatialHash {
     pub map: HashMap<IVec3, Vec<(Entity, Vec3)>>,
+    /// The shell the members live in: the least and greatest distance from the planet's
+    /// centre over every member at the last rebuild. The horde is a skin a few metres thick
+    /// on a sphere, so most cells of a query's cube hold nothing and need no probe.
+    pub shell: (f32, f32),
+}
+
+impl Default for SpatialHash {
+    fn default() -> Self {
+        Self { map: HashMap::new(), shell: (f32::INFINITY, f32::NEG_INFINITY) }
+    }
+}
+
+/// Distance from `p` to the cell span `[k·cell, (k+1)·cell)` along one axis (0 inside it).
+fn axis_gap(p: f32, k: i32) -> f32 {
+    let lo = k as f32 * ENEMY_SEPARATION_CELL;
+    (lo - p).max(p - (lo + ENEMY_SEPARATION_CELL)).max(0.0)
 }
 
 impl SpatialHash {
     pub fn key(pos: Vec3) -> IVec3 {
         (pos / ENEMY_SEPARATION_CELL).floor().as_ivec3()
     }
-    /// All enemies within `radius` of `pos` (approximate, cell-based).
+
+    /// Every member that could lie within `radius` of `pos` (cell-based: a superset, never
+    /// missing one). Probes only the cells that both touch the query ball and cross the
+    /// members' shell (M18: the old full-cube scan was 3,375 probes for a homing seeker's
+    /// 14 m and 9,261 for the comet's 22 m; `spatial_hash_self_check` reports the new ones).
     pub fn near<'a>(&'a self, pos: Vec3, radius: f32) -> impl Iterator<Item = (Entity, Vec3)> + 'a {
-        let r = (radius / ENEMY_SEPARATION_CELL).ceil() as i32;
-        let c = Self::key(pos);
-        (-r..=r).flat_map(move |x| {
-            (-r..=r).flat_map(move |y| {
-                (-r..=r).flat_map(move |z| {
-                    self.map
-                        .get(&(c + IVec3::new(x, y, z)))
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                })
-            })
-        })
+        self.cells(pos, radius).flat_map(move |k| self.map.get(&k).into_iter().flatten().copied())
     }
+
+    /// The cells a `near` query probes.
+    fn cells(&self, pos: Vec3, radius: f32) -> impl Iterator<Item = IVec3> {
+        let cell = ENEMY_SEPARATION_CELL;
+        let r = (radius / cell).ceil() as i32;
+        let c = Self::key(pos);
+        let (lo, hi) = self.shell;
+        (-r..=r)
+            .flat_map(move |x| (-r..=r).map(move |y| (c.x + x, c.y + y)))
+            .flat_map(move |(kx, ky)| {
+                // the z cells of this column the ball reaches (none if it misses the column)
+                let (gx, gy) = (axis_gap(pos.x, kx), axis_gap(pos.y, ky));
+                let rest = radius * radius - gx * gx - gy * gy;
+                let (z0, z1) = if rest < 0.0 {
+                    (1, 0)
+                } else {
+                    let s = rest.sqrt();
+                    (((pos.z - s) / cell).floor() as i32, ((pos.z + s) / cell).floor() as i32)
+                };
+                (z0..=z1).map(move |kz| IVec3::new(kx, ky, kz))
+            })
+            .filter(move |k| {
+                // the cell's nearest and farthest points from the planet's centre
+                let min = k.as_vec3() * cell;
+                let max = min + Vec3::splat(cell);
+                let near = Vec3::ZERO.clamp(min, max).length();
+                let far = min.abs().max(max.abs()).length();
+                far >= lo && near <= hi
+            })
+    }
+}
+
+/// Headless self-check (M18): `SpatialHash::near` finds exactly what a brute-force scan
+/// finds within the radius, on a crowd scattered over a planet's skin, for the radii the
+/// game queries — and says how much of the old cube scan it skips.
+pub fn spatial_hash_self_check() -> Result<String, String> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5A7);
+    let radius_planet = 140.0;
+    let mut hash = SpatialHash::default();
+    let mut all: Vec<(Entity, Vec3)> = Vec::new();
+    for i in 0..1200u32 {
+        let dir = random_dir(&mut rng);
+        let pos = dir * (radius_planet + rng.gen_range(-3.0..4.5));
+        all.push((Entity::from_raw_u32(i + 1).unwrap(), pos));
+    }
+    // cluster a third of them around one spot, like a horde on the player
+    let hot = Vec3::Y * radius_planet;
+    for (_, p) in all.iter_mut().take(400) {
+        let jitter = Vec3::new(rng.gen_range(-18.0..18.0), 0.0, rng.gen_range(-18.0..18.0));
+        *p = (hot + jitter).normalize() * (radius_planet + rng.gen_range(-1.0..3.0));
+    }
+    hash.fill(all.iter().copied());
+    let mut report = Vec::new();
+    for (q, radius) in [(hot, 14.0), (hot, 22.0), (hot + Vec3::X * 7.0, 2.2), (hot, 0.8), (Vec3::X * 141.0, 22.0)] {
+        let mut got: Vec<Entity> = hash.near(q, radius).filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| e).collect();
+        let mut want: Vec<Entity> = all.iter().filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| *e).collect();
+        got.sort();
+        want.sort();
+        if got != want {
+            return Err(format!("near({radius} m) found {} of the {} within reach", got.len(), want.len()));
+        }
+        let cube = (2 * (radius / ENEMY_SEPARATION_CELL).ceil() as usize + 1).pow(3);
+        report.push(format!("{radius}m {}/{cube}", hash.cells(q, radius).count()));
+    }
+    Ok(report.join(", "))
 }
 
 #[derive(Resource)]
@@ -298,6 +394,14 @@ pub struct Director {
     /// Bosses alive last tick; a drop means one just fell and the horde exhales.
     pub bosses_alive: usize,
     pub tick: f32,
+    /// The overflow valve (GDD §9 "overflow merges into The Static"): spawns the live cap
+    /// had no room for, banked this stage instead of discarded. They come back as extra
+    /// ghosts once The Static rises (`STATIC_BACKLOG_DRAIN` a second, when there is room).
+    pub static_backlog: f32,
+    /// Far stragglers the valve has handed to The Static this stage (see `director_spawn`).
+    pub static_recycled: u32,
+    /// The "THE STATIC IS GATHERING" line has been shown this stage.
+    pub gathering_told: bool,
 }
 
 impl Default for Director {
@@ -310,6 +414,9 @@ impl Default for Director {
             exhale: 0.0,
             bosses_alive: 0,
             tick: 0.0,
+            static_backlog: 0.0,
+            static_recycled: 0,
+            gathering_told: false,
         }
     }
 }
@@ -389,6 +496,159 @@ fn enemy_mesh(kind: EnemyKind) -> Mesh {
             m.add_cone(0.42, 1.1, 8, at(Vec3::new(0.0, 0.0, 0.0)), BODY);
             m.add_sphere(0.22, 1, at(Vec3::new(0.0, 0.48, 0.0)), BODY);
             m.add_box(Vec3::new(0.24, 0.12, 0.08), at(Vec3::new(0.0, 0.48, -0.18)), DARK); // visor
+        }
+        // ---- batch 1 (P08): each a silhouette you can name at a glance, one glowing
+        // accent (`set_glow`), front at local -Z like the rest ----
+        Rollo => {
+            // a curled armadillo: a ball banded with plates around its roll axis (local X)
+            m.add_sphere(0.52, 2, at(Vec3::ZERO), BODY);
+            for i in 0..6 {
+                let a = i as f32 / 6.0 * std::f32::consts::TAU;
+                m.add_box(
+                    Vec3::new(1.12, 0.1, 0.34),
+                    Transform::from_translation(Vec3::new(0.0, a.cos() * 0.5, a.sin() * 0.5)).with_rotation(Quat::from_rotation_x(a)),
+                    MID,
+                ); // armour band
+            }
+            m.add_sphere(0.2, 1, at(Vec3::new(0.0, -0.18, -0.46)), DARK); // tucked snout
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.08, 0.22, 4, at(Vec3::new(0.16 * s, 0.56, -0.1)), DARK); // ear
+                m.set_glow(true);
+                m.add_sphere(0.065, 0, at(Vec3::new(0.11 * s, -0.08, -0.6)), BODY); // eye in the curl
+                m.set_glow(false);
+            }
+        }
+        Trencher => {
+            // a low digging beast: wide body, a finned spine (all that shows under the
+            // crust), shovel claws with glowing tips
+            m.add_ellipsoid(Vec3::new(0.58, 0.36, 0.74), 1, at(Vec3::new(0.0, -0.06, 0.0)), BODY);
+            for (z, h) in [(-0.34, 0.38), (0.02, 0.46), (0.38, 0.32)] {
+                m.add_box(Vec3::new(0.1, h, 0.3), at(Vec3::new(0.0, 0.28 + h * 0.4, z)), MID); // spine fin
+            }
+            m.add_cone(0.16, 0.4, 5, Transform::from_translation(Vec3::new(0.0, -0.04, -0.82)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // snout
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.3, 0.08, 0.42),
+                    Transform::from_translation(Vec3::new(0.34 * s, -0.26, -0.66)).with_rotation(Quat::from_rotation_y(0.25 * s)),
+                    DARK,
+                ); // shovel claw
+                m.set_glow(true);
+                for c in [-0.08, 0.08] {
+                    m.add_cone(
+                        0.05,
+                        0.2,
+                        4,
+                        Transform::from_translation(Vec3::new(0.34 * s + c - 0.06 * s, -0.26, -0.94)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                        BODY,
+                    ); // hot claw tip
+                }
+                m.set_glow(false);
+                m.add_cylinder(0.08, 0.32, 5, at(Vec3::new(0.32 * s, -0.38, 0.3)), MID); // hind leg
+            }
+        }
+        AegisDrone => {
+            // a drone core behind a curved shield wall whose rim glows: the side it faces
+            // is the side you cannot hurt
+            m.add_sphere(0.34, 1, at(Vec3::new(0.0, 0.0, 0.14)), BODY);
+            m.add_box(Vec3::new(0.86, 0.96, 0.08), at(Vec3::new(0.0, 0.0, -0.4)), MID); // shield face
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.42, 0.9, 0.08),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.0, -0.26)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    MID,
+                ); // shield wing
+                m.add_box(Vec3::new(0.06, 0.32, 0.26), at(Vec3::new(0.26 * s, 0.0, 0.46)), DARK); // stabilizer
+            }
+            m.add_cylinder(0.025, 0.4, 4, at(Vec3::new(0.0, 0.5, 0.18)), DARK); // antenna
+            m.set_glow(true);
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, 0.5, -0.42)), BODY); // lit rim
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, -0.5, -0.42)), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.06, 0.9, 0.12),
+                    Transform::from_translation(Vec3::new(0.76 * s, 0.0, -0.13)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    BODY,
+                );
+            }
+            m.set_glow(false);
+        }
+        Sunskimmer => {
+            // a swept manta dart burning a little sun under its belly
+            m.add_ellipsoid(Vec3::new(0.24, 0.15, 0.68), 1, at(Vec3::ZERO), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.95, 0.05, 0.42),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.02, 0.12))
+                        .with_rotation(Quat::from_rotation_y(0.4 * s) * Quat::from_rotation_z(0.14 * s)),
+                    MID,
+                ); // swept wing
+            }
+            m.add_cone(0.1, 0.7, 5, Transform::from_translation(Vec3::new(0.0, 0.0, 0.78)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // tail
+            m.add_cone(0.13, 0.4, 5, Transform::from_translation(Vec3::new(0.0, 0.0, -0.78)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // nose
+            m.set_glow(true);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.13, 0.04)), BODY); // the sun core
+            m.set_glow(false);
+        }
+        BeaconTick => {
+            // a bloated little tick with a tall antenna and a red tracker bulb
+            m.add_ellipsoid(Vec3::new(0.44, 0.32, 0.54), 1, at(Vec3::new(0.0, 0.0, 0.1)), BODY);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.04, -0.44)), DARK); // head
+            for s in [-1.0, 1.0] {
+                for z in [-0.25, 0.05, 0.35] {
+                    m.add_cylinder(0.04, 0.5, 4, Transform::from_translation(Vec3::new(0.46 * s, -0.18, z)).with_rotation(Quat::from_rotation_z(1.0 * s)), MID); // leg
+                }
+            }
+            m.add_cylinder(0.03, 0.62, 4, at(Vec3::new(0.0, 0.58, 0.06)), MID); // antenna
+            m.set_glow(true);
+            m.add_sphere(0.13, 1, at(Vec3::new(0.0, 0.92, 0.06)), BODY); // tracker bulb
+            m.set_glow(false);
+        }
+        Mimic => {
+            // the chest, lid up, teeth out, eyes in the dark — on stubby running legs
+            m.add_box(Vec3::new(1.0, 0.52, 0.7), at(Vec3::new(0.0, -0.1, 0.0)), BODY); // box
+            m.add_box(
+                Vec3::new(1.04, 0.2, 0.74),
+                Transform::from_translation(Vec3::new(0.0, 0.34, 0.14)).with_rotation(Quat::from_rotation_x(0.55)),
+                BODY,
+            ); // gaping lid
+            for x in [-0.36, -0.12, 0.12, 0.36] {
+                m.add_cone(0.07, 0.2, 4, at(Vec3::new(x, 0.24, -0.33)), BODY); // lower teeth
+                m.add_cone(
+                    0.07,
+                    0.2,
+                    4,
+                    Transform::from_translation(Vec3::new(x + 0.12, 0.45, -0.22)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)),
+                    BODY,
+                ); // upper teeth
+            }
+            m.add_box(Vec3::new(0.3, 0.06, 0.45), Transform::from_translation(Vec3::new(0.0, 0.18, -0.45)).with_rotation(Quat::from_rotation_x(0.35)), Color::srgb(0.75, 0.15, 0.15)); // tongue
+            m.add_box(Vec3::new(1.03, 0.08, 0.73), at(Vec3::new(0.0, -0.2, 0.0)), DARK); // iron band
+            for (x, z) in [(-0.38, -0.24), (0.38, -0.24), (-0.38, 0.24), (0.38, 0.24)] {
+                m.add_cylinder(0.08, 0.26, 5, at(Vec3::new(x, -0.44, z)), DARK); // stubby leg
+            }
+            m.set_glow(true);
+            for s in [-1.0, 1.0] {
+                m.add_sphere(0.075, 0, at(Vec3::new(0.2 * s, 0.34, -0.02)), BODY); // eye
+            }
+            m.set_glow(false);
+        }
+        BeamerPrime => {
+            // the Beamer's crystal grown into a sniper: tripod, twin crystal, a long barrel
+            // and a glowing scope lens at its tip
+            m.add_cone(0.3, 1.5, 5, at(Vec3::new(0.0, 0.1, 0.1)), BODY); // main crystal
+            m.add_cone(0.2, 0.9, 5, Transform::from_translation(Vec3::new(0.0, -0.35, 0.1)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)), BODY); // keel
+            m.add_sphere(0.16, 1, at(Vec3::new(0.0, 0.28, 0.05)), DARK); // core
+            m.add_cylinder(0.065, 1.3, 6, Transform::from_translation(Vec3::new(0.0, 0.3, -0.62)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // barrel
+            for i in 0..3 {
+                let a = i as f32 / 3.0 * std::f32::consts::TAU + 0.5;
+                m.add_cylinder(0.05, 0.7, 4, Transform::from_translation(Vec3::new(a.cos() * 0.34, -0.5, a.sin() * 0.34 + 0.1)).with_rotation(Quat::from_rotation_z(a.cos() * 0.4) * Quat::from_rotation_x(-a.sin() * 0.4)), MID); // tripod leg
+            }
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.1, 0.6, 4, Transform::from_translation(Vec3::new(0.24 * s, 0.35, 0.15)).with_rotation(Quat::from_rotation_z(-0.45 * s)), MID); // shard
+            }
+            m.set_glow(true);
+            m.add_sphere(0.12, 1, at(Vec3::new(0.0, 0.3, -1.3)), BODY); // scope lens
+            m.set_glow(false);
         }
     }
     m.build()
@@ -472,7 +732,7 @@ fn aim_dash_mesh(pad: f32) -> Mesh {
         let z = -(i as f32 * period + dash * 0.5);
         m.add_box(Vec3::new(1.0 + pad, 1.0 + pad, dash + pad * 0.02), crate::meshkit::at(Vec3::new(0.0, 0.0, z)), Color::WHITE);
     }
-    m.build_ccw()
+    m.build()
 }
 
 /// The Burrower's crack decal: seven jagged three-segment cracks radiating from a small
@@ -508,7 +768,7 @@ fn crack_mesh(width: f32) -> Mesh {
         }
     }
     m.add_cylinder(0.12 + width, 0.03 + width * 0.2, 7, crate::meshkit::at(Vec3::ZERO), Color::WHITE);
-    m.build_ccw()
+    m.build()
 }
 
 /// Danger material colors in a palette: ring, ring fill, shot, beam charge, beam fire. The
@@ -523,32 +783,29 @@ pub fn setup_enemy_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    // absent headless (no renderer): the accents then simply don't glow
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     let mut mesh_map = HashMap::new();
     let mut mat_map = HashMap::new();
-    for kind in [
-        EnemyKind::Shambler,
-        EnemyKind::Sprinter,
-        EnemyKind::Bruiser,
-        EnemyKind::Spitter,
-        EnemyKind::Ufo,
-        EnemyKind::Burrower,
-        EnemyKind::Beamer,
-        EnemyKind::Lobber,
-        EnemyKind::Ghost,
-    ] {
+    let glow_mask = images.map(|mut i| i.add(crate::meshkit::glow_mask_image()));
+    for kind in EnemyKind::ALL {
         let def = kind.def();
         mesh_map.insert(kind, meshes.add(enemy_mesh(kind)));
         let ghost = kind == EnemyKind::Ghost;
+        // A kind with an accent glows ONLY there (the mask's white texel), bright enough
+        // to read on the night side; the built eight keep their faint all-over glow.
+        let (emissive, emissive_texture) = match (kind.accent(), &glow_mask) {
+            (Some(accent), Some(mask)) => (accent.to_linear() * ENEMY_ACCENT_GLOW, Some(mask.clone())),
+            _ if ghost => (def.color.to_linear() * 1.8, None),
+            _ => (def.color.to_linear() * 0.15, None),
+        };
         mat_map.insert(
             kind,
             materials.add(StandardMaterial {
                 base_color: if ghost { def.color.with_alpha(0.55) } else { def.color },
-                emissive: if ghost {
-                    def.color.to_linear() * 1.8
-                } else {
-                    def.color.to_linear() * 0.15
-                },
+                emissive,
+                emissive_texture,
                 alpha_mode: if ghost { AlphaMode::Blend } else { AlphaMode::Opaque },
                 perceptual_roughness: 0.8,
                 ..default()
@@ -556,7 +813,16 @@ pub fn setup_enemy_assets(
         );
     }
 
+    let ghost = EnemyKind::Ghost.def().color;
+    let ghost_night_mat = materials.add(StandardMaterial {
+        base_color: ghost.with_alpha(GHOST_NIGHT_ALPHA),
+        emissive: ghost.to_linear() * 0.6,
+        alpha_mode: AlphaMode::Blend,
+        perceptual_roughness: 0.8,
+        ..default()
+    });
     commands.insert_resource(EnemyAssets {
+        ghost_night_mat,
         meshes: mesh_map,
         mats: mat_map,
         elite_mat: materials.add(StandardMaterial {
@@ -653,17 +919,65 @@ pub fn setup_enemy_assets(
     });
 }
 
-pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform), With<Enemy>>) {
-    for v in hash.map.values_mut() {
-        v.clear();
-    }
-    for (e, tf) in &q {
-        hash.map.entry(SpatialHash::key(tf.translation)).or_default().push((e, tf.translation));
-    }
-    hash.map.retain(|_, v| !v.is_empty());
+pub fn rebuild_hash(
+    mut hash: ResMut<SpatialHash>,
+    planet: Option<Res<CurrentPlanet>>,
+    q: Query<(Entity, &Transform, &Enemy, Has<Buried>)>,
+) {
+    hash.fill(q.iter().filter_map(|(e, tf, en, buried)| {
+        // A Trencher tunnelling under the crust is out of reach — its ridge is the tell,
+        // not a target.
+        if buried && en.kind == EnemyKind::Trencher {
+            return None;
+        }
+        // Column-hitbox fliers are filed where the weapons fly: under their body.
+        let at = match &planet {
+            Some(p) if en.kind.column_hitbox() => p.surface_point(en.dir) + en.dir * COLUMN_HIT_HEIGHT,
+            _ => tf.translation,
+        };
+        Some((e, at))
+    }));
 }
 
-/// One crowd enemy. Public so the headless probes can stage an exact scene (a comet tail).
+impl SpatialHash {
+    /// Replace the contents (keeping the cells' allocations) and re-measure the shell.
+    pub fn fill(&mut self, members: impl Iterator<Item = (Entity, Vec3)>) {
+        for v in self.map.values_mut() {
+            v.clear();
+        }
+        let mut shell = (f32::INFINITY, f32::NEG_INFINITY);
+        for (e, pos) in members {
+            let d = pos.length();
+            shell = (shell.0.min(d), shell.1.max(d));
+            self.map.entry(Self::key(pos)).or_default().push((e, pos));
+        }
+        self.map.retain(|_, v| !v.is_empty());
+        self.shell = shell;
+    }
+}
+
+/// One crowd enemy of any kind, sized by a run's `Scaling` — THE entry point for anything
+/// that adds to the horde outside the director: boss phase adds (P13's Sandstorm Court
+/// Aegis Drones and Final Judgment Beamer Primes), a sprung Mimic, the headless probes.
+/// Everything a kind needs to behave (its `bestiary` components, a Burrower's crack) comes
+/// with it. Returns the new enemy.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy_at(
+    commands: &mut Commands,
+    assets: &EnemyAssets,
+    planet: &CurrentPlanet,
+    kind: EnemyKind,
+    dir: Vec3,
+    elite: bool,
+    sc: &Scaling,
+    rng: &mut impl Rng,
+) -> Entity {
+    let (hp, dmg) = if kind == EnemyKind::Ghost { (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg) } else { (sc.hp, sc.dmg) };
+    spawn_enemy(commands, assets, planet, kind, dir, elite, hp, dmg, rng)
+}
+
+/// One crowd enemy with explicit HP/damage multipliers (see `spawn_enemy_at`). Public so the
+/// headless probes can stage an exact scene (a comet tail).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_enemy(
     commands: &mut Commands,
@@ -675,7 +989,7 @@ pub fn spawn_enemy(
     hp_mult: f32,
     dmg_mult: f32,
     rng: &mut impl Rng,
-) {
+) -> Entity {
     let def = kind.def();
     let scale = def.scale * if elite { EliteMods::SCALE } else { 1.0 } * rng.gen_range(0.92..1.1);
     let hp = def.hp * hp_mult * if elite { EliteMods::HP } else { 1.0 };
@@ -718,17 +1032,31 @@ pub fn spawn_enemy(
     if kind == EnemyKind::Lobber {
         cmd.insert(Lobber { cd: rng.gen_range(2.5..5.0) });
     }
+    // the §9 batch-1 kinds carry their behaviour (and the look a client streams)
+    crate::bestiary::attach(&mut cmd, kind, dir, rng);
+    let id = cmd.id();
     if kind == EnemyKind::Burrower {
         // the ground cracks over the burrow for exactly as long as it stays under
         spawn_crack_decal(commands, assets, planet, dir, BURROW_SECS);
     }
+    id
 }
 
 /// Timer-driven wave spawner. Runs while playing.
 ///
 /// Budget per second = `Rate_base` (the §3 arc beats) × the breathing modifier (hold while a
 /// miniboss is up, exhale after a boss falls) × `Scaling::spawn` (run time, depth, Δ, party).
-#[allow(clippy::too_many_arguments)]
+///
+/// The live cap counts the CROWD only — pots are scenery and bosses arrive on the clock, so
+/// neither takes a horde slot (L16). A budget the cap has no room for is not thrown away
+/// (M16, GDD §9 "overflow merges into The Static"):
+/// 1. crowd enemies stranded far from every astronaut — beyond `STATIC_RECYCLE_ARC`, over
+///    any horizon, adding nothing but a filled slot — dissolve into The Static, farthest
+///    first, and the same budget spawns fresh over the players' horizon: the pressure stays
+///    where the fighting is instead of piling up behind a kite;
+/// 2. whatever still does not fit is banked in `Director::static_backlog` and pours out as
+///    extra ghosts once The Static rises — the ones the planet could not hold are waiting.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
@@ -738,8 +1066,10 @@ pub fn director_spawn(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(&Player, &crate::run::PlayerState)>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_crowd: Query<(Entity, &Enemy, Has<Buried>), (Without<crate::interact::Pot>, Without<Boss>)>,
     q_boss: Query<&Boss>,
+    (crawl, mut gimmicks): (Res<crate::gimmicks::Crawl>, ResMut<crate::gimmicks::GimmickTelemetry>),
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -764,11 +1094,13 @@ pub fn director_spawn(
     let party = scaling::living_party(q_player.iter().map(|(_, ps)| ps));
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
-    let alive = q_enemies.iter().count();
+    let alive = q_crowd.iter().count();
     // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
     // sub-linearly — a full budget per player doubles density and blows the cap, while no
     // bump at all gives each player half a horde.
     let sc = Scaling::for_run(&run, party);
+    // §4: a wave aimed at an astronaut standing in the night lands closer
+    let sun = crate::daynight::Sun::of(&run);
 
     // Breathing: a boss count that dropped since last tick means one just fell.
     let bosses_now = q_boss.iter().count();
@@ -784,6 +1116,12 @@ pub fn director_spawn(
         * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
+    // The backlog rejoins through The Static's own door.
+    if run.static_active && director.static_backlog > 0.0 {
+        let drain = (STATIC_BACKLOG_DRAIN * dt).min(director.static_backlog);
+        director.static_backlog -= drain;
+        director.spawn_bank += drain;
+    }
 
     // Elite rolls (see config::ELITE_ROLL_SECS). The Static has no elites.
     if !run.static_active {
@@ -791,7 +1129,9 @@ pub fn director_spawn(
         director.since_elite += dt;
         if director.elite_timer <= 0.0 {
             director.elite_timer += ELITE_ROLL_SECS;
-            if rng.gen_bool(sc.elite_chance as f64) {
+            // §8 Farside: elites prowl the Moon's far hemisphere (+20% with the party there)
+            let far = crate::daynight::farside_elite_mult(planet.kind, anchors.iter().map(|(d, _)| *d));
+            if rng.gen_bool((sc.elite_chance * far).min(1.0) as f64) {
                 director.elite_pending = true;
             }
         }
@@ -814,8 +1154,49 @@ pub fn director_spawn(
     director.spawn_bank -= budget as f32;
 
     let cap = sc.live_cap;
-    let room = cap.saturating_sub(alive);
+    let mut room = cap.saturating_sub(alive);
+    if budget > room {
+        // 1. The far stragglers go first (never an elite — its loot is promised — nor a
+        // Burrower mid-ambush). Arc to the NEAREST astronaut, so a co-op squad split
+        // across the planet keeps both hordes.
+        let want = budget - room;
+        let mut far: Vec<(f32, Entity)> = q_crowd
+            .iter()
+            .filter(|(_, e, buried)| !e.elite && !*buried)
+            .filter_map(|(ent, e, _)| {
+                let arc = anchors
+                    .iter()
+                    .map(|(a, _)| sphere::arc_dist(e.dir, *a, planet.radius))
+                    .fold(f32::INFINITY, f32::min);
+                (arc > STATIC_RECYCLE_ARC).then_some((arc, ent))
+            })
+            .collect();
+        if far.len() > want {
+            far.select_nth_unstable_by(want - 1, |a, b| b.0.total_cmp(&a.0));
+            far.truncate(want);
+        }
+        for (_, ent) in &far {
+            commands.entity(*ent).despawn();
+        }
+        director.static_recycled += far.len() as u32;
+        room += far.len();
+        // 2. The rest waits in The Static.
+        let overflow = budget.saturating_sub(room);
+        director.static_backlog = (director.static_backlog + overflow as f32).min(STATIC_BACKLOG_MAX);
+        if !run.static_active && !director.gathering_told && director.static_backlog >= STATIC_GATHERING_TELL {
+            director.gathering_told = true;
+            banners.write(BannerMsg("THE STATIC IS GATHERING. IT KEEPS WHAT THE PLANET CAN'T HOLD.".into()));
+        }
+    }
     let n = budget.min(room);
+    // Live horde by kind, for the world's per-kind caps (pots and boss heads are not horde).
+    let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+    if n > 0 {
+        for (_, e, _) in &q_crowd {
+            by_kind[e.kind.index()] += 1;
+        }
+    }
+    let table = crate::content::enemies::spawn_table(planet.kind);
     for i in 0..n {
         let (anchor, flare) = anchors[i % anchors.len()];
         let heading = {
@@ -829,29 +1210,43 @@ pub fn director_spawn(
         } else {
             SPAWN_ARC_MIN..SPAWN_ARC_MAX
         };
-        let arc = rng.gen_range(band);
+        let night = sun.spawn_arc(anchor);
+        let arc = rng.gen_range(band) * night;
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
-            let (hp, dmg) = (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg);
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp, dmg, rng);
+            // the Dark Moon's CRAWL: The Static erupts where it was seen massing
+            let dir = match crawl.ghost_dir(rng, planet.radius) {
+                Some(d) => {
+                    gimmicks.crawl_ghosts += 1;
+                    d
+                }
+                None => dir,
+            };
+            spawn_enemy_at(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, &sc, rng);
             continue;
         }
 
-        let mix = EnemyKind::mix(run.elapsed);
-        let kind = mix[rng.gen_range(0..mix.len())];
-        let elite = std::mem::take(&mut director.elite_pending);
+        // The world's table picks the kind (on the chain-wide mix clock, so later stages keep
+        // their later mix — M17); P01's scaling already decided how many and how tough. A
+        // pending elite waits for a kind that may carry it.
+        let Some(row) = crate::content::enemies::pick_spawn(table, scaling::mix_secs(run.timer, run.stage), &by_kind, sc.party_spawn, rng) else {
+            continue;
+        };
+        let kind = row.kind;
+        by_kind[kind.index()] += 1;
+        let elite = row.can_elite && std::mem::take(&mut director.elite_pending);
         if elite {
             director.since_elite = 0.0;
         }
         // Burrowers ambush: spawn close.
         let dir = if kind == EnemyKind::Burrower {
-            let arc = rng.gen_range(9.0..16.0);
+            let arc = rng.gen_range(9.0..16.0) * night;
             sphere::offset_dir(anchor, heading, arc, planet.radius)
         } else {
             dir
         };
-        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, rng);
+        spawn_enemy_at(&mut commands, &assets, &planet, kind, dir, elite, &sc, rng);
     }
 }
 
@@ -951,6 +1346,7 @@ pub fn boss_phase_system(
     q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q_boss: Query<(&mut Enemy, &mut Boss)>,
     q_live: Query<(), With<Enemy>>,
+    q_horde: Query<&Enemy, (Without<Boss>, Without<crate::interact::Pot>)>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
@@ -997,7 +1393,7 @@ pub fn boss_phase_system(
         };
         banners.write(BannerMsg(format!("{name} — {label}!")));
         sfx.write(SfxMsg(Sfx::BossRoar));
-        shake.add(0.55);
+        shake.add(SHAKE_ENEMY_SLAM_MAX);
 
         // encirclement burst: a ring of adds crests the horizon around the player
         let ring = (8 + want as usize * 3).min(room);
@@ -1008,15 +1404,24 @@ pub fn boss_phase_system(
             continue;
         };
         let (t, b) = sphere::tangent_frame(victim.dir);
+        // the ring is drawn from the world's table (its per-kind caps included), at least as
+        // late in the stage as a mid-fight mix
+        let table = crate::content::enemies::spawn_table(planet.kind);
+        let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+        for e in &q_horde {
+            by_kind[e.kind.index()] += 1;
+        }
         for i in 0..ring {
             let a = i as f32 / ring as f32 * std::f32::consts::TAU + rng.gen_range(-0.2..0.2);
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
             let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
-            let mix = EnemyKind::mix(run.elapsed.max(300.0));
-            let kind = mix[rng.gen_range(0..mix.len())];
-            let elite = want == 2 && rng.gen_bool(0.25);
-            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, &mut rng);
+            let Some(row) = crate::content::enemies::pick_spawn(table, scaling::mix_secs(run.timer, run.stage).max(300.0), &by_kind, sc.party_spawn, &mut rng) else {
+                continue;
+            };
+            by_kind[row.kind.index()] += 1;
+            let elite = want == 2 && row.can_elite && rng.gen_bool(0.25);
+            spawn_enemy_at(&mut commands, &assets, &planet, row.kind, dir, elite, &sc, &mut rng);
         }
     }
 }
@@ -1028,7 +1433,7 @@ pub fn boss_phase_system(
 pub fn anubot_beam_system(
     time: Res<Time>,
     q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>)>,
-    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam), Without<Stunned>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     let dt = time.delta_secs();
@@ -1147,10 +1552,9 @@ pub fn spawn_anubot_beam_vis(commands: &mut Commands, assets: &EnemyAssets, boss
     ));
 }
 
-/// DEV: press B during play to summon the current planet's stage boss immediately
-/// (so the Craterpillar is testable without surviving 8+ minutes). Host/solo only — a
-/// client summoning a boss would spawn one its host never simulates. P28 moves it behind
-/// `--dev`.
+/// DEV (`--dev` only): press B during play to summon the current planet's stage boss
+/// immediately (so the Craterpillar is testable without surviving 8+ minutes). Host/solo
+/// only — a client summoning a boss would spawn one its host never simulates.
 pub fn debug_spawn_boss(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1256,15 +1660,35 @@ pub fn craterpillar_update(
     }
 }
 
-/// Steering + separation + transform write for every enemy.
+/// How far an astronaut SEEMS to the horde, as a multiplier on the real arc: a Signal Flare
+/// carrier (§7) and anyone a Beacon Tick tagged (§9) read closer than they are, so the chase
+/// prefers them over a nearer teammate.
+pub fn horde_lure(revealed: bool, tracked: bool) -> f32 {
+    (if revealed { SIGNAL_FLARE_LURE } else { 1.0 }) * if tracked { TRACKER_LURE } else { 1.0 }
+}
+
+/// Which astronaut an enemy at `from` chases: the least lured great-circle distance.
+pub fn chase_target(from: Vec3, snaps: &[crate::player::AstronautSnap], lure: &[f32], radius: f32) -> usize {
+    (0..snaps.len())
+        .min_by(|&a, &b| {
+            (sphere::arc_dist(from, snaps[a].dir, radius) * lure[a]).total_cmp(&(sphere::arc_dist(from, snaps[b].dir, radius) * lure[b]))
+        })
+        .unwrap_or(0)
+}
+
+/// Steering + separation + transform write for every enemy. Kinds that steer themselves
+/// (`bestiary::SelfSteered`: Rollo, the Sunskimmer, a fleeing Mimic) and anything under the
+/// ground are someone else's.
+#[allow(clippy::type_complexity)]
 pub fn enemy_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
+    run: Res<RunState>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<crate::bestiary::Tracked>), Without<Enemy>>,
     mut q: Query<
-        (Entity, &mut Enemy, &mut Transform),
-        (Without<Buried>, Without<crate::interact::Pot>),
+        (Entity, &mut Enemy, &mut Transform, Has<Stunned>, Has<Boss>),
+        (Without<Buried>, Without<crate::interact::Pot>, Without<crate::bestiary::SelfSteered>),
     >,
 ) {
     let dt = time.delta_secs();
@@ -1276,45 +1700,41 @@ pub fn enemy_move(
     // Downed astronauts are not targets.
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(e, p, _, tf)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(e, p, _, tf, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
         .collect();
     if snaps.is_empty() {
         return;
     }
-    // How far each astronaut SEEMS to the horde: a Signal Flare carrier reads closer than
-    // they are, so the chase prefers them over a nearer teammate (§7).
-    let lure: Vec<f32> = q_player
+    // How far each astronaut SEEMS to the horde (Signal Flare, a Beacon Tick's tracker).
+    let (lure, tracked): (Vec<f32>, Vec<bool>) = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(_, _, ps, _)| if ps.revealed() { SIGNAL_FLARE_LURE } else { 1.0 })
-        .collect();
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(_, _, ps, _, tracked)| (horde_lure(ps.revealed(), tracked), tracked))
+        .unzip();
     let t_now = time.elapsed_secs();
+    // §4 night risk: the horde is faster on the night side (bosses keep their authored pace)
+    let sun = crate::daynight::Sun::of(&run);
 
-    for (entity, mut e, mut tf) in &mut q {
+    for (entity, mut e, mut tf, stunned, is_boss) in &mut q {
         // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
-        let target = snaps
-            .iter()
-            .zip(&lure)
-            .min_by(|(a, la), (b, lb)| {
-                (sphere::arc_dist(e.dir, a.dir, planet.radius) * **la)
-                    .total_cmp(&(sphere::arc_dist(e.dir, b.dir, planet.radius) * **lb))
-            })
-            .map(|(s, _)| *s)
-            .unwrap_or(snaps[0]);
+        let pick = chase_target(e.dir, &snaps, &lure, planet.radius);
+        let target = snaps[pick];
         let player_dir = target.dir;
         let player_pos = target.pos;
-        e.contact_cd = (e.contact_cd - dt).max(0.0);
-        e.flash = (e.flash - dt * 6.0).max(0.0);
-        e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
-        e.knock *= (1.0 - 7.0 * dt).max(0.0);
+        tick_enemy(&mut e, dt);
 
         let r = planet.surface(e.dir);
-        let eff_speed = e.speed * (1.0 - e.slow);
+        let night = if is_boss { 1.0 } else { sun.enemy_speed(e.dir) };
+        let mut eff_speed = e.speed * (1.0 - e.slow) * night;
+        // A tracked astronaut is a beacon: the far horde closes on it faster (§9 Beacon Tick).
+        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
+        if tracked[pick] && to_player_arc > TRACKER_SPEEDUP_ARC {
+            eff_speed *= TRACKER_SPEED_MULT;
+        }
 
         // Ranged kinds hold their preferred distance and strafe; melee beelines.
         let standoff = e.kind.def().standoff;
-        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
         let steer_target = if standoff > 0.0 && to_player_arc < standoff {
             let (t, _) = sphere::tangent_frame(e.dir);
             let tangent_to = {
@@ -1337,7 +1757,8 @@ pub fn enemy_move(
             player_dir
         };
 
-        let angle = eff_speed * dt / r;
+        // a stunned foe stands reeling (its knockback still carries it, below)
+        let angle = if stunned { 0.0 } else { eff_speed * dt / r };
         let mut new_dir = sphere::step_toward(e.dir, steer_target, angle);
 
         // separation from neighbors (cheap cell lookup)
@@ -1373,6 +1794,15 @@ pub fn enemy_move(
 
         animate_crowd(&mut e, &mut tf, &planet, player_pos, eff_speed, dt, t_now);
     }
+}
+
+/// The per-frame decays every simulated enemy runs, whoever steers it (`enemy_move`, or a
+/// `bestiary` kind's own mover): contact cooldown, hit-flash, slow and knockback.
+pub fn tick_enemy(e: &mut Enemy, dt: f32) {
+    e.contact_cd = (e.contact_cd - dt).max(0.0);
+    e.flash = (e.flash - dt * 6.0).max(0.0);
+    e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
+    e.knock *= (1.0 - 7.0 * dt).max(0.0);
 }
 
 /// Crowd-tier animation, shared by the host's simulated horde and a client's streamed
@@ -1455,7 +1885,9 @@ pub fn burrower_emerge(
     assets: Res<EnemyAssets>,
     q_player: Query<(Entity, &Transform), With<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
-    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), Without<Player>>,
+    // a tunnelling Trencher wears `Buried` too (every weapon already skips it), but it
+    // surfaces on its own terms (`bestiary::trencher_update`)
+    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), (Without<Player>, Without<crate::bestiary::Trencher>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1489,7 +1921,7 @@ pub fn enemy_contact(
     time: Res<Time>,
     run: Res<RunState>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
-    mut q: Query<(Entity, &mut Enemy, &Transform), Without<Buried>>,
+    mut q: Query<(Entity, &mut Enemy, &Transform), (Without<Buried>, Without<Stunned>)>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     if time.delta_secs() <= 0.0 {
@@ -1504,7 +1936,9 @@ pub fn enemy_contact(
         return;
     }
     for (entity, mut e, tf) in &mut q {
-        if e.contact_cd > 0.0 || e.speed == 0.0 {
+        // no bite at all (a Beacon Tick's touch is `bestiary::tick_latch`'s): a zero hit would
+        // still spend the victim's i-frames and shield recharge
+        if e.contact_cd > 0.0 || e.speed == 0.0 || e.damage <= 0.0 {
             continue;
         }
         let reach = e.scale * 0.55 + PLAYER_RADIUS + 0.25;
@@ -1528,7 +1962,7 @@ pub fn spitter_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
-    mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
+    mut q: Query<(&Enemy, &mut Spitter, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1585,7 +2019,8 @@ pub fn beamer_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
+    // the Longshot Beamer Prime wears a Beamer (for the shared aim line) but aims itself
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform, Has<Stunned>), (Without<Buried>, Without<crate::bestiary::PrimeSight>)>,
     q_lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
@@ -1612,7 +2047,17 @@ pub fn beamer_attack(
         }
     };
 
-    for (entity, e, mut b, tf) in &mut q {
+    for (entity, e, mut b, tf, stunned) in &mut q {
+        // A stunned beamer loses its lock: the telegraph drops rather than hanging frozen
+        // and firing the moment the stun wears off.
+        if stunned {
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
+            continue;
+        }
         // While charging, stay on the LATCHED target (if it still exists); otherwise pick
         // the nearest visible astronaut fresh.
         let latched = b
@@ -1703,7 +2148,6 @@ pub fn aim_line_visuals(
     mut q_lines: Query<(Entity, &mut AimLine, &mut Transform), Without<Enemy>>,
 ) {
     let dt = time.delta_secs();
-    let period = AIM_LINE_LEN / AIM_DASHES as f32;
     for (le, mut line, mut ltf) in &mut q_lines {
         let Ok((e, b, tf)) = q.get(line.owner) else {
             commands.entity(le).try_despawn();
@@ -1712,16 +2156,23 @@ pub fn aim_line_visuals(
         if b.aim == Vec3::ZERO {
             continue;
         }
-        let locked = b.charging <= BEAMER_LOCK_SECS;
+        // the Prime's line is longer, its charge and lock its own
+        let (len, charge_secs, lock_secs) = if e.kind == EnemyKind::BeamerPrime {
+            (PRIME_AIM_LINE_LEN, PRIME_CHARGE_SECS, PRIME_LOCK_SECS)
+        } else {
+            (AIM_LINE_LEN, BEAMER_CHARGE_SECS, BEAMER_LOCK_SECS)
+        };
+        let period = len / AIM_DASHES as f32;
+        let locked = b.charging <= lock_secs;
         if !locked {
             line.march = (line.march + dt * AIM_DASH_SPEED / period).fract();
         }
-        let charge = 1.0 - (b.charging / BEAMER_CHARGE_SECS).clamp(0.0, 1.0);
+        let charge = 1.0 - (b.charging / charge_secs).clamp(0.0, 1.0);
         let width = if locked { 0.26 } else { 0.09 + charge * 0.1 };
         // The dash mesh runs from the origin along local -Z (frame_quat's forward).
         ltf.translation = tf.translation + e.dir * 1.0 + b.aim * (line.march * period);
         ltf.rotation = sphere::frame_quat(e.dir, b.aim);
-        ltf.scale = Vec3::new(width, width, AIM_LINE_LEN);
+        ltf.scale = Vec3::new(width, width, len);
     }
 }
 
@@ -1732,7 +2183,7 @@ pub fn lobber_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
-    mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
+    mut q: Query<(&Enemy, &mut Lobber, &Transform), (Without<Buried>, Without<Stunned>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1805,8 +2256,10 @@ pub fn enemy_projectiles(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(Entity, &Transform, &crate::run::PlayerState), With<Player>>,
-    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform, Option<&mut crate::bestiary::CurveShot>), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
+    particles: Option<Res<ParticleAssets>>,
+    mut telemetry: ResMut<crate::bestiary::BestiaryTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1814,18 +2267,40 @@ pub fn enemy_projectiles(
     }
     // a Beacon is no bullet shield: shots pass over the downed (L18)
     let ppos: Vec<(Entity, Vec3)> = q_player.iter().filter(|(_, _, ps)| !ps.dead).map(|(e, t, _)| (e, t.translation)).collect();
-    for (e, mut p, mut tf) in &mut q {
+    for (e, mut p, mut tf, curve) in &mut q {
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(e).despawn();
             continue;
         }
-        let r = planet.surface(p.dir) + p.hover;
+        // A Beamer Prime's railbolt flies a line of fire over the curve instead of hugging
+        // the ground: any terrain that rises into that line stops it (the hill's shadow).
+        let r = match &curve {
+            Some(c) => c.radius(),
+            None => planet.surface(p.dir) + p.hover,
+        };
         let vel = p.heading * p.speed;
         let (nd, nv) = sphere::advance(p.dir, vel, r, dt);
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
-        tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        if let Some(mut c) = curve {
+            c.flown += p.speed * dt;
+            let r = c.radius();
+            tf.translation = p.dir * r;
+            tf.rotation = sphere::frame_quat(p.dir, p.heading);
+            if planet.surface(p.dir) > r - PRIME_BOLT_CLEARANCE {
+                if p.damage > 0.0 {
+                    telemetry.prime_bolts_shadowed += 1; // the host's own shot, not a client's copy
+                }
+                if let Some(pa) = &particles {
+                    fx::burst(&mut commands, pa, tf.translation, p.dir, Pcolor::Danger, 10, 5.0);
+                }
+                commands.entity(e).despawn();
+                continue;
+            }
+        } else {
+            tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        }
         // first astronaut it touches eats it (a shot is consumed by one body)
         if let Some((pe, _)) = ppos
             .iter()
@@ -1844,7 +2319,8 @@ pub fn boss_attacks(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    mut q: Query<(&Enemy, &mut Boss, &Transform)>,
+    // (bosses are immune to stuns; the filter keeps "stunned foes don't attack" universal)
+    mut q: Query<(&Enemy, &mut Boss, &Transform), Without<Stunned>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
     let dt = time.delta_secs();
@@ -1947,7 +2423,7 @@ pub fn telegraphs(
     save: Res<crate::save::MetaSave>,
     mut shake: ResMut<Shake>,
     particles: Option<Res<ParticleAssets>>,
-    q_player: Query<(Entity, &Transform), With<Player>>,
+    q_player: Query<(Entity, &Transform, Has<crate::player::LocalPlayer>), With<Player>>,
     mut q: Query<(Entity, &mut Telegraph, &mut Transform), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
@@ -1960,7 +2436,8 @@ pub fn telegraphs(
     } else {
         TELEGRAPH_PULSE_HZ
     };
-    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t, _)| (e, t.translation)).collect();
+    let me = q_player.iter().find(|(_, _, local)| *local).map(|(_, t, _)| t.translation);
     for (e, mut tg, mut tf) in &mut q {
         tg.timer -= dt;
         let t = 1.0 - (tg.timer / tg.max).clamp(0.0, 1.0);
@@ -1986,7 +2463,13 @@ pub fn telegraphs(
                         writer.write(PlayerHitMsg { victim: pe, amount: tg.damage, from: tf.translation, attacker: None });
                     }
                 }
-                shake.add(0.22);
+                // §13 budget: an elite/boss slam kicks 0.22–0.35 (a boss's ring slam the
+                // most), fading out with distance — a mortar across the planet shakes nothing
+                if let Some(me) = me {
+                    let near = (1.0 - tf.translation.distance(me) / SHAKE_ENEMY_SLAM_FALLOFF).clamp(0.0, 1.0);
+                    let kick = if tg.ring { SHAKE_ENEMY_SLAM_MAX } else { SHAKE_ENEMY_SLAM_MIN };
+                    shake.add(kick * near);
+                }
                 if let Some(pa) = &particles {
                     fx::burst(&mut commands, pa, tf.translation, tg.dir, Pcolor::Danger, 18, 9.0);
                 }

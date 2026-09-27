@@ -15,9 +15,21 @@ pub struct HitMsg {
     pub amount: f32,
     pub crit: bool,
     pub knock: Vec3,
-    /// What dealt it: a weapon (its family drives the §11 duo combos, `duos::DuoLedger`),
-    /// a thorns reflection, or anything else (items, techs, the comet, set-pieces).
+    /// What dealt it: a weapon, a thorns reflection, or anything else (items, techs, the
+    /// comet, set-pieces). A weapon's family drives the §11 duo combos (`duos::DuoLedger`),
+    /// and what a hit DOES beyond damage keys off the weapon (`HitMsg::weapon`) — a
+    /// Whoopee's stun, a bell's mark, a cryo vent's own slow, the §13 hitstop's evolved bonus.
     pub by: HitBy,
+}
+
+impl HitMsg {
+    /// The weapon that dealt this hit, if a weapon did.
+    pub fn weapon(&self) -> Option<WeaponKind> {
+        match self.by {
+            HitBy::Weapon(w) => Some(w),
+            _ => None,
+        }
+    }
 }
 
 /// Attribution for a `HitMsg`, beyond the astronaut in `source`.
@@ -26,7 +38,7 @@ pub enum HitBy {
     Weapon(WeaponKind),
     /// Thorns reflecting an enemy's hit back at it (`combat::apply_player_hits`).
     Thorns,
-    /// Items, movement techs, the Comet Combo, co-op set-pieces, dev/test kills.
+    /// Items, movement techs, the Comet Combo, co-op set-pieces, the world, dev/test kills.
     #[default]
     Other,
 }
@@ -64,6 +76,8 @@ pub enum NumKind {
     Crit,
     Heal,
     Dodge,
+    /// An Aegis Drone's shield took the hit (§9).
+    Block,
 }
 
 /// Floating combat text request.
@@ -101,6 +115,22 @@ pub enum Sfx {
     Grind,
     Blink,
     Flashlight,
+    // ---- §8 world gimmicks ----
+    Thorns,
+    Spore,
+    SporePop,
+    // ---- §6 Tier-1 weapons ----
+    Toll,
+    Whoopee,
+    Splat,
+    Discharge,
+    // ---- §9 new enemies (P08) ----
+    /// A Sunskimmer commits to its dive.
+    Whine,
+    /// A chest turns out to be a Mimic.
+    Chomp,
+    /// A Beacon Tick plants its tracker.
+    Tag,
 }
 
 #[derive(Message)]

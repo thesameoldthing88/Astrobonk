@@ -166,6 +166,16 @@ pub fn spawn_rate_base(timer_left: f32, static_active: bool, static_secs: f32) -
     beats[beats.len() - 1].1
 }
 
+/// Where in the §3 run arc the spawn MIX stands: seconds into a full 10:00 stage, read off
+/// the countdown like `Rate_base`, so a shorter chained stage joins the arc mid-way (stage
+/// 3's 8:00 opens at the 2:00 mark, and its miniboss at 7:00 meets the 7:00 mix), plus a
+/// head start per world deeper in the chain. Keyed on `run.elapsed` it restarted at a
+/// Shambler-only trickle on every world (M17), whatever build had just come through the
+/// teleporter.
+pub fn mix_secs(timer_left: f32, depth: usize) -> f32 {
+    (STAGE_SECONDS[0] - timer_left).max(0.0) + depth as f32 * MIX_DEPTH_HEAD_START_SECS
+}
+
 /// The "tension breathes" beat modifier on top of `Rate_base`: exhale after a boss falls,
 /// hold while a miniboss is up, otherwise full inhale.
 pub fn beat_modifier(miniboss_alive: bool, exhale_left: f32) -> f32 {
@@ -267,6 +277,14 @@ pub fn self_check() -> Result<(), String> {
         || spawn_rate_base(0.0, true, 120.0) <= spawn_rate_base(0.0, true, 0.0)
     {
         return Err("Rate_base does not follow the run arc".into());
+    }
+    // The mix follows the countdown and deepens with the chain (M17).
+    if mix_secs(STAGE_SECONDS[0], 0) != 0.0
+        || mix_secs(STAGE_SECONDS[2], 0) <= mix_secs(STAGE_SECONDS[0], 0)
+        || mix_secs(STAGE_SECONDS[1], 1) <= mix_secs(STAGE_SECONDS[1], 0)
+        || mix_secs(MINIBOSS_MARKS[0], 2) < STAGE_SECONDS[0] - MINIBOSS_MARKS[0]
+    {
+        return Err("the spawn mix restarts on a chained stage".into());
     }
     Ok(())
 }

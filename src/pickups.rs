@@ -114,6 +114,9 @@ pub struct PickupAssets {
     pub gem_mesh: Handle<Mesh>,
     pub gem_mat: Handle<StandardMaterial>,
     pub big_gem_mat: Handle<StandardMaterial>,
+    /// §8 Farside: the same gems burning brighter (`daynight::farside_gems` swaps them in).
+    pub gem_far_mat: Handle<StandardMaterial>,
+    pub big_gem_far_mat: Handle<StandardMaterial>,
     pub coin_mesh: Handle<Mesh>,
     pub coin_mat: Handle<StandardMaterial>,
     pub silver_mat: Handle<StandardMaterial>,
@@ -138,6 +141,9 @@ pub fn setup_pickup_assets(
         gem_mesh: meshes.add(Mesh::from(Sphere::new(0.22))),
         gem_mat: materials.add(emissive(Color::srgb(0.25, 1.0, 0.4), 2.2)),
         big_gem_mat: materials.add(emissive(Color::srgb(0.3, 0.7, 1.0), 3.0)),
+        // unlit draws base colour only, so "brighter" is an over-white base the bloom catches
+        gem_far_mat: materials.add(emissive(Color::LinearRgba(Color::srgb(0.25, 1.0, 0.4).to_linear() * FARSIDE_GEM_GLOW), 2.2)),
+        big_gem_far_mat: materials.add(emissive(Color::LinearRgba(Color::srgb(0.3, 0.7, 1.0).to_linear() * FARSIDE_GEM_GLOW), 3.0)),
         coin_mesh: meshes.add(Mesh::from(Cylinder::new(0.22, 0.07))),
         coin_mat: materials.add(emissive(Color::srgb(1.0, 0.85, 0.2), 2.0)),
         silver_mat: materials.add(emissive(Color::srgb(0.8, 0.9, 1.0), 2.6)),
@@ -429,7 +435,10 @@ pub fn kill_drops(
     (save, mut flash_gate, time): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>, Res<Time>),
 ) {
     let mut rng = rand::thread_rng();
+    // §4 night reward: kills on the night side drop +25% Gold (pots are not kills)
+    let sun = crate::daynight::Sun::of(&run);
     for msg in reader.read() {
+        let gold = |n: u64, rng: &mut rand::rngs::ThreadRng| PickupKind::Gold(sun.kill_gold(msg.dir, n, rng));
         if msg.is_pot {
             run.pots_broken += 1;
             // pots: gold, sometimes silver or food
@@ -465,7 +474,8 @@ pub fn kill_drops(
             let more = elite_loot_mult(msg, &run);
             let coins = (rng.gen_range(4..8) as f32 * more).round() as u32;
             for _ in 0..coins {
-                spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Gold(rng.gen_range(4..10)));
+                let n = rng.gen_range(4..10);
+                spawn_pickup(&mut commands, &assets, &planet, msg.dir, gold(n, &mut rng));
             }
             if rng.gen_bool((0.35 * more).min(0.95) as f64) {
                 let kinds = [PowerupKind::Damage2x, PowerupKind::Magnet, PowerupKind::Speed];
@@ -473,7 +483,8 @@ pub fn kill_drops(
             }
         } else {
             if rng.gen_bool(0.07) {
-                spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Gold(rng.gen_range(1..4)));
+                let n = rng.gen_range(1..4);
+                spawn_pickup(&mut commands, &assets, &planet, msg.dir, gold(n, &mut rng));
             }
             if rng.gen_bool(0.012) {
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Food);
@@ -487,7 +498,8 @@ pub fn kill_drops(
         if msg.is_boss {
             sfx.write(SfxMsg(Sfx::BossRoar));
             for _ in 0..14 {
-                spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Gold(rng.gen_range(8..20)));
+                let n = rng.gen_range(8..20);
+                spawn_pickup(&mut commands, &assets, &planet, msg.dir, gold(n, &mut rng));
             }
         }
 

@@ -81,7 +81,7 @@ cursed levers, the one death-save resolver) · `coop` §11 Tumbling Beacon/reviv
 physics · `duos` STATIC CASCADE + named duo combos · `director` clock/stages/results · `interact`
 chests/shrines/vendors · `events_world` planetary events · `comet` Comet Combo · `content/`
 data tables · `save` meta save · `ui/` hud/panels/menus/settings/numbers · `fx` shake/hitstop/
-particles · `audio`/`music` synth · `net` transport/replication · `netenemy` horde/boss/hazard/
+particles · `toon` the toon look (cel-lighting patch of bevy_pbr, ink/rim pass, per-world grade) · `audio`/`music` synth · `net` transport/replication · `netenemy` horde/boss/hazard/
 pickup streaming · `remote` teammate rigs · `playlog` session log · `headless` smoke bot.
 
 ## Git

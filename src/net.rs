@@ -49,9 +49,16 @@ use std::time::{Duration, SystemTime};
 // PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
-// Bumped for P18 (co-op rules): the down/revive/drop-in fields in PlayerVitals, the squad
-// tally and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots on the hazard lane.
-pub const PROTOCOL_ID: u64 = 0xA570B0_9;
+// P07: the sun's phase and The Crawl's sites in RunSnapMsg, HazardEvent::Spore -> _9.
+// P12 (merged after P07): the replicated `arsenal::NetWeaponVis` (the Yo-Yo combo) and the
+// Evolve / Wisp hazard events -> _A.
+// P08 (merged after P12): kind codes 9-15 (the §9 batch-1 enemies), five appended
+// HazardEvents (OwnedTelegraph, CurveBolt, Uppercut, Tracked, MimicSprung) and the
+// EnemyStateMsg lane -> _B.
+// P18 (merged after P08): the down/revive/drop-in fields in PlayerVitals, the squad tally
+// and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots appended to the hazard
+// lane (Revived, Shove, Cascade, Duo, DropIn) -> _C.
+pub const PROTOCOL_ID: u64 = 0xA570B0_C;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -266,8 +273,15 @@ pub struct RunSnapMsg {
     pub storm_dir: [f32; 3],
     pub storm_heading: [f32; 3],
     pub storm_radius: f32,
-    /// Devoured Sun Shard: how much of the sun is eaten — both machines light the same sky.
+    /// §3 diegetic difficulty: how much of the sun is eaten — both machines light the same sky.
     pub sun_shrink: f32,
+    /// §4 day/night: how far the sun has turned this stage. A client dead-reckons it between
+    /// snapshots (`daynight::drift_sun`), so both machines light — and judge night by — one sun.
+    pub sun_phase: f32,
+    /// The Dark Moon's CRAWL: where The Static is massing / erupting, as direction + mass
+    /// (`gimmicks::Crawl::to_wire`; a handful of sites at most). A client masses them on
+    /// between snapshots and draws them through the ground.
+    pub crawl: Vec<[f32; 4]>,
     /// The Static Radio is in the party (The Static comes early; the pause screen's threat
     /// line and anything else a joiner derives from `Scaling` must know).
     pub static_radio: bool,
@@ -521,6 +535,33 @@ pub enum HazardEvent {
     /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
     /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
     Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
+    // ---- appended (P07): world gimmicks, see `gimmicks` ----
+    /// A Dark Moon spore cap was primed: plant `plant` of the stage's `WorldFlora` (seeded,
+    /// so indexed alike on every machine) runs its fuse → burst → cloud → regrowth. The fuse's
+    /// danger disc arrives as its own Telegraph.
+    Spore { plant: u16 },
+    // ---- appended (P12): weapon one-shots, see `arsenal::WeaponFx` ----
+    /// `owner` evolved a weapon into `weapon` (`WeaponKind::code`): every machine plays the
+    /// §12 fanfare on them.
+    Evolve { owner: u8, weapon: u8 },
+    /// THE ANGELUS raised a friendly wisp for `owner` at `dir` (`power`: its hit, host-only).
+    Wisp { owner: u8, dir: [f32; 3], power: f32 },
+    // ---- appended (P08): the §9 new enemies, see `bestiary` ----
+    /// A telegraph that belongs to one crowd enemy (`enemy`, its NetId): a Trencher's
+    /// uppercut spot, a Sunskimmer's landing. The client ties its copy to that proxy, so it
+    /// vanishes the moment the enemy dies rather than promising a hit that never comes.
+    OwnedTelegraph { enemy: u16, dir: [f32; 3], radius: f32, max: f32, ring: bool },
+    /// A Longshot Beamer Prime's railbolt: a shot along a line of fire over the curve
+    /// (`bestiary::CurveShot`) — its radius eases from `r0` to `r1` over `span` metres.
+    CurveBolt { dir: [f32; 3], heading: [f32; 3], speed: f32, life: f32, r0: f32, r1: f32, span: f32 },
+    /// A Trencher erupted at `dir`; bit `i` of `launched` = PlayerId `i` was thrown up (that
+    /// joiner's own predicted body goes up with its host copy).
+    Uppercut { dir: [f32; 3], launched: u8 },
+    /// A Beacon Tick tagged astronaut `owner` for `secs`: the beacon over them.
+    Tracked { owner: u8, secs: f32 },
+    /// The disguised chest at `dir` was a Mimic: the joiner drops its copy of the chest (the
+    /// monster itself streams as a crowd enemy).
+    MimicSprung { dir: [f32; 3] },
     // ---- appended (P18): co-op one-shots, see `coop::CoopFx` ----
     /// `rescuer` hauled `downed` off its Tumbling Beacon at `dir`.
     Revived { rescuer: u8, downed: u8, dir: [f32; 3] },
@@ -559,6 +600,20 @@ pub struct EnemySnapMsg {
     pub n_spawn: u16,
     pub n_update: u16,
     pub n_despawn: u16,
+    pub data: Vec<u8>,
+}
+
+/// One chunk of the ENEMY-STATE lane (P08): what a client cannot derive from a crowd
+/// enemy's position — a Trencher under the crust, a Sunskimmer's dive height, an Aegis
+/// Drone's shield facing, a Beamer Prime's leading aim. Sent at NET_ENEMY_STATE_HZ for the
+/// new-kind enemies each client has resident (their proxies exist), unreliable: every
+/// record is the whole state, so a lost one is simply superseded.
+///
+/// Layout of `data`: `n` records of STATE_RECORD_BYTES, hand-packed like `EnemySnapMsg`
+/// (see `netenemy::encode_state`).
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct EnemyStateMsg {
+    pub n: u16,
     pub data: Vec<u8>,
 }
 
@@ -757,6 +812,7 @@ impl Plugin for NetPlugin {
             .replicate::<NetHero>()
             .replicate::<NetComet>()
             .replicate::<NetItemVis>()
+            .replicate::<crate::arsenal::NetWeaponVis>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
@@ -811,6 +867,9 @@ impl Plugin for NetPlugin {
             // Without this the stream is gated on ServerTick and silently dropped for any
             // client that isn't AuthorizedClient yet.
             .make_message_independent::<EnemySnapMsg>()
+            // the new kinds' look (P08) — after the crowd itself in priority
+            .add_server_message::<EnemyStateMsg>(Channel::Unreliable)
+            .make_message_independent::<EnemyStateMsg>()
             .init_resource::<MyPlayerId>()
             .add_systems(Startup, apply_cli_net)
             .init_resource::<PeerSlots>()
@@ -872,6 +931,12 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 crate::techs::log_tech_fx
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
+                (crate::arsenal::log_weapon_fx, crate::daynight::log_sky)
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )
@@ -985,6 +1050,7 @@ fn announce_player_ids(
 fn push_run_snapshot(
     run: Res<crate::run::RunState>,
     storm: Res<crate::events_world::DustStorm>,
+    crawl: Res<crate::gimmicks::Crawl>,
     session: Res<SessionState>,
     mut out: MessageWriter<ToClients<RunSnapMsg>>,
 ) {
@@ -1013,6 +1079,8 @@ fn push_run_snapshot(
             storm_heading: storm.heading.to_array(),
             storm_radius: storm.radius,
             sun_shrink: run.sun_shrink,
+            sun_phase: run.sun_phase,
+            crawl: crawl.to_wire(),
             static_radio: run.static_radio,
             assist: run.assist,
             assisted: run.assisted,
@@ -1040,6 +1108,7 @@ fn apply_run_snapshot(
     mut run: ResMut<crate::run::RunState>,
     mut sync: ResMut<RunSync>,
     mut storm: ResMut<crate::events_world::DustStorm>,
+    mut crawl: ResMut<crate::gimmicks::Crawl>,
 ) {
     for m in msgs.read() {
         // A straggler from a run that has already ended (or been superseded).
@@ -1080,6 +1149,8 @@ fn apply_run_snapshot(
         storm.heading = Vec3::from(m.storm_heading);
         storm.radius = m.storm_radius;
         run.sun_shrink = m.sun_shrink;
+        run.sun_phase = m.sun_phase;
+        crawl.adopt(&m.crawl);
         run.static_radio = m.static_radio;
         run.assist = m.assist;
         run.assisted = m.assisted;
@@ -1942,8 +2013,10 @@ pub fn start_host(commands: &mut Commands, channels: &RepliconChannels, port: u1
     commands.insert_resource(transport);
     commands.insert_resource(HostPort(port));
     commands.insert_resource(NetRole::Host);
-    info!("hosting on port {port}");
-    crate::playlog::line(format!("NET hosting on port {port}"));
+    // the address too: it is what the other player types, and what a log reader needs
+    let ip = local_ip();
+    info!("hosting on {ip} port {port}");
+    crate::playlog::line(format!("NET hosting on {ip} port {port}"));
     Ok(())
 }
 
@@ -2485,7 +2558,36 @@ fn reset_after_session(
 //    Repro: headless `--techs [--coop2] [--planet …]`; windowed
 //        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
 //    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
-// 2i. CO-OP RULES (P18, see coop.rs / duos.rs) — the §11 Tumbling Beacon, drop-in, friendly
+// 2i. DAY/NIGHT + WORLD GIMMICKS (P07, see daynight.rs / gimmicks.rs) — one sun: the host
+//    turns it (`RunState::sun_phase`) and eats it (`sun_shrink`, Sun Shard + Cursed Δ); both
+//    ride RunSnapMsg and a client dead-reckons the phase (`daynight::drift_sun`), so every
+//    machine lights from, and judges night by, the same `daynight::Sun`. Night's effects on
+//    the horde (speed, closer spawns) and on loot (+25% Gold) are host simulation; the
+//    joiner's own Nightfall reading comes from its predicted body against the same sun.
+//    Mars's thorns snag in `player_physics` from the seeded flora both machines lay, so a
+//    joiner predicts its own snag. Dark Moon spore caps are host-primed; the cycle rides the
+//    hazard lane (HazardEvent::Spore, the plant's index) and its fuse disc streams as a
+//    Telegraph like any other; the damage is the host's. The Crawl's sites ride RunSnapMsg
+//    (`crawl`), massed on locally between snapshots, and draw through the ground on both.
+//    The Moon's Earthside/Farside is geometry both machines know (the Earth is fixed).
+//    Repro: headless `--daynight [--coop2] [--planet …]`, `--hazards --planet mars|darkmoon
+//    [--coop2]`; windowed coop.sh … --planet darkmoon --dev --staticnow and compare the
+//    two sides' SKY / GIMMICK lines.
+// 2j. NEW ENEMIES (P08, see bestiary.rs) — the seven §9 batch-1 kinds are ordinary crowd
+//    records (kind codes 9-15). What a client cannot derive from position rides a new
+//    ENEMY-STATE lane (EnemyStateMsg, 7-byte records at NET_ENEMY_STATE_HZ, only for ids
+//    already resident on that client): a Trencher's cycle (so the proxy sinks under the
+//    crust and throws its own ridge mounds), a Sunskimmer's altitude and dive, an Aegis
+//    Drone's shield facing (it turns slower than the proxy's chase would say), a Beamer
+//    Prime's leading aim. The one-shots ride the hazard lane: OwnedTelegraph (a ring that
+//    dies with its proxy), CurveBolt (the Prime's railbolt), Uppercut (a joiner in the
+//    launch mask throws its own predicted body up), Tracked (the beacon over a tagged
+//    astronaut) and MimicSprung (the joiner drops its copy of the disguised chest — which
+//    chests are Mimics is rolled with the layout, so both machines already agree).
+//    Everything that hurts, and the Mimic's refund to the purse that paid, is the host's.
+//    Repro: headless `--bestiary [--coop2] [--planet mars]`; windowed coop.sh … --dev
+//    --enemies all and compare the joiner's `states=` count on its NETENEMY line.
+// 2k. CO-OP RULES (P18, see coop.rs / duos.rs) — the §11 Tumbling Beacon, drop-in, friendly
 //    physics and the co-op set-pieces are simulated by the host for every astronaut. What a
 //    joiner must see: PlayerVitals carries down / claimed / Static Meter / revive progress /
 //    Hero's Adrenaline / friendly chill / drop-in grace and level (its own are adopted into its

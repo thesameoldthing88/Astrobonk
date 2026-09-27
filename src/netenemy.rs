@@ -151,6 +151,8 @@ pub struct NetBossIndex(HashMap<u16, Entity>);
 #[derive(Resource, Default)]
 pub struct NetEnemyStats {
     pub records: u32,
+    /// Enemy-state lane records received (P08).
+    pub states: u32,
     pub chunks: u32,
     pub bytes: u32,
     pub seq_gaps: u32,
@@ -181,6 +183,8 @@ impl Plugin for EnemyStreamPlugin {
                     stream_hazards,
                     stream_bosses,
                     stream_enemies.after(assign_net_ids),
+                    // after the crowd: it only sends ids that are resident on each client
+                    stream_enemy_states.after(stream_enemies),
                 )
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(crate::net::is_simulating)
@@ -198,6 +202,7 @@ impl Plugin for EnemyStreamPlugin {
                     receive_pickups,
                     receive_hazards,
                     receive_enemies,
+                    receive_enemy_states,
                     drive_boss_proxies,
                     drive_proxies,
                     drive_net_aim_lines,
@@ -463,6 +468,113 @@ fn stream_enemies(
     }
 }
 
+/// Bytes in one enemy-state record: id (2), state (1), altitude (1), heading (3 × i8).
+pub const STATE_RECORD_BYTES: usize = 7;
+/// Altitude range an enemy-state record can carry (a Sunskimmer's cruise, bob included).
+const STATE_ALT_MAX: f32 = SKIM_ALTITUDE * 1.25;
+
+/// Pack one new-kind enemy's look (`bestiary::EnemyVis`) onto the enemy-state lane. The
+/// heading goes as a WORLD vector (three signed bytes, re-flattened onto the proxy's own
+/// tangent plane on arrival) rather than an angle in a tangent frame: the frame at the
+/// proxy's drawn spot is not quite the host's, and near its pole it flips.
+pub fn encode_state(buf: &mut Vec<u8>, id: u16, vis: &crate::bestiary::EnemyVis) {
+    buf.extend_from_slice(&(id & ID_MASK).to_le_bytes());
+    buf.push(vis.state);
+    buf.push(((vis.alt / STATE_ALT_MAX).clamp(0.0, 1.0) * 255.0).round() as u8);
+    for c in vis.heading.to_array() {
+        buf.push(((c.clamp(-1.0, 1.0) * 127.0).round() as i8) as u8);
+    }
+}
+
+/// Unpack one record (`STATE_RECORD_BYTES` long).
+pub fn decode_state(rec: &[u8]) -> (u16, crate::bestiary::EnemyVis) {
+    let id = u16::from_le_bytes([rec[0], rec[1]]) & ID_MASK;
+    let heading = Vec3::new(rec[4] as i8 as f32, rec[5] as i8 as f32, rec[6] as i8 as f32) / 127.0;
+    (
+        id,
+        crate::bestiary::EnemyVis {
+            state: rec[2],
+            alt: rec[3] as f32 / 255.0 * STATE_ALT_MAX,
+            heading: heading.normalize_or_zero(),
+        },
+    )
+}
+
+/// Headless RULES: a record survives the wire.
+pub fn state_lane_self_check() -> Result<(), String> {
+    let vis = crate::bestiary::EnemyVis { state: 3, alt: 7.3, heading: Vec3::new(0.3, -0.5, 0.81).normalize() };
+    let mut buf = Vec::new();
+    encode_state(&mut buf, 0x7ABC, &vis);
+    if buf.len() != STATE_RECORD_BYTES {
+        return Err(format!("an enemy-state record is {} bytes, not {STATE_RECORD_BYTES}", buf.len()));
+    }
+    let (id, back) = decode_state(&buf);
+    if id != 0x7ABC || back.state != 3 || (back.alt - 7.3).abs() > 0.1 || back.heading.angle_between(vis.heading) > 0.02 {
+        return Err(format!("the enemy-state lane garbled a record: {vis:?} came back as {back:?} (id {id:X})"));
+    }
+    let codes: Vec<u8> = EnemyKind::ALL.iter().map(|k| kind_code(*k)).collect();
+    if EnemyKind::ALL.iter().any(|k| kind_from_code(kind_code(*k)) != *k) || codes.iter().enumerate().any(|(i, c)| *c as usize != i) {
+        return Err(format!("enemy kind codes do not round-trip in ALL order: {codes:?}"));
+    }
+    Ok(())
+}
+
+/// HOST: the enemy-state lane — each client gets the look of the new-kind enemies it has
+/// proxies for (its residency set), at NET_ENEMY_STATE_HZ.
+fn stream_enemy_states(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    residency: Res<ClientResidency>,
+    clients: Query<Entity, (With<ConnectedClient>, With<AuthorizedClient>)>,
+    q: Query<(&NetId, &crate::bestiary::EnemyVis)>,
+    mut out: MessageWriter<ToClients<crate::net::EnemyStateMsg>>,
+) {
+    *acc += time.delta_secs();
+    if *acc < 1.0 / NET_ENEMY_STATE_HZ {
+        return;
+    }
+    *acc = 0.0;
+    let recs: Vec<(u16, &crate::bestiary::EnemyVis)> = q.iter().map(|(n, v)| (n.0, v)).collect();
+    if recs.is_empty() {
+        return;
+    }
+    let per_chunk = NET_ENEMY_CHUNK_BYTES / STATE_RECORD_BYTES;
+    for client in &clients {
+        let Some(resident) = residency.0.get(&client) else { continue };
+        let mine: Vec<&(u16, &crate::bestiary::EnemyVis)> = recs.iter().filter(|(id, _)| resident.contains(id)).collect();
+        for chunk in mine.chunks(per_chunk) {
+            let mut data = Vec::with_capacity(chunk.len() * STATE_RECORD_BYTES);
+            for (id, vis) in chunk {
+                encode_state(&mut data, *id, vis);
+            }
+            out.write(ToClients {
+                targets: SendTargets::Single(ClientId::Client(client)),
+                message: crate::net::EnemyStateMsg { n: chunk.len() as u16, data },
+            });
+        }
+    }
+}
+
+/// CLIENT: apply the enemy-state lane to the proxies it names (a record for a proxy not
+/// built yet is dropped; the next one, 100 ms on, carries the same state).
+fn receive_enemy_states(
+    mut msgs: MessageReader<crate::net::EnemyStateMsg>,
+    index: Res<NetEnemyIndex>,
+    mut stats: ResMut<NetEnemyStats>,
+    mut q: Query<&mut crate::bestiary::EnemyVis, With<NetEnemy>>,
+) {
+    for m in msgs.read() {
+        for rec in m.data.chunks_exact(STATE_RECORD_BYTES).take(m.n as usize) {
+            let (id, vis) = decode_state(rec);
+            stats.states += 1;
+            let Some(e) = index.0.get(&id).copied() else { continue };
+            if let Ok(mut v) = q.get_mut(e) {
+                *v = vis;
+            }
+        }
+    }
+}
+
 /// Marks a hazard visual a client built from a streamed event. These carry real
 /// `EnemyProjectile` / `Telegraph` / `MortarShell` components so the existing integrators
 /// animate them for free — but always with `damage: 0.0`, because the host resolves all
@@ -477,24 +589,31 @@ pub struct NetHazard;
 /// untouched and no future hazard can be added without this seeing it.
 #[allow(clippy::too_many_arguments)]
 fn stream_hazards(
-    added_proj: Query<&EnemyProjectile, Added<EnemyProjectile>>,
-    added_tel: Query<&Telegraph, Added<Telegraph>>,
+    added_proj: Query<(&EnemyProjectile, Option<&crate::bestiary::CurveShot>), Added<EnemyProjectile>>,
+    added_tel: Query<(&Telegraph, Option<&crate::bestiary::TelegraphOwner>), Added<Telegraph>>,
+    nids: Query<&NetId>,
     added_mortar: Query<&MortarShell, Added<MortarShell>>,
     added_lines: Query<(Entity, &AimLine), Added<AimLine>>,
     added_cracks: Query<&CrackDecal, (Added<CrackDecal>, Without<NetHazard>)>,
+    added_spores: Query<&crate::gimmicks::SporeBurst, Added<crate::gimmicks::SporeBurst>>,
     beamers: Query<(&NetId, &Beamer)>,
     astronauts: Query<&PlayerId>,
     mut removed_lines: RemovedComponents<AimLine>,
     // line entity -> its beamer's NetId, because by the time a removal is seen the line
     // (and possibly the beamer) is gone and can no longer be asked
     mut live_lines: Local<HashMap<Entity, u16>>,
-    // §7 item one-shots (a yo-yo throw, a singularity, an ignition, a death-save): the item
-    // systems already say them as local messages, so they ride this lane as-is
-    mut item_fx: MessageReader<crate::items::ItemFxMsg>,
-    // §4 movement-tech one-shots (a Slam landing, a blink), the same way
-    mut tech_fx: MessageReader<crate::techs::TechFxMsg>,
-    // §11 co-op one-shots (a revive, a shove, STATIC CASCADE, a duo, a drop-in landing)
-    mut coop_fx: MessageReader<crate::coop::CoopFxMsg>,
+    // The one-shots other systems already say as local messages ride this lane as-is: §7 items
+    // (a yo-yo throw, a singularity, an ignition, a death-save), §4 movement techs (a Slam
+    // landing, a blink), §6/§12 weapons (an evolution's fanfare, THE ANGELUS's wisps), §9 new
+    // enemies (an uppercut, a tracker, a sprung mimic), §11 co-op (a revive, a shove, STATIC
+    // CASCADE, a duo, a drop-in landing)
+    (mut item_fx, mut tech_fx, mut weapon_fx, mut bestiary_fx, mut coop_fx): (
+        MessageReader<crate::items::ItemFxMsg>,
+        MessageReader<crate::techs::TechFxMsg>,
+        MessageReader<crate::arsenal::WeaponFxMsg>,
+        MessageReader<crate::bestiary::BestiaryFxMsg>,
+        MessageReader<crate::coop::CoopFxMsg>,
+    ),
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
     use crate::items::ItemFx;
@@ -520,6 +639,21 @@ fn stream_hazards(
             },
         });
     }
+    for m in weapon_fx.read().filter(|m| !m.from_wire) {
+        use crate::arsenal::WeaponFx;
+        events.push(match m.fx {
+            WeaponFx::Evolve { owner, weapon } => HazardEvent::Evolve { owner, weapon: weapon.code() },
+            WeaponFx::Wisp { owner, dir, power } => HazardEvent::Wisp { owner, dir: dir.to_array(), power },
+        });
+    }
+    for m in bestiary_fx.read().filter(|m| !m.from_wire) {
+        use crate::bestiary::BestiaryFx;
+        events.push(match m.fx {
+            BestiaryFx::Uppercut { dir, launched } => HazardEvent::Uppercut { dir: dir.to_array(), launched },
+            BestiaryFx::Tracked { owner, secs } => HazardEvent::Tracked { owner, secs },
+            BestiaryFx::MimicSprung { dir } => HazardEvent::MimicSprung { dir: dir.to_array() },
+        });
+    }
     for m in coop_fx.read().filter(|m| !m.from_wire) {
         use crate::coop::CoopFx;
         events.push(match m.fx {
@@ -543,7 +677,19 @@ fn stream_hazards(
             events.push(HazardEvent::AimLineEnd { enemy });
         }
     }
-    for p in &added_proj {
+    for (p, curve) in &added_proj {
+        if let Some(c) = curve {
+            events.push(HazardEvent::CurveBolt {
+                dir: p.dir.to_array(),
+                heading: p.heading.to_array(),
+                speed: p.speed,
+                life: p.life,
+                r0: c.r0,
+                r1: c.r1,
+                span: c.span,
+            });
+            continue;
+        }
         events.push(HazardEvent::Projectile {
             dir: [p.dir.x, p.dir.y, p.dir.z],
             heading: [p.heading.x, p.heading.y, p.heading.z],
@@ -553,7 +699,18 @@ fn stream_hazards(
             style: if p.speed > 30.0 { 1 } else { 0 },
         });
     }
-    for t in &added_tel {
+    for (t, owner) in &added_tel {
+        // an owned ring names its owner, so the client's copy dies with the proxy
+        if let Some(nid) = owner.and_then(|o| nids.get(o.0).ok()) {
+            events.push(HazardEvent::OwnedTelegraph {
+                enemy: nid.0,
+                dir: t.dir.to_array(),
+                radius: t.radius,
+                max: t.max,
+                ring: t.ring,
+            });
+            continue;
+        }
         events.push(HazardEvent::Telegraph {
             dir: [t.dir.x, t.dir.y, t.dir.z],
             radius: t.radius,
@@ -570,6 +727,10 @@ fn stream_hazards(
     }
     for c in &added_cracks {
         events.push(HazardEvent::Crack { dir: c.dir.to_array(), dur: c.timer });
+    }
+    // Dark Moon spore caps: the plant's index is enough, both machines lay the same flora
+    for b in added_spores.iter().filter(|b| b.live) {
+        events.push(HazardEvent::Spore { plant: b.plant });
     }
     if events.is_empty() {
         return;
@@ -592,8 +753,12 @@ fn receive_hazards(
     lines: Query<(Entity, &AimLine)>,
     mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
     mut tech_fx: MessageWriter<crate::techs::TechFxMsg>,
+    mut weapon_fx: MessageWriter<crate::arsenal::WeaponFxMsg>,
+    flora: Option<Res<crate::gimmicks::WorldFlora>>,
+    mut bestiary_fx: MessageWriter<crate::bestiary::BestiaryFxMsg>,
     mut coop_fx: MessageWriter<crate::coop::CoopFxMsg>,
 ) {
+    use crate::bestiary::{BestiaryFx, BestiaryFxMsg};
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
     use crate::techs::{TechFx, TechFxMsg};
     let (Some(assets), Some(planet)) = (assets, planet) else { return };
@@ -628,6 +793,30 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 tech_fx.write(TechFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the weapons', for `arsenal::weapon_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Evolve { owner, weapon } => crate::content::weapons::WeaponKind::from_code(weapon)
+                    .map(|weapon| crate::arsenal::WeaponFx::Evolve { owner, weapon }),
+                HazardEvent::Wisp { owner, dir, power } => {
+                    Some(crate::arsenal::WeaponFx::Wisp { owner, dir: Vec3::from(dir), power })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                weapon_fx.write(crate::arsenal::WeaponFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the new enemies', for `bestiary::bestiary_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Uppercut { dir, launched } => Some(BestiaryFx::Uppercut { dir: Vec3::from(dir), launched }),
+                HazardEvent::Tracked { owner, secs } => Some(BestiaryFx::Tracked { owner, secs }),
+                HazardEvent::MimicSprung { dir } => Some(BestiaryFx::MimicSprung { dir: Vec3::from(dir) }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                bestiary_fx.write(BestiaryFxMsg { fx, from_wire: true });
                 continue;
             }
             // ...and the co-op one-shots, for `coop::coop_fx_presentation`
@@ -708,13 +897,62 @@ fn receive_hazards(
                     let crack = crate::enemies::spawn_crack_decal(&mut commands, &assets, &planet, Vec3::from(dir), dur);
                     commands.entity(crack).insert(NetHazard);
                 }
-                // handled above, as ItemFxMsg / TechFxMsg
+                HazardEvent::OwnedTelegraph { enemy, dir, radius, max, ring } => {
+                    let ring_e = commands
+                        .spawn((
+                            crate::enemies::telegraph_bundle(
+                                &assets,
+                                &planet,
+                                Telegraph { timer: max, max, radius, damage: 0.0, dir: Vec3::from(dir), ring },
+                            ),
+                            NetHazard,
+                        ))
+                        .id();
+                    // tied to the proxy when we have one: `reap_owned_telegraphs` drops the
+                    // ring the moment the host's despawn of its owner lands
+                    if let Some(proxy) = index.0.get(&enemy).copied() {
+                        commands.entity(ring_e).insert(crate::bestiary::TelegraphOwner(proxy));
+                    }
+                }
+                HazardEvent::CurveBolt { dir, heading, speed, life, r0, r1, span } => {
+                    let dir = Vec3::from(dir);
+                    commands.spawn((
+                        EnemyProjectile { dir, heading: Vec3::from(heading), speed, damage: 0.0, life, hover: 1.0 },
+                        crate::bestiary::CurveShot { r0, r1, span, flown: 0.0 },
+                        NetHazard,
+                        Mesh3d(assets.proj_mesh.clone()),
+                        MeshMaterial3d(assets.ring_mat.clone()),
+                        Transform::from_translation(dir * r0).with_scale(Vec3::new(0.5, 0.5, 3.0)),
+                        crate::planet::StageScoped,
+                    ));
+                }
+                HazardEvent::Spore { plant } => {
+                    // a cap on a world we are not standing on (a straggler across a stage
+                    // change) has no plant to swell
+                    let Some(pl) = flora
+                        .as_ref()
+                        .filter(|f| f.style == Some(crate::content::planets::FloraStyle::GlowShrooms))
+                        .and_then(|f| f.plants.get(plant as usize).copied())
+                    else {
+                        continue;
+                    };
+                    commands.spawn((
+                        crate::gimmicks::spore_bundle(&planet, crate::gimmicks::SporeBurst::new(plant, pl.dir, false)),
+                        NetHazard,
+                    ));
+                }
+                // handled above, as ItemFxMsg / TechFxMsg / BestiaryFxMsg / WeaponFxMsg
                 HazardEvent::ItemOrbit { .. }
                 | HazardEvent::Singularity { .. }
                 | HazardEvent::TrailIgnite { .. }
                 | HazardEvent::DeathSave { .. }
                 | HazardEvent::Slam { .. }
                 | HazardEvent::Blink { .. }
+                | HazardEvent::Uppercut { .. }
+                | HazardEvent::Tracked { .. }
+                | HazardEvent::MimicSprung { .. }
+                | HazardEvent::Evolve { .. }
+                | HazardEvent::Wisp { .. }
                 | HazardEvent::Revived { .. }
                 | HazardEvent::Shove { .. }
                 | HazardEvent::Cascade { .. }
@@ -759,17 +997,26 @@ pub fn drive_net_aim_lines(
     mine: Res<MyPlayerId>,
     q_local: Query<&Transform, (With<crate::player::LocalPlayer>, Without<Enemy>)>,
     q_mates: Query<(&PlayerId, &Transform), (With<crate::remote::RemoteAstronaut>, Without<Enemy>)>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &NetAimTarget, &Transform)>,
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &NetAimTarget, &Transform, Option<&crate::bestiary::EnemyVis>)>,
     lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (proxy, e, mut b, target, tf) in &mut q {
+    for (proxy, e, mut b, target, tf, vis) in &mut q {
         b.charging -= dt;
         if b.charging <= 0.0 {
             end_aim_line(&mut commands, proxy, &lines);
+            continue;
+        }
+        // A Beamer Prime LEADS its mark, which no client can re-derive from where the mark
+        // stands: its aim comes over the enemy-state lane, eased between records.
+        if let Some(vis) = vis.filter(|_| e.kind == crate::content::enemies::EnemyKind::BeamerPrime) {
+            let want = (vis.heading - e.dir * vis.heading.dot(e.dir)).normalize_or_zero();
+            if want != Vec3::ZERO {
+                b.aim = if b.aim == Vec3::ZERO { want } else { crate::bestiary::turn_toward(b.aim, want, e.dir, 6.0 * dt) };
+            }
             continue;
         }
         if b.charging <= BEAMER_LOCK_SECS && b.aim != Vec3::ZERO {
@@ -1082,7 +1329,6 @@ fn client_stage_transition(
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run.planet());
     let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     crate::player::spawn_player(
         &mut commands,
         &mut meshes,
@@ -1105,8 +1351,10 @@ fn client_stage_transition(
         &crate::run::PlayerState::new(run.character, &save),
         &save,
         &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
     *phase = crate::run::RunPhase::Playing;
@@ -1346,7 +1594,7 @@ fn planet_index(planet: &CurrentPlanet) -> usize {
 
 /// Explicit discriminants rather than a derived index: this is a WIRE format, so the
 /// mapping must not silently shift if the enum is ever reordered.
-fn kind_code(k: EnemyKind) -> u8 {
+pub fn kind_code(k: EnemyKind) -> u8 {
     match k {
         EnemyKind::Shambler => 0,
         EnemyKind::Sprinter => 1,
@@ -1357,9 +1605,17 @@ fn kind_code(k: EnemyKind) -> u8 {
         EnemyKind::Beamer => 6,
         EnemyKind::Lobber => 7,
         EnemyKind::Ghost => 8,
+        // ---- appended (P08): never reorder ----
+        EnemyKind::Rollo => 9,
+        EnemyKind::Trencher => 10,
+        EnemyKind::AegisDrone => 11,
+        EnemyKind::Sunskimmer => 12,
+        EnemyKind::BeaconTick => 13,
+        EnemyKind::Mimic => 14,
+        EnemyKind::BeamerPrime => 15,
     }
 }
-fn kind_from_code(c: u8) -> EnemyKind {
+pub fn kind_from_code(c: u8) -> EnemyKind {
     match c {
         1 => EnemyKind::Sprinter,
         2 => EnemyKind::Bruiser,
@@ -1369,6 +1625,13 @@ fn kind_from_code(c: u8) -> EnemyKind {
         6 => EnemyKind::Beamer,
         7 => EnemyKind::Lobber,
         8 => EnemyKind::Ghost,
+        9 => EnemyKind::Rollo,
+        10 => EnemyKind::Trencher,
+        11 => EnemyKind::AegisDrone,
+        12 => EnemyKind::Sunskimmer,
+        13 => EnemyKind::BeaconTick,
+        14 => EnemyKind::Mimic,
+        15 => EnemyKind::BeamerPrime,
         _ => EnemyKind::Shambler,
     }
 }
@@ -1468,6 +1731,10 @@ fn receive_enemies(
                     crate::planet::StageScoped,
                 ))
                 .id();
+            if crate::bestiary::has_vis(kind) {
+                // the new kinds' look, filled in by the enemy-state lane
+                commands.entity(e).insert(crate::bestiary::vis_bundle(dir));
+            }
             index.0.insert(id, e);
         }
 
@@ -1513,7 +1780,7 @@ fn receive_enemies(
 /// CLIENT: ease each proxy toward its last streamed position and animate it with the same
 /// crowd animator the host uses, so a streamed horde is indistinguishable from a simulated
 /// one. Also reaps proxies whose updates stopped arriving.
-fn drive_proxies(
+pub fn drive_proxies(
     mut commands: Commands,
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
@@ -1702,7 +1969,7 @@ pub fn log_stream_stats(
         NetRole::Client => {
             info!("NETPARITY[Client] {parity_line}");
             info!(
-                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s states={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
                 local_sim.iter().count(),
                 n_boss.iter().count(),
@@ -1725,6 +1992,7 @@ pub fn log_stream_stats(
                 my_ps.iter().next().map(|p| p.hp).unwrap_or(0.0),
                 my_ps.iter().next().map(|p| p.gold).unwrap_or(0),
                 stats.records,
+                stats.states,
                 stats.chunks,
                 stats.bytes,
                 stats.bytes as f32 / 1024.0,
@@ -1732,6 +2000,7 @@ pub fn log_stream_stats(
                 mine.0
             );
             stats.records = 0;
+            stats.states = 0;
             stats.chunks = 0;
             stats.bytes = 0;
         }

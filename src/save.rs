@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+/// Lifetime counters the quests read. `#[serde(default)]` like every other save struct: a
+/// counter added in a later build must load as 0 from an older save, never fail the file
+/// (M13 — that used to start a fresh save over the player's progress).
 #[derive(Resource, Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 pub struct Counters {
     pub kills: u64,
     pub pots: u64,
@@ -26,7 +30,43 @@ pub struct Counters {
     pub runs_won: u64,
     pub chimp_freed: bool,
     /// (planet, tier) cleared flags, e.g. ("Moon", 2)
+    #[serde(deserialize_with = "lenient::set")]
     pub cleared: HashSet<(PlanetKind, u32)>,
+}
+
+/// Tolerant loading for the save's content-keyed fields (M13). Heroes, weapons, planets,
+/// tomes, quests and palettes are stored by NAME; one renamed or removed in a later build
+/// used to fail the whole parse. Now the entry this build cannot read is dropped on its own
+/// and everything around it loads.
+mod lenient {
+    use serde::de::DeserializeOwned;
+    use serde::{Deserialize, Deserializer};
+    use serde_json::Value;
+    use std::collections::{HashMap, HashSet};
+    use std::hash::Hash;
+
+    pub fn set<'de, D: Deserializer<'de>, T: DeserializeOwned + Eq + Hash>(d: D) -> Result<HashSet<T>, D::Error> {
+        Ok(Vec::<Value>::deserialize(d)?.into_iter().filter_map(|v| T::deserialize(v).ok()).collect())
+    }
+
+    pub fn vec<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
+        Ok(Vec::<Value>::deserialize(d)?.into_iter().filter_map(|v| T::deserialize(v).ok()).collect())
+    }
+
+    /// A JSON object keyed by an enum's name (`serde_json` writes unit variants as strings).
+    pub fn map<'de, D: Deserializer<'de>, K: DeserializeOwned + Eq + Hash, V: DeserializeOwned>(
+        d: D,
+    ) -> Result<HashMap<K, V>, D::Error> {
+        Ok(serde_json::Map::<String, Value>::deserialize(d)?
+            .into_iter()
+            .filter_map(|(k, v)| Some((K::deserialize(Value::String(k)).ok()?, V::deserialize(v).ok()?)))
+            .collect())
+    }
+
+    /// A single value this build can't read falls back to its default.
+    pub fn or_default<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
+        Ok(T::deserialize(Value::deserialize(d)?).unwrap_or_default())
+    }
 }
 
 /// How floating damage numbers are drawn (GDD §13 "Toggle: Full / Merged-only /
@@ -63,6 +103,7 @@ impl NumberMode {
 #[serde(default)]
 pub struct Accessibility {
     /// Colorblind palette for the colors that carry meaning (danger, rarity).
+    #[serde(deserialize_with = "lenient::or_default")]
     pub palette: Palette,
     /// "Danger = white outline": every telegraph, aim line and enemy shot gets a white hull.
     pub high_contrast: bool,
@@ -75,6 +116,7 @@ pub struct Accessibility {
     pub photosensitive: bool,
     /// Bevy `UiScale`, `UI_SCALE_MIN..=UI_SCALE_MAX`.
     pub ui_scale: f32,
+    #[serde(deserialize_with = "lenient::or_default")]
     pub numbers: NumberMode,
     /// Damage-number size multiplier, `NUMBER_SIZE_MIN..=NUMBER_SIZE_MAX`.
     pub number_size: f32,
@@ -162,13 +204,19 @@ pub struct MetaSave {
     pub version: u32,
     pub silver: u64,
     /// Rank per tome, 0..=TOME_MAX_RANK.
+    #[serde(deserialize_with = "lenient::map")]
     pub tome_levels: HashMap<TomeKind, u32>,
+    #[serde(deserialize_with = "lenient::vec")]
     pub tome_loadout: Vec<TomeKind>,
     /// Loadout slots: TOME_BASE_SLOTS plus quest rewards (P21 adds more of those).
     pub tome_slots: u32,
+    #[serde(deserialize_with = "lenient::set")]
     pub unlocked_chars: HashSet<AstronautKind>,
+    #[serde(deserialize_with = "lenient::set")]
     pub unlocked_weapons: HashSet<WeaponKind>,
+    #[serde(deserialize_with = "lenient::set")]
     pub unlocked_planets: HashSet<PlanetKind>,
+    #[serde(deserialize_with = "lenient::set")]
     pub quests_done: HashSet<QuestKind>,
     pub counters: Counters,
     pub volume: f32,
@@ -254,10 +302,25 @@ fn save_path() -> PathBuf {
 
 impl MetaSave {
     pub fn load() -> Self {
-        let path = save_path();
-        let mut s = match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-                warn!("save corrupt ({e}), starting fresh");
+        Self::load_from(&save_path())
+    }
+
+    /// Load (and migrate) the save at `path`. A file this build cannot parse is never
+    /// overwritten: it is renamed aside to `save.json.bak-<unix secs>` first, so the next
+    /// `save()` of a fresh profile cannot destroy the player's progress (M13).
+    pub(crate) fn load_from(path: &std::path::Path) -> Self {
+        let mut s = match std::fs::read_to_string(path) {
+            Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
+                let secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let mut bak = path.as_os_str().to_owned();
+                bak.push(format!(".bak-{secs}"));
+                match std::fs::rename(path, &bak) {
+                    Ok(()) => warn!("save unreadable ({e}); kept it as {}, starting fresh", PathBuf::from(&bak).display()),
+                    Err(re) => warn!("save unreadable ({e}) and could not be set aside ({re}); starting fresh"),
+                }
                 Self::default()
             }),
             Err(_) => Self::default(),
@@ -328,18 +391,23 @@ impl MetaSave {
     }
 
     pub fn save(&self) {
-        let path = save_path();
+        if let Err(e) = self.save_to(&save_path()) {
+            warn!("could not write save: {e}");
+        }
+    }
+
+    /// Write the save atomically: the whole file goes to `save.json.tmp`, then a rename
+    /// swaps it in (replacing the old one on every OS we ship). A crash or a full disk mid-
+    /// write leaves the previous save intact instead of a truncated one (M13).
+    pub(crate) fn save_to(&self, path: &std::path::Path) -> Result<(), String> {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        match serde_json::to_string_pretty(self) {
-            Ok(s) => {
-                if let Err(e) = std::fs::write(&path, s) {
-                    warn!("could not write save: {e}");
-                }
-            }
-            Err(e) => warn!("could not serialize save: {e}"),
-        }
+        let text = serde_json::to_string_pretty(self).map_err(|e| format!("serialize: {e}"))?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        std::fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", PathBuf::from(&tmp).display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("replace {}: {e}", path.display()))
     }
 
     pub fn tome_level(&self, t: TomeKind) -> u32 {
@@ -501,4 +569,75 @@ pub fn settings_self_check() -> Result<(), String> {
         return Err("settings did not survive a save/load round trip".into());
     }
     Ok(())
+}
+
+/// Headless self-check of the save FORMAT (M13): older and newer saves must load without
+/// losing progress, and a file that cannot be read must be set aside, never overwritten.
+pub fn format_self_check() -> Result<(), String> {
+    // A save written before a counter existed (here: every counter but `kills`) keeps what
+    // it has; the rest default.
+    let old = r#"{"silver": 77, "counters": {"kills": 4321, "cleared": [["Moon", 1]]}}"#;
+    let s: MetaSave = serde_json::from_str(old).map_err(|e| format!("a save missing counters was rejected: {e}"))?;
+    if s.silver != 77 || s.counters.kills != 4321 || s.counters.best_level != 0 || !s.counters.cleared.contains(&(PlanetKind::Moon, 1)) {
+        return Err("a save missing counters lost its progress".into());
+    }
+    // Content renamed or removed since the save was written: that ENTRY goes, the rest stays.
+    let future = r#"{"silver": 5,
+        "unlocked_chars": ["Buzz", "SomeRetiredHero"],
+        "unlocked_weapons": ["Wrench", "NotAWeapon"],
+        "unlocked_planets": ["Moon", "Pluto"],
+        "quests_done": ["Kill100", "FinishTheGame"],
+        "tome_levels": {"Damage": 3, "Mystery": 9},
+        "tome_loadout": ["Damage", "Mystery"],
+        "accessibility": {"palette": "Infrared", "numbers": "Holographic", "ui_scale": 1.25},
+        "counters": {"kills": 9, "cleared": [["Moon", 1], ["Pluto", 1]], "some_future_counter": 3}}"#;
+    let f: MetaSave = serde_json::from_str(future).map_err(|e| format!("a save with unknown content was rejected: {e}"))?;
+    if f.silver != 5
+        || !f.unlocked_chars.contains(&AstronautKind::Buzz)
+        || !f.unlocked_weapons.contains(&WeaponKind::Wrench)
+        || !f.unlocked_planets.contains(&PlanetKind::Moon)
+        || !f.quests_done.contains(&QuestKind::Kill100)
+        || f.tome_level(TomeKind::Damage) != 3
+        || f.tome_loadout != vec![TomeKind::Damage]
+        || f.accessibility.palette != Palette::default()
+        || f.accessibility.numbers != NumberMode::default()
+        || (f.accessibility.ui_scale - 1.25).abs() > 1e-6
+        || f.counters.kills != 9
+        || f.counters.cleared.len() != 1
+    {
+        return Err(format!("unknown entries were not dropped one by one: {f:?}"));
+    }
+
+    // An unreadable file is renamed aside, and a save round-trips through the atomic write.
+    let dir = std::env::temp_dir().join(format!("astrobonk-save-check-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join(config::SAVE_FILE);
+    let result = (|| {
+        std::fs::write(&path, "{ this is not json").map_err(|e| e.to_string())?;
+        let fresh = MetaSave::load_from(&path);
+        if fresh.silver != 0 {
+            return Err("an unreadable save did not start fresh".to_string());
+        }
+        let kept = std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("save.json.bak-"));
+        if !kept || path.exists() {
+            return Err("an unreadable save was not set aside as save.json.bak-<secs>".into());
+        }
+        let mut good = MetaSave::default();
+        good.silver = 1234;
+        good.counters.best_level = 25;
+        good.save_to(&path)?;
+        good.silver = 99;
+        good.save_to(&path)?; // replaces an existing file
+        let back = MetaSave::load_from(&path);
+        if back.silver != 99 || back.counters.best_level != 25 || dir.join("save.json.tmp").exists() {
+            return Err("the atomic save did not round-trip (or left its temp file)".into());
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }

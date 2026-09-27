@@ -23,6 +23,7 @@ const LINES: [&str; 6] = [
     "Green gems are XP. Fill the bar, pick a card. Trust your gut.",
     "Shift to slide. Jump as you land to keep the speed — you'll need it.",
     "It gets dark on the far side. Bring a light. F works the one on your gun.",
+    // the first big one is miniboss #1, and its guaranteed cache (P01) is the chest
     "Big one inbound. Kite it, don't trade. It'll drop a chest.",
 ];
 
@@ -35,12 +36,15 @@ pub fn tutorial_system(
     mut tut: ResMut<Tutorial>,
     run: Res<RunState>,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_enemies: Query<(), (With<Enemy>, Without<crate::interact::Pot>)>,
+    // a boss or miniboss on the field — the host's, or a joiner's streamed proxy
+    q_boss: Query<(), With<crate::enemies::Boss>>,
     mut q_text: Query<(&mut Text, &mut TextColor), With<TutorialText>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    // DEV: press T to replay the first-run tutorial (veterans have it marked done).
-    if keys.just_pressed(KeyCode::KeyT) {
+    // DEV (`--dev` only): press T to replay the first-run tutorial (veterans have it marked
+    // done).
+    if crate::dev_mode() && keys.just_pressed(KeyCode::KeyT) {
         *tut = Tutorial { active: true, step: 0, timer: 0.0 };
     }
     let Ok((mut text, mut color)) = q_text.single_mut() else { return };
@@ -75,11 +79,14 @@ pub fn tutorial_system(
         2 => run.elapsed > 14.0,
         3 => q_ps.single().map(|p| p.level >= 2).unwrap_or(false),
         4 => run.elapsed > 42.0,
-        5 => run.minibosses_spawned[0],
+        // Keyed on the boss itself, not `minibosses_spawned` (host-only state a joiner
+        // never receives, so its tutorial stalled before this line — L28).
+        5 => !q_boss.is_empty(),
         _ => false,
     };
     if ready {
-        text.0 = format!("\u{260E} MISSION CONTROL:  {}", LINES[tut.step]);
+        // (no phone glyph: the UI font has none, and it drew as an empty box)
+        text.0 = format!("MISSION CONTROL:  {}", LINES[tut.step]);
         color.0 = Color::srgb(0.55, 0.95, 1.0).with_alpha(0.0);
         tut.timer = HOLD;
         tut.step += 1;

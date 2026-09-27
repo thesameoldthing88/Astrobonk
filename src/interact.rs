@@ -7,7 +7,7 @@ use crate::content::Rarity;
 use crate::fx::{self, Pcolor, ParticleAssets};
 use crate::messages::*;
 use crate::pickups::Pickup;
-use crate::planet::{random_dir, CurrentPlanet, StageScoped};
+use crate::planet::{random_dir, CurrentPlanet, PropColliders, StageScoped};
 use crate::player::Player;
 use crate::run::{roll_item, ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
@@ -250,16 +250,32 @@ fn price(grade: Rarity, discount: f32) -> u64 {
     (base * (1.0 - discount)).round().max(1.0) as u64
 }
 
-/// A random direction at least `min_arc` meters (great-circle) from `avoid`, and off the
-/// Grind-Lines — a chest or a shrine standing on a rail would be ridden straight through.
-/// The rails are the terrain's and the props' (the same on every machine), so the retries
-/// they cost keep the layout stream machine-independent.
-fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, rails: &GrindLines, avoid: Vec3, min_arc: f32) -> Vec3 {
+/// Where interactables may not stand: the Grind-Lines — a chest or a shrine on a rail would
+/// be ridden straight through — and the solid props (L7: one inside a big boulder could be
+/// neither reached nor jumped onto). Both are the terrain's and the stage seed's, the same on
+/// every machine, so the retries they cost keep the layout stream machine-independent.
+pub struct Keepout<'a> {
+    pub rails: &'a GrindLines,
+    pub props: &'a PropColliders,
+}
+
+impl Keepout<'_> {
+    fn clear(&self, d: Vec3, planet: &CurrentPlanet) -> bool {
+        self.rails.closest(d).is_none_or(|(arc, ..)| arc > GRIND_INTERACT_CLEARANCE)
+            && self.props.0.iter().all(|c| {
+                // compare cosines: no acos per prop per try
+                let reach = (c.radius + INTERACT_PROP_CLEARANCE) / planet.radius;
+                reach >= std::f32::consts::PI || d.dot(c.dir) < reach.cos()
+            })
+    }
+}
+
+/// A random direction at least `min_arc` meters (great-circle) from `avoid` and clear of
+/// the `Keepout`.
+fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, keep: &Keepout, avoid: Vec3, min_arc: f32) -> Vec3 {
     for _ in 0..40 {
         let d = random_dir(rng);
-        if sphere::arc_dist(d, avoid, planet.radius) > min_arc
-            && rails.closest(d).is_none_or(|(arc, ..)| arc > GRIND_INTERACT_CLEARANCE)
-        {
+        if sphere::arc_dist(d, avoid, planet.radius) > min_arc && keep.clear(d, planet) {
             return d;
         }
     }
@@ -276,9 +292,11 @@ pub fn spawn_interactables(
     ps: &PlayerState,
     save: &MetaSave,
     rails: &GrindLines,
+    props: &PropColliders,
     player_dir: Vec3,
 ) {
     let def = planet.kind.def();
+    let keep = Keepout { rails, props };
     // deterministic interactable layout + vendor stock from the run seed
     let mut rng = StdRng::seed_from_u64(run.run_seed.wrapping_add(run.stage as u64).wrapping_mul(0x9e37));
 
@@ -295,7 +313,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..def.pots {
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 8.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 8.0);
         let silverish = rng.gen_bool(0.1);
         commands.spawn((
             Pot { broken: false },
@@ -331,7 +349,7 @@ pub fn spawn_interactables(
     let pedestal = meshes.add(Mesh::from(Cylinder::new(0.8, 0.5)));
     let icon = meshes.add(Mesh::from(Sphere::new(0.4)));
 
-    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| {
+    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| -> Entity {
         let c = InteractDefs::color(kind);
         let mat = materials.add(StandardMaterial {
             base_color: c,
@@ -365,13 +383,21 @@ pub fn spawn_interactables(
                     _ => Mesh3d(icon.clone()),
                 };
                 p.spawn((shape, MeshMaterial3d(mat), Transform::from_xyz(0.0, 1.0, 0.0)));
-            });
+            })
+            .id()
     };
 
-    // Chests
+    // Chests — some of them Mimics (§9). The roll is drawn for every chest from the layout
+    // stream, so both machines agree which ones bite; its first breath is hashed off where
+    // it stands, so the tell starts out of step from chest to chest.
     for _ in 0..7 {
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 12.0);
-        spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 12.0);
+        let mimic = rng.gen_bool(MIMIC_CHEST_CHANCE);
+        let chest = spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        if mimic {
+            let first = MIMIC_TELL_SECS.0 + (dir.x * 43.7 + dir.y * 9.1).fract().abs() * (MIMIC_TELL_SECS.1 - MIMIC_TELL_SECS.0);
+            commands.entity(chest).insert(crate::bestiary::MimicDisguise { tell: first, breath: 0.0 });
+        }
     }
     // Shady guys with pre-rolled stock (fixed at stage entry, luck applies now)
     for _ in 0..2 {
@@ -380,21 +406,21 @@ pub fn spawn_interactables(
             let (item, grade) = roll_item(ps, ps.stats.luck, &mut rng);
             stock.push((item, grade, price(grade, ps.stats.chest_discount), false));
         }
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::ShadyGuy, dir, stock, None);
     }
     // Shrines
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::GreedShrine, dir, Vec::new(), None);
     }
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 15.0);
         spawn_simple(commands, InteractKind::MagnetShrine, dir, Vec::new(), None);
     }
-    let dir = place_dir(&mut rng, planet, rails, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, &keep, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Moai, dir, Vec::new(), None);
-    let dir = place_dir(&mut rng, planet, rails, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, &keep, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Microwave, dir, Vec::new(), None);
     // The draw happens UNCONDITIONALLY even though the cage itself is conditional.
     // `place_dir` consumes a variable number of rng draws (it retries up to 40 times), so
@@ -402,12 +428,15 @@ pub fn spawn_interactables(
     // whose saves disagree about `chimp_freed` would then stand in DIFFERENT rings, and
     // "converge on the shrine together" silently cannot work. The cage stays per-machine
     // (it is a per-machine unlock); only the rng stream is made machine-independent.
-    let cage_dir = place_dir(&mut rng, planet, rails, player_dir, 25.0);
+    let cage_dir = place_dir(&mut rng, planet, &keep, player_dir, 25.0);
     if planet.kind == crate::content::planets::PlanetKind::Moon && !save.counters.chimp_freed {
         spawn_simple(commands, InteractKind::Cage, cage_dir, Vec::new(), None);
     }
 
-    // Charge shrines (stand in the ring)
+    // Charge shrines (stand in the ring). Bevy's Torus lies in its local XZ plane and
+    // frame_quat maps local Y to the surface normal, so the ring lies flat on the ground and
+    // outlines the 4.2 m charge zone. (It used to take an extra quarter-turn about X, which
+    // stood it on its edge like an arch — the zone you stand in was never drawn.)
     let ring_mesh = meshes.add(Mesh::from(Torus::new(3.6, 3.9)));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.4, 1.0, 0.9),
@@ -417,7 +446,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..5 {
-        let dir = place_dir(&mut rng, planet, rails, player_dir, 18.0);
+        let dir = place_dir(&mut rng, planet, &keep, player_dir, 18.0);
         let pos = planet.surface_point(dir);
         commands.spawn((
             ChargeShrine { progress: 0.0, done: false },
@@ -425,7 +454,7 @@ pub fn spawn_interactables(
             Mesh3d(ring_mesh.clone()),
             MeshMaterial3d(ring_mat.clone()),
             Transform::from_translation(pos + dir * 0.2)
-                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0)),
             StageScoped,
         ));
     }
@@ -531,7 +560,7 @@ pub fn interact_system(
     mut panels: (ResMut<ChestPanel>, ResMut<ShopPanel>),
     mut pending: ResMut<crate::director::PendingStage>,
     q_player: Query<(Entity, &Transform), (With<Player>, With<crate::player::LocalPlayer>)>,
-    mut q: Query<(Entity, &mut Interactable, &Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut Interactable, &Transform, Has<crate::bestiary::MimicDisguise>), Without<Player>>,
     mut pickups: Query<&mut Pickup>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
@@ -552,7 +581,7 @@ pub fn interact_system(
     let mut rng = rand::thread_rng();
 
     let mut nearest: Option<(Entity, f32)> = None;
-    for (e, i, tf) in q.iter() {
+    for (e, i, tf, _) in q.iter() {
         if i.used {
             continue;
         }
@@ -566,7 +595,7 @@ pub fn interact_system(
         prompt.0 = None;
         return;
     };
-    let Ok((_, mut inter, tf)) = q.get_mut(entity) else {
+    let Ok((_, mut inter, tf, is_mimic)) = q.get_mut(entity) else {
         prompt.0 = None;
         return;
     };
@@ -603,6 +632,14 @@ pub fn interact_system(
         InteractKind::Chest => {
             if ps.gold < cost_now {
                 banners.write(BannerMsg("NOT ENOUGH GOLD".into()));
+                return;
+            }
+            if is_mimic {
+                // Greed, punished (§9): trying the lid pays the price into its mouth. It
+                // springs (`bestiary::mimic_spring`); kill it and the payer gets it back.
+                ps.gold -= cost_now;
+                inter.used = true;
+                commands.entity(entity).insert(crate::bestiary::MimicSprung { payer: actor_entity, paid: cost_now });
                 return;
             }
             let item = *inter.chest_item.get_or_insert_with(|| roll_item(&ps, ps.stats.luck, &mut rng));

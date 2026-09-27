@@ -96,6 +96,12 @@ pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
 /// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
 /// lookup's ~4 m reach), so none stands on one.
 pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
+/// Metres an interactable (pot, chest, shrine…) keeps clear of a solid prop's rim (L7).
+pub const INTERACT_PROP_CLEARANCE: f32 = 1.0;
+/// Great-circle metres around the drop point (`Vec3::Y`, where every stage starts) kept free
+/// of props, so the first view of a planet is never from inside a boulder (the chase camera
+/// sits 7.5 m back and avoids terrain, not props).
+pub const START_CLEAR_ARC: f32 = 12.0;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;
@@ -156,6 +162,103 @@ pub const SLAM_SAFE_FRACTION: f32 = 0.35;
 pub const TELEGRAPH_LIFT: f32 = 0.3;
 /// A Beamer's aim line length, metres.
 pub const AIM_LINE_LEN: f32 = 24.0;
+
+// ── GDD §9 new enemies, batch 1 (P08) — behaviour in `bestiary.rs` ─────────────
+/// Rollo rolls a great circle toward its mark: it eases to CRUISE on the flat, gains
+/// SLOPE_ACCEL m/s² per unit of downhill grade (loses it uphill) between MIN and MAX, and
+/// turns at most TURN_RATE rad/s — slower than a player circling it, so a side-step makes it
+/// overshoot. Rolling into a crater wall (uphill grade over WALL_GRADE) or a rock above
+/// BONK_SPEED stuns it for STUN_SECS and costs it BONK_SELF of its max HP: bait it.
+pub const ROLLO_CRUISE_SPEED: f32 = 7.0;
+pub const ROLLO_MIN_SPEED: f32 = 2.0;
+pub const ROLLO_MAX_SPEED: f32 = 12.5;
+pub const ROLLO_EASE: f32 = 0.9;
+pub const ROLLO_SLOPE_ACCEL: f32 = 16.0;
+pub const ROLLO_TURN_RATE: f32 = 0.9;
+pub const ROLLO_WALL_GRADE: f32 = 0.42;
+pub const ROLLO_BONK_SPEED: f32 = 5.5;
+pub const ROLLO_STUN_SECS: f32 = 1.8;
+pub const ROLLO_BONK_SELF: f32 = 0.35;
+/// The Trencher: surfaced, it dives once its mark is between MIN and DIVE arc metres, sinks
+/// for SINK_SECS, tunnels at TUNNEL_SPEED (a sprint just outruns it) for up to TUNNEL_SECS,
+/// then marks the spot for WINDUP_SECS and uppercuts everyone GROUNDED within RADIUS — they
+/// take DAMAGE_MULT × its bite and are launched at LAUNCH_VEL. Airborne astronauts are not
+/// touched: it punishes staying on the ground. COOLDOWN before it dives again.
+pub const TRENCH_MIN_ARC: f32 = 4.0;
+pub const TRENCH_DIVE_ARC: f32 = 20.0;
+pub const TRENCH_SINK_SECS: f32 = 0.45;
+pub const TRENCH_TUNNEL_SPEED: f32 = 8.0;
+pub const TRENCH_TUNNEL_SECS: f32 = 4.0;
+pub const TRENCH_WINDUP_SECS: f32 = 0.75;
+pub const TRENCH_UPPERCUT_RADIUS: f32 = 3.0;
+pub const TRENCH_DAMAGE_MULT: f32 = 1.4;
+pub const TRENCH_LAUNCH_VEL: f32 = 13.0;
+pub const TRENCH_ERUPT_SECS: f32 = 0.5;
+pub const TRENCH_COOLDOWN: f32 = 6.0;
+/// Metres over the ground above which an astronaut counts as airborne for the uppercut.
+pub const TRENCH_AIRBORNE_HEIGHT: f32 = 0.35;
+/// Metres of tunnel between two ridge mounds, and how long a mound stands.
+pub const TRENCH_MOUND_STEP: f32 = 0.7;
+pub const TRENCH_MOUND_SECS: f32 = 1.8;
+/// The Aegis Drone's shield: a cone of SHIELD_HALF radians either side of where it faces,
+/// swung toward its mark at TURN_RATE rad/s (a player running a 5 m circle at run speed
+/// outpaces it). A blocked hit lands BLOCK_FRACTION of its damage.
+pub const AEGIS_SHIELD_HALF: f32 = 1.15;
+pub const AEGIS_TURN_RATE: f32 = 1.4;
+pub const AEGIS_BLOCK_FRACTION: f32 = 0.1;
+/// Least seconds between two BLOCK read-outs from one drone.
+pub const AEGIS_BLOCK_FX_SECS: f32 = 0.35;
+/// The Sunskimmer cruises at ALTITUDE (metres over the ground), commits once its mark is
+/// within DIVE_ARC, marks the landing and dives for DIVE_SECS, then blows up over RADIUS.
+/// Anyone this high over the ground rides the blast out. The whine plays for a local
+/// astronaut within WHINE_ARC when one commits (§9: at night you hear it first).
+pub const SKIM_ALTITUDE: f32 = 12.0;
+pub const SKIM_DIVE_ARC: f32 = 15.0;
+pub const SKIM_DIVE_SECS: f32 = 1.3;
+pub const SKIM_BLAST_RADIUS: f32 = 3.2;
+pub const SKIM_BLAST_CLEAR_HEIGHT: f32 = 2.5;
+pub const SKIM_WHINE_ARC: f32 = 38.0;
+/// Where a column-hitbox flier (`EnemyKind::column_hitbox`) is filed in the spatial hash:
+/// this far over the ground, where the weapons fly.
+pub const COLUMN_HIT_HEIGHT: f32 = 1.0;
+/// The Beacon Tick's tracker: TRACKER_SECS on the astronaut it touched. While it lasts the
+/// horde reads that astronaut as LURE × their real distance (so off-screen enemies path to
+/// them over a nearer teammate), and anything farther than SPEEDUP_ARC from its mark moves
+/// SPEED_MULT faster toward them.
+pub const TRACKER_SECS: f32 = 6.0;
+pub const TRACKER_LURE: f32 = 0.35;
+pub const TRACKER_SPEEDUP_ARC: f32 = 30.0;
+pub const TRACKER_SPEED_MULT: f32 = 1.35;
+/// The Mimic Chest: the share of stage chests that are mimics (rolled with the layout), how
+/// long it telegraphs its 360° shockwave (RADIUS, DAMAGE_MULT × its bite) after the lid is
+/// tried, and how long it flees at FLEE_SPEED (under run speed: it can be caught) before it
+/// digs out with the gold it swallowed.
+pub const MIMIC_CHEST_CHANCE: f64 = 0.14;
+pub const MIMIC_SHOCK_SECS: f32 = 0.45;
+pub const MIMIC_SHOCK_RADIUS: f32 = 5.0;
+pub const MIMIC_SHOCK_DAMAGE_MULT: f32 = 1.5;
+pub const MIMIC_FLEE_SPEED: f32 = 6.8;
+pub const MIMIC_FLEE_SECS: f32 = 12.0;
+/// Seconds between a disguised mimic's breaths — the tell a sharp eye can catch.
+pub const MIMIC_TELL_SECS: (f32, f32) = (3.5, 6.5);
+/// The Longshot Beamer Prime: holds STANDOFF arc metres off, paints anyone within RANGE —
+/// over the horizon — for CHARGE_SECS (the last LOCK_SECS locked), leading its mark by the
+/// railbolt's flight time. The bolt flies BOLT_SPEED on a line of fire over the curve, and
+/// any terrain that rises above that line stops it: cover is a hill's shadow.
+pub const PRIME_STANDOFF: f32 = 38.0;
+pub const PRIME_RANGE: f32 = 62.0;
+pub const PRIME_CHARGE_SECS: f32 = 1.6;
+pub const PRIME_LOCK_SECS: f32 = 0.35;
+pub const PRIME_COOLDOWN: f32 = 4.5;
+pub const PRIME_BOLT_SPEED: f32 = 46.0;
+pub const PRIME_AIM_LINE_LEN: f32 = 36.0;
+/// How far below the line of fire the ground must stay for the bolt to pass.
+pub const PRIME_BOLT_CLEARANCE: f32 = 0.25;
+/// The enemy-state lane (`netenemy::stream_enemy_states`): what a client cannot derive of
+/// the new kinds (under-crust, dive height, shield facing, sniper aim), per second.
+pub const NET_ENEMY_STATE_HZ: f32 = 10.0;
+/// Emissive strength of a new kind's accent (lens, core, rim) over its accent colour.
+pub const ENEMY_ACCENT_GLOW: f32 = 4.0;
 
 pub const GEM_CAP: usize = 550;
 pub const PICKUP_BASE_RANGE: f32 = 3.2;
@@ -223,6 +326,24 @@ pub const SPAWN_EXHALE_SECS: f32 = 15.0;
 /// The Static's own base rate (then scaled like everything else) — it never stops growing.
 pub const STATIC_RATE_BASE: f32 = 4.2;
 pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
+/// Seconds of the §3 spawn-mix arc a chained world starts ahead per step of depth, on top
+/// of joining the arc where its shorter countdown begins (`scaling::mix_secs`).
+pub const MIX_DEPTH_HEAD_START_SECS: f32 = 60.0;
+/// The HUD's horizon test (`hud::update_edge_markers`) treats the planet as a ball this
+/// many metres under its mean surface (or under the target's own ground, if lower): what
+/// the camera-to-target line passes through that ball for is over the horizon.
+pub const EDGE_MARKER_OCCLUDER_INSET: f32 = 0.5;
+/// The overflow valve (`enemies::director_spawn`, GDD §9). A crowd enemy this many arc
+/// metres from every astronaut is over any horizon — the spawn band is 42–58 m, and on the
+/// Dark Moon, the smallest world, nothing is more than 330 m away — so dissolving it into The Static costs
+/// the fight nothing, and its slot spawns fresh where the players are.
+pub const STATIC_RECYCLE_ARC: f32 = 100.0;
+/// Spawns the cap had no room for, banked for The Static at most this many per stage.
+pub const STATIC_BACKLOG_MAX: f32 = 300.0;
+/// Extra ghosts per second the backlog adds once The Static rises (room permitting).
+pub const STATIC_BACKLOG_DRAIN: f32 = 4.0;
+/// Backlog size at which the host is told The Static is gathering (once per stage).
+pub const STATIC_GATHERING_TELL: f32 = 40.0;
 /// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
 pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
 /// The rest of the §11 table: per-enemy HP 100 / 110 / 120 / 130 % ("the encirclement ring
@@ -410,16 +531,220 @@ pub const SIGNAL_FLARE_LURE: f32 = 0.5;
 pub const SIGNAL_FLARE_SPAWN_ARC_MIN: f32 = 30.0;
 pub const SIGNAL_FLARE_SPAWN_ARC_MAX: f32 = 42.0;
 
-/// Devoured Sun Shard: every SUN_SHARD_PERIOD s the day side shrinks one SUN_SHARD_STEP
-/// toward total night (RunState::sun_shrink, 0..1).
-pub const SUN_SHARD_PERIOD: f32 = 60.0;
+// ── Day/night (GDD §4) and diegetic difficulty (§3) ───────────────────────────
+/// Full turns of the sun over one stage's clock: the terminator sweeps the whole surface
+/// once per stage (§4 "the terminator sweeps the surface over the 10:00 run"). At ~1.4 m/s
+/// on the equator a runner can chase the day or stay in the night — it is a biome you pick.
+pub const SUN_TURNS_PER_STAGE: f32 = 1.0;
+/// Where the sun stands at the crash site when a stage begins: this far (radians) short of
+/// noon, so the first night reaches the crash site about a third of the way in.
+pub const SUN_START_BEFORE_NOON: f32 = 0.5;
+/// Half-width of the twilight band in `dot(dir, sunward)` — where `Sun::daylight` ramps.
+pub const TWILIGHT_BAND: f32 = 0.05;
+/// §4 night risk: the horde moves this much faster on the night side...
+pub const NIGHT_ENEMY_SPEED: f32 = 0.15;
+/// ...and a wave aimed at an astronaut standing in the night lands this much closer (it
+/// crests the horizon INSIDE your vision).
+pub const NIGHT_SPAWN_ARC_MULT: f32 = 0.8;
+/// §4 night risk: "The Static is near-invisible — you hear it before you see it". A ghost on
+/// the night side fades to this opacity (by day it is 0.55).
+pub const GHOST_NIGHT_ALPHA: f32 = 0.12;
+/// §4 night reward: gold from kills on the night side.
+pub const NIGHT_GOLD_MULT: f32 = 1.25;
+/// Diegetic difficulty (§3): every SUN_EAT_SECS the day side shrinks toward night-lock
+/// (RunState::sun_shrink, 0..1) — by SUN_SHARD_STEP while a Devoured Sun Shard is carried,
+/// plus SUN_CURSED_STEP per unit of the party's Difficulty (Cursed Moon Rock, Cursed Tome,
+/// Greed): the more danger invited, the more of the sun goes out.
+pub const SUN_EAT_SECS: f32 = 60.0;
 pub const SUN_SHARD_STEP: f32 = 0.1;
+pub const SUN_CURSED_STEP: f32 = 0.1;
+/// The key light dims by this share as the sun is eaten (it goes out entirely at 1).
+pub const SUN_DIM_AT_FULL_SHRINK: f32 = 0.5;
+/// How fast (per second) the ambient eases between day and night levels as you cross the
+/// terminator — a dusk, not a light switch.
+pub const AMBIENT_EASE: f32 = 1.2;
+
+// ── World gimmicks (GDD §8) ───────────────────────────────────────────────────
+/// The Moon's Earthlight: a cyan fill from the fixed Earth on the Earthside hemisphere.
+pub const EARTHLIGHT_LUX: f32 = 700.0;
+/// Farside (the hemisphere facing away from the Earth): ambient drops by this share, gems
+/// glow brighter, and the elite roll is this much likelier (scaled by the share of the
+/// party standing on Farside).
+pub const FARSIDE_AMBIENT_DROP: f32 = 0.45;
+pub const FARSIDE_ELITE_BONUS: f32 = 0.2;
+pub const FARSIDE_GEM_GLOW: f32 = 2.6;
+/// Mars's thorn flora: touching a bush (below its height, within this many metres of its
+/// stem per unit of scale) slows you to THORN_SLOW of your speed, lingering THORN_LINGER s.
+pub const THORN_REACH: f32 = 0.85;
+pub const THORN_HEIGHT: f32 = 0.9;
+pub const THORN_SLOW: f32 = 0.55;
+pub const THORN_LINGER: f32 = 0.45;
+/// The Dark Moon's fungus: an astronaut within SPORE_TRIGGER m primes a ripe cap; after a
+/// SPORE_FUSE s telegraph it detonates (SPORE_RADIUS, the burst hurts astronauts AND the
+/// horde) and leaves a spore cloud (SPORE_CLOUD_RADIUS, SPORE_CLOUD_SECS) that eats HP
+/// every SPORE_TICK s. The cap regrows over SPORE_REGROW s.
+pub const SPORE_TRIGGER: f32 = 6.0;
+pub const SPORE_FUSE: f32 = 1.5;
+pub const SPORE_RADIUS: f32 = 5.0;
+pub const SPORE_BURST_DAMAGE: f32 = 12.0;
+pub const SPORE_ENEMY_DAMAGE: f32 = 40.0;
+pub const SPORE_CLOUD_RADIUS: f32 = 4.2;
+pub const SPORE_CLOUD_SECS: f32 = 4.0;
+pub const SPORE_CLOUD_DPS: f32 = 5.0;
+pub const SPORE_TICK: f32 = 0.5;
+pub const SPORE_REGROW: f32 = 20.0;
+/// The Dark Moon's CRAWL: The Static masses under the crust (seen through it) for
+/// CRAWL_MASS_SECS before it erupts at that site; the site then spews ghosts for
+/// CRAWL_ERUPT_SECS, and its successor starts massing CRAWL_MASS_SECS before it closes, so
+/// the next eruption is always on show. CRAWL_SITES + one per extra astronaut stand at once,
+/// CRAWL_ARC_MIN..MAX m from an astronaut (over the horizon); ghosts erupt within
+/// CRAWL_SPREAD m of a site.
+pub const CRAWL_MASS_SECS: f32 = 15.0;
+pub const CRAWL_ERUPT_SECS: f32 = 25.0;
+pub const CRAWL_SITES: usize = 3;
+pub const CRAWL_ARC_MIN: f32 = 38.0;
+pub const CRAWL_ARC_MAX: f32 = 60.0;
+pub const CRAWL_SPREAD: f32 = 5.0;
 
 pub const WEAPON_SLOTS: usize = 4;
 pub const MAX_WEAPON_LEVEL: u32 = 7;
 /// Evolved weapons one astronaut may own per run (GDD §15 ledger). Tome of Ascension adds
 /// one more through `PlayerState::evo_cap`.
 pub const EVOLUTION_CAP: u32 = 1;
+
+// ── The Tier-1 weapons' own behaviours (GDD §6; `arsenal.rs`) ────────────────
+/// Meatball Comet: the arc peaks this high over the ground (m), plus LOB_PEAK_PER_M per
+/// metre of range — a far lob climbs higher, so it reads as going OVER the horizon.
+pub const LOB_PEAK: f32 = 5.0;
+pub const LOB_PEAK_PER_M: f32 = 0.22;
+/// The flight stretches with range: `flight × (LOB_FLIGHT_BASE + range / LOB_FLIGHT_RANGE)`.
+pub const LOB_FLIGHT_BASE: f32 = 0.6;
+pub const LOB_FLIGHT_RANGE: f32 = 45.0;
+/// How many live foes in range a lob weighs as landing spots (spread over the crowd), and
+/// how close two meatballs of one volley may land (in AoE radii).
+pub const LOB_CANDIDATES: usize = 24;
+pub const LOB_TARGET_SEPARATION: f32 = 1.6;
+/// RAGÙ RAIN: the three pieces land this far (arc m) round the target, splitting at this
+/// point of the fall (0.5 = the apex).
+pub const RAGU_SPREAD: f32 = 5.5;
+pub const RAGU_SPLIT_AT: f32 = 0.55;
+/// The sauce splat left where a meatball lands (seconds; cosmetic).
+pub const SPLAT_SECS: f32 = 1.4;
+
+/// Static Cling: damage at the field's edge as a share of damage at contact, and the
+/// extra damage per foe hugging you (capped at HUG_CROWD_CAP of them).
+pub const HUG_EDGE_SHARE: f32 = 0.45;
+pub const HUG_PER_HUGGER: f32 = 0.08;
+pub const HUG_CROWD_CAP: u32 = 10;
+/// At most this many cling zaps drawn per tick (the damage lands on every hugger).
+pub const HUG_ZAPS: usize = 3;
+/// FULL DISCHARGE: seconds of charge per nova (attack speed shortens it), and the nova's
+/// damage as a multiple of one field tick.
+pub const FULL_DISCHARGE_SECS: f32 = 5.0;
+pub const FULL_DISCHARGE_NOVA_MULT: f32 = 6.0;
+pub const FULL_DISCHARGE_KNOCK: f32 = 14.0;
+
+/// Ricochet Disc: each hit re-arms the disc against the same foe after this long, and a
+/// disc out of bounces rolls on round its great circle, cutting through this many more
+/// foes before it shatters (THE OMNIDISC never runs out). A disc lives for one lap of the
+/// planet at its speed, plus DISC_LAP_SLACK — then it has come all the way home.
+pub const DISC_REHIT_SECS: f32 = 0.6;
+pub const DISC_CRUISE_PIERCE: i32 = 6;
+pub const DISC_LAP_SLACK: f32 = 1.04;
+/// A disc steers onto its bounce target this hard (rad/s-ish), and one owner keeps at most
+/// DISC_MAX_LIVE in the air (the oldest shatters) so lapping discs can't pile up forever.
+pub const DISC_TURN: f32 = 22.0;
+pub const DISC_MAX_LIVE: usize = 12;
+
+/// Sonic Whoopee: the shove (m/s knock impulse) and the stun it leaves; with
+/// WHOOPEE_PANIC_CROWD or more foes inside WHOOPEE_PANIC_RADIUS it recharges this many
+/// times faster — the "oh god I'm surrounded" button.
+pub const WHOOPEE_KNOCK: f32 = 22.0;
+pub const WHOOPEE_STUN_SECS: f32 = 1.1;
+pub const WHOOPEE_PANIC_RADIUS: f32 = 4.0;
+pub const WHOOPEE_PANIC_CROWD: usize = 6;
+pub const WHOOPEE_PANIC_RATE: f32 = 2.5;
+/// THE BROWN NOTE: the repulsor ring rolls out at this speed (m/s), shoving and stunning.
+pub const BROWN_NOTE_SPEED: f32 = 24.0;
+pub const BROWN_NOTE_KNOCK: f32 = 30.0;
+pub const BROWN_NOTE_STUN_SECS: f32 = 1.6;
+
+/// Cosmonaut's Bell: a toll marks what it hits for this long (a toll every 4 s keeps a
+/// crowd marked), and any hit on a marked foe gets this much extra crit chance — anyone's
+/// hit, so a teammate's Critshow feeds on your bell.
+pub const BELL_MARK_SECS: f32 = 4.5;
+pub const BELL_MARK_CRIT: f32 = 0.35;
+/// Halos drawn over marked foes at most (the mark itself has no cap).
+pub const BELL_HALO_CAP: usize = 80;
+/// THE ANGELUS: each toll raises up to its projectile count of the foes that died within
+/// ANGELUS_REACH (arc m) of the bell in the last ANGELUS_MEMORY_SECS, as friendly wisps
+/// that hunt for WISP_LIFE s, hitting for WISP_DAMAGE × the toll's damage every
+/// WISP_HIT_SECS. One bell keeps at most ANGELUS_WISP_CAP.
+pub const ANGELUS_REACH: f32 = 24.0;
+pub const ANGELUS_MEMORY_SECS: f32 = 6.0;
+pub const ANGELUS_WISP_CAP: usize = 8;
+pub const WISP_LIFE: f32 = 10.0;
+pub const WISP_SPEED: f32 = 9.0;
+pub const WISP_DAMAGE: f32 = 0.45;
+pub const WISP_HIT_SECS: f32 = 0.4;
+
+/// Yo-Yo of Damocles: one combo stack per YOYO_COMBO_METRES moved without taking a hit, up
+/// to YOYO_COMBO_MAX; standing still bleeds YOYO_COMBO_DECAY stacks/s, and any hit that
+/// lands clears it. Each stack is +YOYO_COMBO_DMG damage and +YOYO_COMBO_REACH reach.
+pub const YOYO_COMBO_METRES: f32 = 5.0;
+pub const YOYO_COMBO_MAX: f32 = 20.0;
+pub const YOYO_COMBO_DECAY: f32 = 2.0;
+pub const YOYO_COMBO_DMG: f32 = 0.06;
+pub const YOYO_COMBO_REACH: f32 = 0.02;
+pub const YOYO_HIT_SECS: f32 = 0.25;
+/// SWORD-YO at max combo: the cord pays out to this radius (m) over SWORDYO_PAYOUT_SECS and
+/// the cord itself cuts, hitting each foe along it at most once per SWORDYO_REHIT_SECS.
+pub const SWORDYO_GARROTE_RADIUS: f32 = 13.0;
+pub const SWORDYO_PAYOUT_SECS: f32 = 0.5;
+pub const SWORDYO_REHIT_SECS: f32 = 0.45;
+pub const SWORDYO_CORD_WIDTH: f32 = 0.9;
+
+/// The evolution fanfare (§12): the gold shockwave ring grows to this radius (m) over
+/// this long; the "assembly" shards fly in from this radius; the world drains to this
+/// saturation (shadows and midtones only — the gold ring and sparks keep their colour)
+/// and comes back over FANFARE_DESAT_SECS.
+pub const FANFARE_RING_RADIUS: f32 = 16.0;
+pub const FANFARE_RING_SECS: f32 = 0.9;
+pub const FANFARE_SHARDS: usize = 12;
+pub const FANFARE_SHARD_RADIUS: f32 = 3.2;
+pub const FANFARE_SHARD_SECS: f32 = 0.34;
+pub const FANFARE_POP_SECS: f32 = 0.3;
+pub const FANFARE_DESAT: f32 = 0.12;
+pub const FANFARE_DESAT_SECS: f32 = 1.1;
+
+// ── Hitstop canon (GDD §13) and the screenshake budget ───────────────────────
+/// Only YOUR killing blows stop time: a crowd kill 50 ms, an elite (or miniboss) 90, the
+/// stage boss 130 and then HITSTOP_DILATE_SECS at HITSTOP_DILATE_SPEED. An evolved
+/// weapon's kill is HITSTOP_EVOLVED_BONUS heavier.
+pub const HITSTOP_KILL_SECS: f32 = 0.05;
+pub const HITSTOP_ELITE_SECS: f32 = 0.09;
+pub const HITSTOP_BOSS_SECS: f32 = 0.13;
+pub const HITSTOP_EVOLVED_BONUS: f32 = 0.02;
+pub const HITSTOP_DILATE_SECS: f32 = 0.15;
+pub const HITSTOP_DILATE_SPEED: f32 = 0.85;
+/// The freeze runs the world at this speed (not 0, so nothing downstream divides by a
+/// zero step).
+pub const HITSTOP_FREEZE_SPEED: f32 = 0.05;
+/// Kept SPARSE: a crowd kill stops time only when nothing has for HITSTOP_KILL_GAP
+/// seconds, an elite when nothing has for HITSTOP_ELITE_GAP. A horde dies at dozens a
+/// second; a freeze per kill is a slideshow, so the stop marks the rhythm, not every body.
+pub const HITSTOP_KILL_GAP: f32 = 2.5;
+pub const HITSTOP_ELITE_GAP: f32 = 0.75;
+/// §13 shake budget: trauma per source (`offset = trauma² × max`, the total clamped).
+pub const SHAKE_PLAYER_HIT: f32 = 0.12;
+pub const SHAKE_ENEMY_SLAM_MIN: f32 = 0.22;
+pub const SHAKE_ENEMY_SLAM_MAX: f32 = 0.35;
+pub const SHAKE_EVOLVE: f32 = 0.25;
+/// A slam further than this from you shakes nothing; nearer, it fades in toward the table.
+pub const SHAKE_ENEMY_SLAM_FALLOFF: f32 = 24.0;
+/// Hard clamp on the camera's shake: the total offset, as an angle about the point it looks
+/// at, never exceeds this (§13: "total camera offset ≤ 1.8° pitch/yaw").
+pub const SHAKE_MAX_DEG: f32 = 1.8;
 
 // ── Level-up choice economy (GDD §3 table, §15 ledger) ───────────────────────
 /// Cards dealt per level-up. The §15 ledger sets no count, so the shipped four stay.
@@ -543,9 +868,54 @@ pub const TELEGRAPH_PULSE_AMP: f32 = 0.07;
 /// line is still tracking. A locked line stops marching — the "dodge now" tell.
 pub const AIM_DASHES: usize = 12;
 pub const AIM_DASH_SPEED: f32 = 9.0;
-/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
-pub const BLOOM_INTENSITY: f32 = 0.15;
+/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15). The toon look
+/// keeps it sparing: flat cel colors read cleaner without a haze over them.
+pub const BLOOM_INTENSITY: f32 = 0.1;
 pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
+/// ...and only the brightest pixels feed it (soft knee), so a lit suit or a pale rock never
+/// glows — suns, stars, glows and hit flashes still do.
+pub const BLOOM_THRESHOLD: f32 = 0.6;
+pub const BLOOM_THRESHOLD_SOFTNESS: f32 = 0.5;
+
+// ── Toon look (locked direction #7, `toon.rs`) ────────────────────────────────
+/// Cel bands on N·L for every lit StandardMaterial: below the first edge a face gets no
+/// direct light (ambient only), between the edges the MID level, above the second FULL.
+/// Each step is smoothed over ±TOON_BAND_SOFT of N·L so a band edge isn't a jagged pixel stair.
+pub const TOON_BAND_EDGES: (f32, f32) = (0.06, 0.38);
+pub const TOON_BAND_MID: f32 = 0.3;
+pub const TOON_BAND_FULL: f32 = 0.72;
+pub const TOON_BAND_SOFT: f32 = 0.035;
+/// A lit rim just inside every silhouette turned toward the sun (drawn by the ink pass, so
+/// only real edges get it, never a grazing stretch of ground): brightens the surface by this
+/// share. Scales with the sun (a shrunken sun, a lower rim); the night side never has one.
+pub const TOON_RIM_STRENGTH: f32 = 0.35;
+/// Specular turns into a hard cel highlight: glossy parts (visors) keep a crisp spot above
+/// this brightness, rough ones (rock, dust, cloth) lose their soft sheen.
+pub const TOON_SPEC_EDGE: (f32, f32) = (0.08, 0.14);
+/// How much of the terrain's own bumpy normal the ground shades with (the rest is the
+/// planet's radial normal), so cel bands follow the world's curve and its big hills instead
+/// of speckling across every small bump.
+pub const TOON_TERRAIN_NORMAL_DETAIL: f32 = 0.55;
+/// The terrain's height colors (crater floor → peak) come in this many flat steps.
+pub const TOON_TERRAIN_BANDS: usize = 4;
+/// The flashlight cone in two cel steps: a dimmer outer ring at this share, the full core.
+/// Edges are in the spot's own 0..1 falloff (1 = inside the inner angle).
+pub const TOON_CONE_RING: f32 = 0.4;
+pub const TOON_CONE_EDGES: (f32, f32) = (0.03, 0.4);
+/// Ink outlines (post-process over the depth + normal prepass): line width in pixels at
+/// 720p (scaled with the window height), and ×this in the §13 high-contrast mode.
+pub const TOON_INK_PX: f32 = 1.0;
+pub const TOON_INK_HIGH_CONTRAST: f32 = 2.0;
+/// A silhouette is inked where the depth's second difference, relative to the pixel's own
+/// depth, exceeds this (planes are linear in reverse-Z depth, so they never trip it)...
+pub const TOON_INK_DEPTH_EDGE: f32 = 0.025;
+/// ...and a crease where neighbouring normals turn by more than this (1 − cos), at this
+/// opacity — a touch lighter than the silhouette, so an outline still reads as the outside.
+pub const TOON_INK_NORMAL_EDGE: f32 = 0.3;
+pub const TOON_INK_CREASE_ALPHA: f32 = 0.85;
+/// Ink fades out between these view distances (m): the planet's far limb is well inside,
+/// the starfield and the sun disc (1400 m+) never get a line.
+pub const TOON_INK_FADE: (f32, f32) = (180.0, 320.0);
 /// Every glow below lives on UNLIT materials, which draw their base color and ignore
 /// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
 /// the camera bloom then has less to spread, too.
@@ -675,3 +1045,9 @@ pub const DUO_MELT_MULT: f32 = 1.3;
 pub const DUO_RIVET_MULT: f32 = 1.5;
 /// At most one duo burst per this long crosses the wire (the tally always counts).
 pub const DUO_FX_MIN_INTERVAL: f32 = 0.25;
+
+/// Melee swing swoosh (combat::sweep_arc_mesh): the crescent's inner edge as a fraction of the
+/// reach, its alpha, and how far over the ground it floats (clear of the terrain's bumps).
+pub const SWEEP_INNER: f32 = 0.45;
+pub const SWEEP_ALPHA: f32 = 0.42;
+pub const SWEEP_LIFT: f32 = 0.35;

@@ -280,7 +280,7 @@ impl ItemKind {
             ),
             SignalFlare => "The horde always knows where you are: it chases you first and lands closer".into(),
             DevouredSunShard => format!(
-                "Every {SUN_SHARD_PERIOD:.0}s the day side shrinks toward total night"
+                "Every {SUN_EAT_SECS:.0}s the day side shrinks toward total night"
             ),
             BoomerangInsurance => format!(
                 "Below {:.0}% HP, auto-blink to the antipode. Once per dip; shares the blink's recharge",
