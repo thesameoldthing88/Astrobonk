@@ -830,6 +830,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
+                crate::arsenal::log_weapon_fx
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 crate::netenemy::log_stream_stats.run_if(|d: Res<NetDebug>| d.log),
             )
             .add_systems(

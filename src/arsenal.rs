@@ -1123,9 +1123,11 @@ pub fn bell_bodies(
         };
         let since = (now - procs.last_toll).max(0.0);
         let swing = (since * 13.0).sin() * (-since * 2.6).exp() * 0.9;
-        tf.translation = ptf.translation + up * (2.2 + (now * 1.7).sin() * 0.08) + side * 0.75;
+        // small, and off the shoulder: the chase camera looks past it, not through it
+        let back = side.cross(up);
+        tf.translation = ptf.translation + up * (1.45 + (now * 1.7).sin() * 0.06) + side * 0.85 + back * 0.25;
         tf.rotation = sphere::frame_quat(up, b) * Quat::from_rotation_x(swing);
-        let s = if kind == WeaponKind::Angelus { 1.35 } else { 1.0 };
+        let s = if kind == WeaponKind::Angelus { 0.75 } else { 0.6 };
         tf.scale = Vec3::splat(s);
     }
     for (owner, kind) in want {
@@ -1782,4 +1784,47 @@ pub fn self_check() -> Result<(), String> {
         return Err("Cosmonaut's Bell must toll every 4 s (§6)".into());
     }
     Ok(())
+}
+
+/// `--netlog`: every 5 s, the weapon one-shots this machine saw (evolutions by owner, wisps;
+/// how many came off the wire) and what it draws — how a two-instance run proves a joiner's
+/// evolution fanfare and THE ANGELUS's wisps crossed the lane both ways.
+#[allow(clippy::type_complexity)]
+pub fn log_weapon_fx(
+    time: Res<Time>,
+    role: Res<crate::net::NetRole>,
+    mut msgs: MessageReader<WeaponFxMsg>,
+    wisps: Query<(), With<Wisp>>,
+    bells: Query<(), With<BellBody>>,
+    yoyos: Query<(), With<YoYoBody>>,
+    combos: Query<(&PlayerId, &NetWeaponVis)>,
+    mut tally: Local<(Vec<(u8, bool)>, u32, u32)>,
+    mut next: Local<f32>,
+) {
+    for m in msgs.read() {
+        match m.fx {
+            WeaponFx::Evolve { owner, .. } => tally.0.push((owner, m.from_wire)),
+            WeaponFx::Wisp { .. } => {
+                tally.1 += 1;
+                tally.2 += u32::from(m.from_wire);
+            }
+        }
+    }
+    let now = time.elapsed_secs();
+    if now < *next {
+        return;
+    }
+    *next = now + 5.0;
+    let combo: Vec<String> = combos.iter().map(|(pid, v)| format!("p{}:{}", pid.0, v.combo)).collect();
+    info!(
+        "WEAPONFX[{:?}] evolves(owner,wire)={:?} wisps={} (wire {}) | drawn: wisps={} bells={} yoyos={} | combo {}",
+        *role,
+        tally.0,
+        tally.1,
+        tally.2,
+        wisps.iter().count(),
+        bells.iter().count(),
+        yoyos.iter().count(),
+        combo.join(" ")
+    );
 }
