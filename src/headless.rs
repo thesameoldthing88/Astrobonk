@@ -1639,6 +1639,9 @@ fn bestiary_probe(
                 if t == BP_AEGIS + 2 {
                     en.max_hp = 1.0e6;
                     en.hp = 1.0e6;
+                    // and hold it off at arm's length: point-blank, a drone circling its mark
+                    // in the crush out-turns its own shield, which is not what's under test
+                    en.speed = 0.0;
                 }
                 if t == BP_AEGIS + 66 {
                     probe.hp_mark = en.hp;
@@ -1829,7 +1832,9 @@ fn bestiary_probe(
     if probe.has(K::BeaconTick) {
         if t == BP_TICK {
             probe.pin = Some(me_dir);
-            stage(&mut commands, probe, K::BeaconTick, sphere::offset_dir(me_dir, fwd, 1.2, r));
+            // within touching reach: a dense horde round the pinned astronaut would otherwise
+            // hold a scurrying tick off
+            stage(&mut commands, probe, K::BeaconTick, sphere::offset_dir(me_dir, fwd, 0.5, r));
         }
         // it has to scurry the last metre through whatever crowds the pinned astronaut
         if (BP_TICK + 1..BP_TICK + 45).contains(&t) && probe.tick_at == 0 {

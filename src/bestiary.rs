@@ -699,9 +699,11 @@ pub fn skimmer_update(
         } else {
             s.t += dt;
             let f = (s.t / SKIM_DIVE_SECS).min(1.0);
-            // it falls faster as it goes: the last third is the fast part
-            e.dir = s.from.slerp(s.to, f.powf(1.4)).normalize();
-            s.alt = SKIM_ALTITUDE * (1.0 - f).powf(1.6);
+            // over the mark first, then down on it: it covers the ground early and drops late,
+            // so the last stretch is a plunge from above — not a skim along the ground through
+            // the camera behind its mark
+            e.dir = s.from.slerp(s.to, 1.0 - (1.0 - f) * (1.0 - f)).normalize();
+            s.alt = SKIM_ALTITUDE * (1.0 - f * f);
             vis.heading = tangent(s.to - s.from, e.dir);
             if f >= 1.0 {
                 for m in &marks {
@@ -1584,3 +1586,4 @@ pub fn dev_spawn_enemies(
     }
     info!("DEV --enemies: {} walked in", kinds.iter().map(|k| k.def().name).collect::<Vec<_>>().join(", "));
 }
+
