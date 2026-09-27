@@ -298,6 +298,14 @@ pub struct Director {
     /// Bosses alive last tick; a drop means one just fell and the horde exhales.
     pub bosses_alive: usize,
     pub tick: f32,
+    /// The overflow valve (GDD §9 "overflow merges into The Static"): spawns the live cap
+    /// had no room for, banked this stage instead of discarded. They come back as extra
+    /// ghosts once The Static rises (`STATIC_BACKLOG_DRAIN` a second, when there is room).
+    pub static_backlog: f32,
+    /// Far stragglers the valve has handed to The Static this stage (see `director_spawn`).
+    pub static_recycled: u32,
+    /// The "THE STATIC IS GATHERING" line has been shown this stage.
+    pub gathering_told: bool,
 }
 
 impl Default for Director {
@@ -310,6 +318,9 @@ impl Default for Director {
             exhale: 0.0,
             bosses_alive: 0,
             tick: 0.0,
+            static_backlog: 0.0,
+            static_recycled: 0,
+            gathering_told: false,
         }
     }
 }
@@ -728,7 +739,17 @@ pub fn spawn_enemy(
 ///
 /// Budget per second = `Rate_base` (the §3 arc beats) × the breathing modifier (hold while a
 /// miniboss is up, exhale after a boss falls) × `Scaling::spawn` (run time, depth, Δ, party).
-#[allow(clippy::too_many_arguments)]
+///
+/// The live cap counts the CROWD only — pots are scenery and bosses arrive on the clock, so
+/// neither takes a horde slot (L16). A budget the cap has no room for is not thrown away
+/// (M16, GDD §9 "overflow merges into The Static"):
+/// 1. crowd enemies stranded far from every astronaut — beyond `STATIC_RECYCLE_ARC`, over
+///    any horizon, adding nothing but a filled slot — dissolve into The Static, farthest
+///    first, and the same budget spawns fresh over the players' horizon: the pressure stays
+///    where the fighting is instead of piling up behind a kite;
+/// 2. whatever still does not fit is banked in `Director::static_backlog` and pours out as
+///    extra ghosts once The Static rises — the ones the planet could not hold are waiting.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
@@ -738,8 +759,9 @@ pub fn director_spawn(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(&Player, &crate::run::PlayerState)>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_crowd: Query<(Entity, &Enemy, Has<Buried>), (Without<crate::interact::Pot>, Without<Boss>)>,
     q_boss: Query<&Boss>,
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -762,7 +784,7 @@ pub fn director_spawn(
     let party = q_player.iter().count();
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
-    let alive = q_enemies.iter().count();
+    let alive = q_crowd.iter().count();
     // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
     // sub-linearly — a full budget per player doubles density and blows the cap, while no
     // bump at all gives each player half a horde.
@@ -782,6 +804,12 @@ pub fn director_spawn(
         * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
+    // The backlog rejoins through The Static's own door.
+    if run.static_active && director.static_backlog > 0.0 {
+        let drain = (STATIC_BACKLOG_DRAIN * dt).min(director.static_backlog);
+        director.static_backlog -= drain;
+        director.spawn_bank += drain;
+    }
 
     // Elite rolls (see config::ELITE_ROLL_SECS). The Static has no elites.
     if !run.static_active {
@@ -812,7 +840,40 @@ pub fn director_spawn(
     director.spawn_bank -= budget as f32;
 
     let cap = sc.live_cap;
-    let room = cap.saturating_sub(alive);
+    let mut room = cap.saturating_sub(alive);
+    if budget > room {
+        // 1. The far stragglers go first (never an elite — its loot is promised — nor a
+        // Burrower mid-ambush). Arc to the NEAREST astronaut, so a co-op squad split
+        // across the planet keeps both hordes.
+        let want = budget - room;
+        let mut far: Vec<(f32, Entity)> = q_crowd
+            .iter()
+            .filter(|(_, e, buried)| !e.elite && !*buried)
+            .filter_map(|(ent, e, _)| {
+                let arc = anchors
+                    .iter()
+                    .map(|(a, _)| sphere::arc_dist(e.dir, *a, planet.radius))
+                    .fold(f32::INFINITY, f32::min);
+                (arc > STATIC_RECYCLE_ARC).then_some((arc, ent))
+            })
+            .collect();
+        if far.len() > want {
+            far.select_nth_unstable_by(want - 1, |a, b| b.0.total_cmp(&a.0));
+            far.truncate(want);
+        }
+        for (_, ent) in &far {
+            commands.entity(*ent).despawn();
+        }
+        director.static_recycled += far.len() as u32;
+        room += far.len();
+        // 2. The rest waits in The Static.
+        let overflow = budget.saturating_sub(room);
+        director.static_backlog = (director.static_backlog + overflow as f32).min(STATIC_BACKLOG_MAX);
+        if !run.static_active && !director.gathering_told && director.static_backlog >= STATIC_GATHERING_TELL {
+            director.gathering_told = true;
+            banners.write(BannerMsg("THE STATIC IS GATHERING. IT KEEPS WHAT THE PLANET CAN'T HOLD.".into()));
+        }
+    }
     let n = budget.min(room);
     for i in 0..n {
         let (anchor, flare) = anchors[i % anchors.len()];
@@ -836,7 +897,7 @@ pub fn director_spawn(
             continue;
         }
 
-        let mix = EnemyKind::mix(run.elapsed);
+        let mix = EnemyKind::mix(scaling::mix_secs(run.timer, run.stage));
         let kind = mix[rng.gen_range(0..mix.len())];
         let elite = std::mem::take(&mut director.elite_pending);
         if elite {
@@ -1007,7 +1068,7 @@ pub fn boss_phase_system(
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
             let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
-            let mix = EnemyKind::mix(run.elapsed.max(300.0));
+            let mix = EnemyKind::mix(scaling::mix_secs(run.timer, run.stage).max(300.0));
             let kind = mix[rng.gen_range(0..mix.len())];
             let elite = want == 2 && rng.gen_bool(0.25);
             spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, &mut rng);

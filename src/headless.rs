@@ -793,6 +793,120 @@ fn tome_probe_withdraw(
 /// `--staticnow` (headless): a few seconds in, wind the clock out so The Static rises
 /// through the real `run_clock` path — with `--fast-boss` the marks have already fired, so
 /// nothing but The Static arrives. Tome of Static's payout and bite need it to be reached.
+/// `--overflow`: the GDD §9 overflow valve, staged. (1) A full cap of Shamblers dropped on
+/// the far side of the planet: the budget that arrives must dissolve the farthest into The
+/// Static and spawn over the bot's horizon instead. (2) A full cap of pinned, harmless elites
+/// (never recycled — their loot is promised): the budget has nowhere to go and must bank as
+/// The Static's backlog. (3) The pins cleared and The Static raised: the backlog must pour
+/// out as extra ghosts.
+#[derive(Resource, Default)]
+struct OverflowProbe {
+    phase: u8,
+    ticks: u32,
+    recycled: u32,
+    backlog_peak: f32,
+    backlog_at_static: f32,
+    backlog_end: f32,
+    ghosts: usize,
+    near_spawns: usize,
+    /// The crowd just after a flood landed (the probe itself overfills the cap by the bodies
+    /// already walking); the valve must never add to it.
+    baseline: usize,
+    over_cap: usize,
+}
+
+const OVERFLOW_FLOOD_TICK: u32 = 60;
+const OVERFLOW_PIN_TICK: u32 = 60 + 750;
+const OVERFLOW_STATIC_TICK: u32 = 60 + 1350;
+const OVERFLOW_END_TICK: u32 = 60 + 1800;
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn overflow_probe(
+    mut commands: Commands,
+    mut probe: ResMut<OverflowProbe>,
+    mut run: ResMut<RunState>,
+    director: Res<crate::enemies::Director>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    planet: Res<CurrentPlanet>,
+    q_me: Query<&Player, With<crate::player::LocalPlayer>>,
+    mut q_crowd: Query<(Entity, &mut Enemy, Has<crate::enemies::Buried>), (Without<crate::interact::Pot>, Without<crate::enemies::Boss>)>,
+    mut q_ps: Query<&mut PlayerState>,
+) {
+    probe.ticks += 1;
+    let Ok(me) = q_me.single() else { return };
+    let cap = crate::run::scaling::Scaling::for_run(&run, 1).live_cap;
+    let mut rng = rand::thread_rng();
+    let t = probe.ticks;
+    let crowd = q_crowd.iter().count();
+    if t == OVERFLOW_FLOOD_TICK + 2 || t == OVERFLOW_PIN_TICK + 2 {
+        probe.baseline = crowd.max(cap);
+    }
+    if (probe.phase == 1 || probe.phase == 2) && t > OVERFLOW_FLOOD_TICK + 2 && t != OVERFLOW_PIN_TICK + 1 {
+        probe.over_cap = probe.over_cap.max(crowd.saturating_sub(probe.baseline));
+    }
+    match t {
+        OVERFLOW_FLOOD_TICK => {
+            // the antipode's neighbourhood: 250+ m of arc away on every world
+            for _ in 0..cap {
+                let far = (-me.dir + crate::planet::random_dir(&mut rng) * 0.25).normalize();
+                crate::enemies::spawn_enemy(&mut commands, &assets, &planet, crate::content::enemies::EnemyKind::Shambler, far, false, 1.0, 1.0, &mut rng);
+            }
+            probe.phase = 1;
+        }
+        OVERFLOW_PIN_TICK => {
+            probe.recycled = director.static_recycled;
+            for (e, _, _) in &q_crowd {
+                commands.entity(e).despawn();
+            }
+            for _ in 0..cap {
+                let dir = crate::planet::random_dir(&mut rng);
+                crate::enemies::spawn_enemy(&mut commands, &assets, &planet, crate::content::enemies::EnemyKind::Shambler, dir, true, 1.0e6, 0.0, &mut rng);
+            }
+            probe.phase = 2;
+        }
+        OVERFLOW_STATIC_TICK => {
+            probe.backlog_at_static = director.static_backlog;
+            for (e, en, _) in &q_crowd {
+                if en.elite {
+                    commands.entity(e).despawn();
+                }
+            }
+            run.timer = run.timer.min(0.5);
+            probe.phase = 3;
+        }
+        OVERFLOW_END_TICK => {
+            probe.backlog_end = director.static_backlog;
+            probe.ghosts = q_crowd.iter().filter(|(_, e, _)| e.kind == crate::content::enemies::EnemyKind::Ghost).count();
+            probe.phase = 4;
+        }
+        _ => {}
+    }
+    if probe.phase == 1 {
+        // what the valve spawns in the flood's place lands over the bot's horizon
+        let me_dir = me.dir;
+        probe.near_spawns += q_crowd
+            .iter_mut()
+            .filter(|(_, e, _)| e.is_added() && crate::sphere::arc_dist(e.dir, me_dir, planet.radius) < STATIC_RECYCLE_ARC)
+            .count();
+    }
+    if probe.phase == 3 {
+        // the bot is not the test: keep it standing while The Static pours out
+        for mut ps in &mut q_ps {
+            ps.hp = ps.stats.max_hp;
+        }
+    }
+    if probe.phase == 2 {
+        // pinned and harmless: the cap stays full of bodies the valve may not touch
+        for (_, mut e, _) in &mut q_crowd {
+            if e.elite {
+                e.speed = 0.0;
+                e.damage = 0.0;
+            }
+        }
+    }
+    probe.backlog_peak = probe.backlog_peak.max(director.static_backlog);
+}
+
 fn static_now(mut run: ResMut<RunState>, mut ticks: Local<u32>) {
     *ticks += 1;
     if *ticks == 150 && !run.static_active {
@@ -1536,17 +1650,19 @@ struct BalanceWindow {
     kills: u32,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn balance_probe(
     time: Res<Time>,
     run: Res<RunState>,
-    mut q_ps: Query<&mut PlayerState>,
+    director: Res<crate::enemies::Director>,
+    mut q_ps: Query<(&mut PlayerState, Has<crate::player::LocalPlayer>)>,
     q_new: Query<&Enemy, (Added<Enemy>, Without<crate::enemies::Boss>)>,
     q_alive: Query<&Enemy>,
     mut kills: MessageReader<crate::messages::KillMsg>,
     mut win: Local<BalanceWindow>,
 ) {
     // Runs between apply_player_hits and downed_watch, so a lethal hit never ends the run.
-    for mut ps in &mut q_ps {
+    for (mut ps, _) in &mut q_ps {
         ps.hp = ps.stats.max_hp;
         ps.dead = false;
     }
@@ -1562,12 +1678,13 @@ fn balance_probe(
     }
     let w = win.secs;
     let sc = crate::run::scaling::Scaling::for_run(&run, q_ps.iter().count());
-    let lead = q_ps.iter().next();
+    // the local astronaut's build (with --coop2 the peer's is an arbitrary other one)
+    let lead = q_ps.iter().find(|(_, local)| *local).map(|(p, _)| p);
     let weapons: Vec<String> = lead
         .map(|p| p.weapons.iter().map(|w| format!("{}:{}", w.kind.def().name, w.level)).collect())
         .unwrap_or_default();
     println!(
-        "  BALANCE t={:>4.0}s stage={} lvl={:<3} horde[hp x{:.2} dmg x{:.2}] spawns/s={:>5.1} crowdHP/s={:>6.0} kills/s={:>5.1} alive={:>4} weapons=[{}]",
+        "  BALANCE t={:>4.0}s stage={} lvl={:<3} horde[hp x{:.2} dmg x{:.2}] spawns/s={:>5.1} crowdHP/s={:>6.0} kills/s={:>5.1} alive={:>4} valve[recycled={} backlog={:.0}] weapons=[{}]",
         run.total_elapsed,
         run.stage,
         lead.map(|p| p.level).unwrap_or(1),
@@ -1577,6 +1694,8 @@ fn balance_probe(
         win.spawned_hp / w,
         win.kills as f32 / w,
         q_alive.iter().filter(|e| e.speed > 0.0).count(),
+        director.static_recycled,
+        director.static_backlog,
         weapons.join(", ")
     );
     *win = BalanceWindow::default();
@@ -1701,7 +1820,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     }
     if fast_boss {
         run.timer = 95.0; // just above the boss mark: boss arrives ~5s in
-        run.elapsed = 570.0; // late-game spawn mix: beamers, lobbers, UFOs, burrowers
+        // the late-game spawn mix (`scaling::mix_secs` reads the 95 s countdown: Beamers,
+        // UFOs, Burrowers, and Lobbers from 1:00 on)
+        run.elapsed = 570.0;
         run.total_elapsed = 570.0; // and the §3 run-time scaling that goes with it
     }
 
@@ -1937,7 +2058,15 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 .run_if(crate::playing)
                 .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
         )
-        .add_systems(Update, crate::director::snapshot_local_sheet);
+        .add_systems(Update, crate::director::snapshot_local_sheet)
+        .init_resource::<OverflowProbe>()
+        .add_systems(
+            Update,
+            overflow_probe
+                .after(crate::enemies::director_spawn)
+                .run_if(crate::playing)
+                .run_if(|| std::env::args().any(|a| a == "--overflow")),
+        );
 
     // enter InRun immediately
     app.insert_state(crate::AppState::InRun);
@@ -2017,6 +2146,31 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     println!("silver={} [{}] chests_opened={} boss_kills={}", silver.total, lines.join(", "), run.chests_opened, run.boss_kills);
 
     let mut ok = true;
+    if std::env::args().any(|a| a == "--overflow") {
+        let o = world.resource::<OverflowProbe>();
+        let line = format!(
+            "recycled={} near_spawns={} backlog_peak={:.0} backlog_at_static={:.0} backlog_end={:.0} ghosts={} over_cap={}",
+            o.recycled, o.near_spawns, o.backlog_peak, o.backlog_at_static, o.backlog_end, o.ghosts, o.over_cap
+        );
+        if o.phase < 4 {
+            println!("FAIL: --overflow never finished its script (phase {}; run more ticks) {line}", o.phase);
+            ok = false;
+        } else if o.recycled == 0 || o.near_spawns == 0 {
+            println!("FAIL: a cap full of far stragglers was not recycled into fresh spawns {line}");
+            ok = false;
+        } else if o.backlog_at_static <= 0.0 {
+            println!("FAIL: overflow with nothing to recycle was discarded, not banked for The Static {line}");
+            ok = false;
+        } else if o.backlog_end >= o.backlog_at_static || o.ghosts == 0 {
+            println!("FAIL: The Static never drew on its backlog {line}");
+            ok = false;
+        } else if o.over_cap > 0 {
+            println!("FAIL: the valve let the crowd past the live cap {line}");
+            ok = false;
+        } else {
+            println!("OVERFLOW OK {line}");
+        }
+    }
     if stale_bank {
         println!("FAIL: Results would bank level {} / gold {}, the run ended at level {p_level} / gold {p_gold} (H1)", banked.level, banked.gold);
         ok = false;

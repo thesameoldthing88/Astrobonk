@@ -35,7 +35,7 @@ pub fn tutorial_system(
     mut tut: ResMut<Tutorial>,
     run: Res<RunState>,
     q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_enemies: Query<(), (With<Enemy>, Without<crate::interact::Pot>)>,
     mut q_text: Query<(&mut Text, &mut TextColor), With<TutorialText>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
