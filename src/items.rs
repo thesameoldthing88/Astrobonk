@@ -479,7 +479,6 @@ pub fn encirclement_scan(
     hash: Res<SpatialHash>,
     enemies: Query<&Enemy>,
     mut telemetry: ResMut<ItemTelemetry>,
-    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
     mut q: Query<(&Player, &mut PlayerState, &mut ItemProcs, &Transform)>,
 ) {
     let dt = time.delta_secs();
@@ -522,7 +521,6 @@ pub fn encirclement_scan(
         ps.encircle_dirs = if octants { dirs } else { 0 };
         ps.crowd = if crowd { near.min(TOME_CROWD_CAP) } else { 0 };
         telemetry.max_encircle = telemetry.max_encircle.max(ps.encircle_dirs.count_ones());
-        tome_tel.max_crowd_bonus = tome_tel.max_crowd_bonus.max(ps.crowd_bonus());
     }
 }
 

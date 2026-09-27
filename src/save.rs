@@ -221,7 +221,9 @@ impl Default for MetaSave {
             version: SAVE_VERSION,
             silver: 0,
             tome_levels: HashMap::new(),
-            tome_loadout: vec![TomeKind::Damage, TomeKind::Health, TomeKind::Xp],
+            // empty: a new player owns no tome, and the first rank of one slots it
+            // (`buy_tome`) — never three unowned rank-0 tomes squatting in the slots
+            tome_loadout: Vec::new(),
             tome_slots: config::TOME_BASE_SLOTS,
             unlocked_chars,
             unlocked_weapons,
@@ -316,9 +318,12 @@ impl MetaSave {
             .filter(|r| matches!(r, Reward::TomeSlot))
             .count() as u32;
         self.tome_slots = self.tome_slots.max(config::TOME_BASE_SLOTS + earned).min(config::TOME_SLOTS_MAX);
-        // a hand-edited or corrupt loadout: no duplicates, never more than the slots
+        // Old defaults slotted Damage/Health/XP before any was bought, and a hand-edited or
+        // corrupt loadout can hold anything: keep only owned tomes, once each, within the
+        // slots.
+        let ranks = self.tome_levels.clone();
         let mut seen = HashSet::new();
-        self.tome_loadout.retain(|t| seen.insert(*t));
+        self.tome_loadout.retain(|t| ranks.get(t).is_some_and(|r| *r > 0) && seen.insert(*t));
         self.tome_loadout.truncate(self.tome_slots as usize);
     }
 
@@ -350,7 +355,9 @@ impl MetaSave {
         }
     }
 
-    /// Buy the next rank of `t` if it has one and the Silver is there. True if bought.
+    /// Buy the next rank of `t` if it has one and the Silver is there. True if bought. A
+    /// first rank goes straight into a free slot: a tome bought and left on the shelf would
+    /// read as Silver spent on nothing.
     pub fn buy_tome(&mut self, t: TomeKind) -> bool {
         let rank = self.tome_level(t);
         let cost = t.cost(rank);
@@ -359,6 +366,9 @@ impl MetaSave {
         }
         self.silver -= cost;
         self.tome_levels.insert(t, rank + 1);
+        if rank == 0 && !self.tome_loadout.contains(&t) && (self.tome_loadout.len() as u32) < self.tome_slots {
+            self.tome_loadout.push(t);
+        }
         true
     }
 

@@ -40,12 +40,57 @@ impl Pickup {
     pub fn new(kind: PickupKind, dir: Vec3, bob: f32) -> Self {
         Self { kind, dir, flying: false, speed: 0.0, bob, target: None, idle: 0.0, arc: false }
     }
+
+    /// Tome of the Horizon calls this gem home: it lifts off along the surface.
+    pub fn call_home(&mut self) {
+        self.flying = true;
+        self.arc = true;
+        self.speed = HORIZON_FLY_START;
+    }
+
+    /// Its caller went down or left before it arrived: it lies where it got to, anybody's
+    /// again, and waits out the horizon from scratch.
+    pub fn settle(&mut self, dir: Vec3) {
+        self.dir = dir;
+        self.flying = false;
+        self.arc = false;
+        self.speed = 0.0;
+        self.idle = 0.0;
+        self.target = None;
+    }
+
+    /// One frame of the flight home to the astronaut over surface point `to`, returning
+    /// where the gem is drawn. The host and a client both fly it with this, so they draw one
+    /// flight; within HORIZON_HANDOFF_ARC `arc` clears and `magnet_step` takes it in.
+    pub fn fly_home(&mut self, to: Vec3, dt: f32, planet: &CurrentPlanet) -> Vec3 {
+        self.speed = (self.speed + HORIZON_FLY_ACCEL * dt).min(HORIZON_FLY_SPEED);
+        let mut dir = self.dir;
+        let at = horizon_flight(&mut dir, to, self.speed * dt, planet.radius, planet);
+        self.dir = dir;
+        if crate::sphere::arc_dist(self.dir, to, planet.radius) < HORIZON_HANDOFF_ARC {
+            self.arc = false;
+        }
+        at
+    }
+
+    /// One frame of the ordinary magnet flight from `at` straight at `pos`.
+    pub fn magnet_step(&mut self, at: Vec3, pos: Vec3, dt: f32) -> Vec3 {
+        self.speed = (self.speed + 60.0 * dt).min(PICKUP_FLY_SPEED * 1.8);
+        at + (pos - at).normalize_or_zero() * self.speed * dt
+    }
 }
 
 /// HOST: this gem was called home from over the horizon by player `.0` (Tome of the
-/// Horizon). `netenemy::stream_pickups` announces it, so a client draws the same flight.
+/// Horizon). `netenemy::stream_pickups` announces it, so a client draws the same flight, and
+/// announces where it settled if the host takes it off again (its caller went down).
 #[derive(Component, Clone, Copy)]
 pub struct HorizonBound(pub u8);
+
+/// HOST: Silver one of The Static's ghosts dropped — what Tome of Static pays on
+/// (`RunState::static_silver_found`), tagged where it drops so neither a pot broken during
+/// The Static nor a ghost coin picked up after it ends is misread.
+#[derive(Component)]
+pub struct StaticSilver;
 
 /// One frame of a horizon flight: move `dir` along the surface toward `to` by `step` metres
 /// on a planet of `radius`, and return where the gem is drawn — lifted off the ground in the
@@ -109,7 +154,7 @@ pub fn spawn_pickup(
     planet: &CurrentPlanet,
     dir: Vec3,
     kind: PickupKind,
-) {
+) -> Entity {
     let mut rng = rand::thread_rng();
     // scatter a touch
     let (t, b) = crate::sphere::tangent_frame(dir);
@@ -129,13 +174,15 @@ pub fn spawn_pickup(
         PickupKind::Powerup(_) => (assets.power_mesh.clone(), assets.power_mat.clone(), 1.0),
     };
     let pos = planet.surface_point(dir) + dir * 0.35;
-    commands.spawn((
-        Pickup::new(kind, dir, rng.gen_range(0.0..6.28)),
-        Mesh3d(mesh),
-        MeshMaterial3d(mat),
-        Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
-        StageScoped,
-    ));
+    commands
+        .spawn((
+            Pickup::new(kind, dir, rng.gen_range(0.0..6.28)),
+            Mesh3d(mesh),
+            MeshMaterial3d(mat),
+            Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
+            StageScoped,
+        ))
+        .id()
 }
 
 /// Attraction + collection — and Tome of the Horizon, which calls XP that has lain over its
@@ -148,13 +195,12 @@ pub fn pickup_update(
     mut run: ResMut<RunState>,
     mut q_player: Query<(Entity, &Player, &mut PlayerState, &Transform, Has<crate::player::LocalPlayer>), Without<Pickup>>,
     particles: Option<Res<ParticleAssets>>,
-    mut q: Query<(Entity, &mut Pickup, &mut Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut Pickup, &mut Transform, Has<HorizonBound>, Has<StaticSilver>), Without<Player>>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
     mut grants: MessageWriter<crate::net::GrantOut>,
     q_ids: Query<&crate::player::PlayerId>,
-    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -193,16 +239,18 @@ pub fn pickup_update(
 
     // (2) Move pickups and record what got collected — resolve ownership PER PICKUP so a
     // gem inside 0.8m of two astronauts is granted (and despawned) exactly once.
-    let mut collected: Vec<(Entity, PickupKind, Vec3, bool, Vec3)> = Vec::new();
+    let mut collected: Vec<(Entity, PickupKind, Vec3, bool, bool)> = Vec::new();
 
-    for (e, mut p, mut tf) in &mut q {
+    for (e, mut p, mut tf, called_home, from_static) in &mut q {
         let cur = p
             .target
             .and_then(|t| attractors.iter().find(|a| a.entity == t));
-        if cur.is_none() && p.arc {
-            // its caller went down or left: it settles where it got to
-            p.arc = false;
-            p.idle = 0.0;
+        if cur.is_none() && called_home {
+            // its caller went down or left before it arrived: it settles where it got to,
+            // and the call is withdrawn so the clients stop flying it too
+            let dir = p.dir;
+            p.settle(dir);
+            commands.entity(e).remove::<HorizonBound>();
         }
         let mut target = match cur {
             Some(a) => Some(a),
@@ -227,11 +275,8 @@ pub fn pickup_update(
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(a, _)| a);
             if let Some(a) = called {
-                p.arc = true;
-                p.flying = true;
-                p.speed = 8.0;
+                p.call_home();
                 commands.entity(e).try_insert(HorizonBound(a.pid));
-                tome_tel.horizon_calls += 1;
                 target = Some(a);
             }
         }
@@ -243,21 +288,12 @@ pub fn pickup_update(
             p.target = Some(a.entity);
             if p.arc {
                 // home along the surface; the last stretch is the ordinary magnet flight
-                p.speed = (p.speed + 40.0 * dt).min(HORIZON_FLY_SPEED);
-                let mut dir = p.dir;
-                tf.translation = horizon_flight(&mut dir, a.dir, p.speed * dt, planet.radius, &planet);
-                p.dir = dir;
-                if crate::sphere::arc_dist(p.dir, a.dir, planet.radius) < a.range.max(2.5) {
-                    p.arc = false;
-                    tome_tel.horizon_arrivals += 1;
-                }
+                tf.translation = p.fly_home(a.dir, dt, &planet);
                 continue;
             }
-            p.speed = (p.speed + 60.0 * dt).min(PICKUP_FLY_SPEED * 1.8);
-            let to = (a.pos - tf.translation).normalize_or_zero();
-            tf.translation += to * p.speed * dt;
+            tf.translation = p.magnet_step(tf.translation, a.pos, dt);
             if tf.translation.distance(a.pos) < 0.8 {
-                collected.push((a.entity, p.kind, a.pos, a.is_local, a.dir));
+                collected.push((a.entity, p.kind, a.pos, a.is_local, from_static));
                 if let Some(pa) = &particles {
                     let c = match p.kind {
                         PickupKind::Xp(_) => Pcolor::Green,
@@ -282,7 +318,7 @@ pub fn pickup_update(
 
     // (3) Grant. XP is a SHARED pool on an individual curve (each player's own xp_gain and
     // level thresholds still apply); gold, food and powerups belong to the collector.
-    for (collector, kind, pos, is_local, _) in collected {
+    for (collector, kind, pos, is_local, from_static) in collected {
         if let PickupKind::Xp(v) = kind {
             for (_, _, mut ps, _, _) in &mut q_player {
                 if !ps.dead {
@@ -304,7 +340,7 @@ pub fn pickup_update(
             if let PickupKind::Gold(g) = kind {
                 granted = PickupKind::Gold((g as f32 * ps.stats.gold_gain).round() as u64);
             }
-            collect(&mut run, &mut ps, kind, pos, is_local, &mut numbers, &mut sfx, &mut banners);
+            collect(&mut run, &mut ps, kind, from_static, pos, is_local, &mut numbers, &mut sfx, &mut banners);
         }
         if !is_local {
             // loot picked up by a REMOTE astronaut has to reach that player's machine
@@ -315,10 +351,12 @@ pub fn pickup_update(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect(
     run: &mut RunState,
     ps: &mut PlayerState,
     kind: PickupKind,
+    from_static: bool,
     pos: Vec3,
     is_local: bool,
     numbers: &mut MessageWriter<NumberMsg>,
@@ -342,10 +380,13 @@ fn collect(
             }
         }
         PickupKind::Silver(s) => {
-            // Tome of Static: what The Static's ghosts pay, the collector's tome multiplies
-            let static_pay = if run.static_active { ps.stats.static_silver.max(0.0) } else { 1.0 };
-            let s = (s as f32 * ps.stats.silver_gain * static_pay).round() as u64;
+            let s = (s as f32 * ps.stats.silver_gain).round() as u64;
             run.silver_run += s;
+            // Tome of Static multiplies this total once, at banking (`director::silver_payout`):
+            // per coin, a x1.3 on a 1-Silver ghost drop would round away to nothing
+            if from_static {
+                run.static_silver_found += s;
+            }
             if is_local {
                 sfx.write(SfxMsg(Sfx::Coin));
             }
@@ -386,7 +427,6 @@ pub fn kill_drops(
     particles: Option<Res<ParticleAssets>>,
     mut sfx: MessageWriter<SfxMsg>,
     (save, mut flash_gate, time): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>, Res<Time>),
-    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
@@ -412,24 +452,20 @@ pub fn kill_drops(
         run.kills += 1;
 
         if run.static_active {
-            // ghosts pay silver
+            // ghosts pay silver (tagged: Tome of Static pays on exactly these)
             if rng.gen_bool(0.5) {
-                spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Silver(1));
+                let coin = spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Silver(1));
+                commands.entity(coin).insert(StaticSilver);
             }
         } else if msg.xp > 0.0 {
             spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Xp(msg.xp));
         }
 
         if msg.elite {
-            // Tome of the Elite: more coins, better odds on the powerup
-            let more = run.elite_loot.max(1.0);
+            let more = elite_loot_mult(msg, &run);
             let coins = (rng.gen_range(4..8) as f32 * more).round() as u32;
             for _ in 0..coins {
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Gold(rng.gen_range(4..10)));
-            }
-            tome_tel.elite_kills += 1;
-            if more > 1.0 {
-                tome_tel.elite_bonus_drops += 1;
             }
             if rng.gen_bool((0.35 * more).min(0.95) as f64) {
                 let kinds = [PowerupKind::Damage2x, PowerupKind::Magnet, PowerupKind::Speed];
@@ -472,6 +508,18 @@ pub fn kill_drops(
             let n = if msg.is_boss { 40 } else if msg.elite { 16 } else { 6 };
             fx::burst(&mut commands, pa, msg.pos, msg.dir, color, n, if msg.is_boss { 12.0 } else { 6.0 });
         }
+    }
+}
+
+/// Tome of the Elite's multiplier on an elite kill's coins and powerup odds: the party's
+/// best (`RunState::elite_loot`) for an elite of the horde, 1 for the boss and minibosses —
+/// they share the elite loot table, but §7's tome is about elites ("big game"), and a boss's
+/// payout is §3's to set.
+pub fn elite_loot_mult(msg: &KillMsg, run: &RunState) -> f32 {
+    if msg.elite && !msg.is_boss && !msg.is_miniboss {
+        run.elite_loot.max(1.0)
+    } else {
+        1.0
     }
 }
 

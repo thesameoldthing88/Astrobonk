@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime};
 // sun/radio in RunSnapMsg) and P04 (§13 assists in RunSnapMsg, revives in PlayerVitals, burrow
 // cracks on the hazard lane) each took 0xA570B0_5 on their own branch; the merged wire is _6.
 // Bumped for wave 3 / P05: the tome lines in `Stats` (PlayerBuildMsg), NetItemVis.lamp and
-// PickupEvent::Horizon.
+// PickupEvent::Horizon / HorizonSettle.
 pub const PROTOCOL_ID: u64 = 0xA570B0_7;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
@@ -364,6 +364,9 @@ pub enum PickupEvent {
     /// the one fly-home a client cannot derive (it is decided by the owner's tome and the
     /// gem's age on the host), so it is announced; the flight itself is drawn locally.
     Horizon { id: u16, owner: u8 },
+    /// …and the host withdrew that call (its caller went down or left before the gem
+    /// arrived): it lies at `dir`, anybody's again.
+    HorizonSettle { id: u16, dir: [f32; 3] },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -2157,8 +2160,9 @@ fn reset_after_session(
 //    night, fall, procs, skips, momentum, lifesteal, elite/Static hits and horizon calls
 //    from the peer's own numbers. The host seats a peer on a TOME-FREE placeholder sheet
 //    until that first build lands. What a client must see: Tome of the Horizon's call rides
-//    the pickup lane (PickupEvent::Horizon; the flight is drawn locally), Nightfall's beam
-//    rides NetItemVis.lamp. Repro: headless --tomes all [--coop2]; windowed coop.sh …
+//    the pickup lane (PickupEvent::Horizon, and HorizonSettle when the host withdraws it;
+//    the flight itself is drawn locally by the host's own `Pickup::fly_home`), Nightfall's
+//    beam rides NetItemVis.lamp. Repro: headless --tomes all [--coop2]; windowed coop.sh …
 //    --dev --tomes all and compare the two sides' TOMES[...] lines (a joiner's host copy
 //    shows the joiner's lines; `flights_seen` counts horizon calls that arrived).
 //

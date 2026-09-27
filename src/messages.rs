@@ -34,9 +34,12 @@ pub struct KillMsg {
     pub pos: Vec3,
     pub dir: Vec3,
     pub kind: Option<EnemyKind>,
+    /// An elite of the horde, a miniboss or the stage boss (they share the elite loot).
     pub elite: bool,
     pub xp: f32,
     pub is_boss: bool,
+    /// A miniboss (a `Boss` that is not the stage boss) — `elite` is set for it too.
+    pub is_miniboss: bool,
     pub is_pot: bool,
 }
 

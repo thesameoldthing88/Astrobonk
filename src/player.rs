@@ -590,14 +590,12 @@ pub fn player_input(
 /// the host's truth come out of the same code: Anti-Grav Boots' hover, Tome of Gravity's
 /// fall, and the `airborne` / `descent_m` / `night` / `momentum` readings Icarus Boots,
 /// Downhill Momentum and the Nightfall and Momentum tomes deal damage from.
-#[allow(clippy::too_many_arguments)]
 pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     props: Res<crate::planet::PropColliders>,
     global: Res<RunState>,
     mut telemetry: ResMut<crate::items::ItemTelemetry>,
-    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
     mut q: Query<(&mut Player, &mut PlayerState, &mut crate::items::ItemProcs, &InputIntent, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
@@ -630,9 +628,6 @@ pub fn player_physics(
         // (the air builds' firing window) is kept and the landing comes sooner
         let fall = if p.vel_r < 0.0 { run.stats.fall_speed.max(0.1) } else { 1.0 };
         p.vel_r -= PLAYER_GRAVITY * fall * dt;
-        if fall > 1.0 {
-            tome_tel.fast_fall_secs += dt;
-        }
     }
 
     // advance over the sphere at current radius
@@ -682,9 +677,6 @@ pub fn player_physics(
     telemetry.max_descent = telemetry.max_descent.max(run.descent_m);
     // Tome of Nightfall reads the side of the planet we stand on…
     run.night = crate::planet::is_night(p.dir, global.sun_shrink);
-    if run.night && run.stats.night_damage > 0.0 {
-        tome_tel.night_secs += dt;
-    }
     // …and Tome of Momentum how long we have kept moving (airborne counts: a bunny-hop
     // chain is the purest momentum there is)
     run.momentum = if p.vel_t.length() >= MOMENTUM_MIN_SPEED && !run.dead {
@@ -692,7 +684,6 @@ pub fn player_physics(
     } else {
         (run.momentum - dt * MOMENTUM_DRAIN).max(0.0)
     };
-    tome_tel.max_momentum_bonus = tome_tel.max_momentum_bonus.max(run.momentum_bonus());
 
     let up = p.dir;
     let pos = planet.surface_point(p.dir) + up * (p.height + PLAYER_HEIGHT * 0.5);

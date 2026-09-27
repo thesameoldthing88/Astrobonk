@@ -134,6 +134,9 @@ pub struct RunState {
     /// Seconds spent in The Static across ALL stages (`static_timer` restarts per stage) —
     /// the §10 formula's `Static_overtime_seconds`.
     pub static_secs_total: f32,
+    /// Of `silver_run`, the Silver The Static's ghosts dropped (`pickups::StaticSilver`) —
+    /// what Tome of Static multiplies at banking. HOST state: only the host banks.
+    pub static_silver_found: u64,
     /// Where the guaranteed miniboss-#1 cache stands, while it is unopened. Set by the host
     /// when miniboss #1 dies and cleared when it is opened; streamed in `RunSnapMsg` so a
     /// client draws the same chest (`interact::sync_reward_cache` owns the entity).
@@ -280,6 +283,7 @@ impl RunState {
             evolves: 0,
             boss_kills: 0,
             static_secs_total: 0.0,
+            static_silver_found: 0,
             reward_chest: None,
             result: None,
             difficulty: 0.0,

@@ -429,8 +429,9 @@ pub struct SilverPayout {
 /// Added on top: the Silver picked up in the run (pots, The Static's ghosts), already
 /// multiplied by Silver gain when it was collected. `tier_bonus` is the Tier on a chain
 /// clear and 0 otherwise — a death still banks every other term (§3: death is never a zero).
-/// `static_silver` is Tome of Static's multiplier on the overtime term ("The Static pays
-/// double Silver"); its ghosts' drops were multiplied when they were picked up.
+/// `static_silver` is Tome of Static ("The Static pays double Silver"): it multiplies both
+/// things The Static pays — the overtime term and the ghosts' Silver — the latter as one
+/// total here, since a 1-Silver coin cannot carry a x1.1.
 pub fn silver_payout(
     run: &RunState,
     victory: bool,
@@ -477,7 +478,11 @@ pub fn silver_payout(
     if run.silver_run > 0 {
         lines.push(("Silver found".into(), format!("+{}", run.silver_run)));
     }
-    SilverPayout { lines, total: performance + run.silver_run }
+    let ghost_bonus = (run.static_silver_found as f32 * (static_tome - 1.0).max(0.0)).round() as u64;
+    if ghost_bonus > 0 {
+        lines.push((format!("Static ghost Silver (Tome of Static x{static_tome:.1})"), format!("+{ghost_bonus}")));
+    }
+    SilverPayout { lines, total: performance + run.silver_run + ghost_bonus }
 }
 
 /// `--minibossnow` (test harness; the windowed game also needs `--dev`): wind the clock to

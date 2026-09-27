@@ -126,7 +126,6 @@ fn main() {
         .init_resource::<ui::hud::BannerQueue>()
         .init_resource::<audio::SfxThrottle>()
         .init_resource::<items::ItemTelemetry>()
-        .init_resource::<tomes::TomeTelemetry>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<messages::HitMsg>()
         .add_message::<messages::PlayerHitMsg>()
@@ -517,8 +516,10 @@ fn client_follow_host_run(
         return;
     }
     // Only pull IN from a menu state. Without this guard the client fights death_watch and
-    // results_input for NextState and ping-pongs between Results and a rebuilt world.
-    if matches!(*state.get(), AppState::MainMenu | AppState::Boot) {
+    // results_input for NextState and ping-pongs between Results and a rebuilt world. The
+    // tome library counts: a joiner re-slotting tomes while the host picks a world would
+    // otherwise stay there while its server-side body stood idle in the host's run.
+    if matches!(*state.get(), AppState::MainMenu | AppState::Tomes | AppState::Boot) {
         next.set(AppState::InRun);
     }
 }

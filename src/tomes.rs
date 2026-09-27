@@ -16,20 +16,22 @@
 //! | Ricochet | Ricochet | rolled per shot in `combat::fire_volley`, skipped in `combat::projectile_move` |
 //! | Momentum | MomentumDamage | `player::player_physics` times `momentum` → `momentum_bonus` |
 //! | Vampirism | Lifesteal, VisorBoost | `recompute_stats` (Vampire Visor's share) |
-//! | Elite | EliteLoot, EliteDamageTaken | `items::item_upkeep` → `RunState::elite_loot` → `pickups::kill_drops`; `incoming_mult` |
+//! | Elite | EliteLoot, EliteDamageTaken | `items::item_upkeep` → `RunState::elite_loot` → `pickups::elite_loot_mult`; `incoming_mult` (horde elites only, never a boss) |
 //! | Banishment | ExtraBanishes/Refreshes, RefreshDiscount | `PlayerState::new`, `PlayerState::refresh_price` |
 //! | Duplication | FreeMicrowave, DupeKeepGrade | `PlayerState::enter_stage`, the Microwave in `interact::interact_system` |
-//! | Horizon | HorizonCollect | `pickups::pickup_update` (+ `PickupEvent::Horizon` for clients) |
-//! | Static | StaticSilver, StaticDamageTaken | `pickups::collect`, `director::silver_payout`; `incoming_mult` |
+//! | Horizon | HorizonCollect | `pickups::pickup_update` → `Pickup::fly_home` (+ `PickupEvent::Horizon`/`HorizonSettle` for clients) |
+//! | Static | StaticSilver, StaticDamageTaken | ghost coins tagged `pickups::StaticSilver` → `RunState::static_silver_found` and the overtime term, both in `director::silver_payout`; `incoming_mult` |
 //! | Ascension | EvoSlots, EvoDamage | `PlayerState::new` → `evo_cap`; `combat::weapon_fire` |
 //!
 //! CO-OP: each machine folds ITS OWN save's tomes into its own sheet; a joiner's derived
 //! `Stats` reach the host in `net::PlayerBuildMsg`, so every line the host simulates for a
 //! peer (orbit, crowd, night, fall, procs, skips, momentum, lifesteal, elite and static
 //! hits, horizon calls, evolved damage) is the peer's. The per-run allowances (banishes,
-//! refreshes, evolution slots, the free Microwave) are spent on the owner's own screen.
-//! What a client must SEE rides existing lanes: the horizon call on the pickup lane, the
-//! flashlight on `NetItemVis::lamp`.
+//! refreshes, evolution slots, the free Microwave) are spent on the owner's own screen —
+//! though a joiner cannot work the Microwave, chests or the Shady Guy until P14's peer
+//! interactables, so Duplication and Salvage pay only the host (and solo) until then.
+//! What a client must SEE rides existing lanes: the horizon call (and its withdrawal) on the
+//! pickup lane, the flashlight on `NetItemVis::lamp`.
 
 use crate::config::*;
 use crate::content::characters::AstronautKind;
@@ -40,20 +42,6 @@ use crate::run::{PlayerState, RefreshPrice, RunState};
 use crate::save::MetaSave;
 use crate::stats::Stats;
 use bevy::prelude::*;
-
-/// What the tome effects did this run — for the headless `--tomes` probe and nothing else.
-#[derive(Resource, Default, Debug)]
-pub struct TomeTelemetry {
-    pub max_crowd_bonus: f32,
-    pub night_secs: f32,
-    pub fast_fall_secs: f32,
-    pub max_momentum_bonus: f32,
-    pub ricochets: u32,
-    pub horizon_calls: u32,
-    pub horizon_arrivals: u32,
-    pub elite_kills: u32,
-    pub elite_bonus_drops: u32,
-}
 
 /// Multiplier on a hit an astronaut takes from the tomes that make certain foes hit harder:
 /// Tome of the Elite (from an elite) and Tome of Static (from The Static).
@@ -96,19 +84,25 @@ pub fn apply_flashlights(
 
 /// `--netlog`: every 5 s, the tome lines of every sheet this machine holds (on a host that
 /// includes each joiner's, as its `PlayerBuildMsg` delivered them — the proof a peer's own
-/// tomes reached the simulation), and the horizon flights drawn here (on a joiner: called by
-/// the host over the pickup lane).
+/// tomes reached the simulation), and the horizon flights drawn here (on a joiner: called and
+/// withdrawn by the host over the pickup lane). The probe counts by watching components, so
+/// the simulation systems carry no telemetry of their own.
+#[allow(clippy::too_many_arguments)]
 pub fn log_tomes(
     time: Res<Time>,
     role: Res<crate::net::NetRole>,
-    tel: Res<TomeTelemetry>,
     sheets: Query<(&crate::player::PlayerId, &PlayerState)>,
-    called: Query<(), Added<crate::pickups::HorizonBound>>,
+    called: Query<(), Changed<crate::pickups::HorizonBound>>,
+    mut withdrawn: RemovedComponents<crate::pickups::HorizonBound>,
+    still: Query<(), With<crate::pickups::Pickup>>,
     flying: Query<(), With<crate::pickups::HorizonBound>>,
-    mut seen: Local<u32>,
+    shots: Query<&crate::combat::Projectile>,
+    mut counts: Local<(u32, u32)>,
     mut next: Local<f32>,
 ) {
-    *seen += called.iter().count() as u32;
+    counts.0 += called.iter().count() as u32;
+    // a removal whose gem still exists is a withdrawn call (a collected one is despawned)
+    counts.1 += withdrawn.read().filter(|e| still.contains(*e)).count() as u32;
     let now = time.elapsed_secs();
     if now < *next {
         return;
@@ -133,13 +127,13 @@ pub fn log_tomes(
         })
         .collect();
     info!(
-        "TOMES[{:?}] {} | horizon calls={} flights_seen={} in_flight={} ricochets={}",
+        "TOMES[{:?}] {} | horizon calls={} withdrawn={} in_flight={} | shots skipping now={}",
         *role,
         lines.join(" ; "),
-        tel.horizon_calls,
-        *seen,
+        counts.0,
+        counts.1,
         flying.iter().count(),
-        tel.ricochets
+        shots.iter().filter(|p| p.hop > 0.0).count()
     );
 }
 
@@ -208,11 +202,14 @@ pub fn self_check() -> Result<(), String> {
 
     // ---- buying and slotting ----
     let mut s = MetaSave { silver: 259, ..MetaSave::default() };
-    if s.tome_slots != TOME_BASE_SLOTS {
-        return Err(format!("a fresh save has {} slots, want {TOME_BASE_SLOTS}", s.tome_slots));
+    if s.tome_slots != TOME_BASE_SLOTS || !s.tome_loadout.is_empty() {
+        return Err(format!("a fresh save has {} slots holding {:?}, want {TOME_BASE_SLOTS} empty", s.tome_slots, s.tome_loadout));
     }
     if !s.buy_tome(TomeKind::Horizon) || s.silver != 159 || s.tome_level(TomeKind::Horizon) != 1 {
         return Err("buying rank 1 did not charge 100".into());
+    }
+    if s.tome_loadout != vec![TomeKind::Horizon] {
+        return Err("a first rank bought with a slot free was not slotted".into());
     }
     if s.buy_tome(TomeKind::Horizon) != (s.silver >= 160) {
         return Err("a rank was sold it could not afford (or refused one it could)".into());
@@ -236,8 +233,9 @@ pub fn self_check() -> Result<(), String> {
     }
 
     // ---- save migration: 20 levels → 10 ranks, 3 base slots → 4, never twice ----
+    // (Precision slotted but never bought: the old default loadout did that)
     let legacy = r#"{"silver": 5, "tome_levels": {"Damage": 15, "Health": 20, "Xp": 1},
-                     "tome_loadout": ["Damage", "Health", "Xp", "Xp"], "tome_slots": 4,
+                     "tome_loadout": ["Damage", "Precision", "Health", "Xp", "Xp"], "tome_slots": 4,
                      "quests_done": ["Kill10000"]}"#;
     let mut old: MetaSave = serde_json::from_str(legacy).map_err(|e| format!("legacy tome save rejected: {e}"))?;
     old.migrate();
@@ -307,7 +305,25 @@ pub fn self_check() -> Result<(), String> {
                 close(st.lifesteal, 0.04) && close(ps.stats.lifesteal, 0.04 + 0.05 * 2.0)
             }
             TomeKind::Elite => {
-                close(st.elite_loot, 2.5) && close(incoming_mult(&st, true, false), 1.4) && close(incoming_mult(&st, false, false), 1.0)
+                // richer horde elites; the boss and minibosses share the elite table, not the tome
+                let mut run = RunState::new(AstronautKind::Buzz, crate::content::planets::PlanetKind::Moon, 1, &MetaSave::default());
+                run.elite_loot = st.elite_loot;
+                let kill = |is_boss, is_miniboss| crate::messages::KillMsg {
+                    pos: Vec3::ZERO,
+                    dir: Vec3::Y,
+                    kind: None,
+                    elite: true,
+                    xp: 0.0,
+                    is_boss,
+                    is_miniboss,
+                    is_pot: false,
+                };
+                close(st.elite_loot, 2.5)
+                    && close(crate::pickups::elite_loot_mult(&kill(false, false), &run), 2.5)
+                    && close(crate::pickups::elite_loot_mult(&kill(true, false), &run), 1.0)
+                    && close(crate::pickups::elite_loot_mult(&kill(false, true), &run), 1.0)
+                    && close(incoming_mult(&st, true, false), 1.4)
+                    && close(incoming_mult(&st, false, false), 1.0)
             }
             TomeKind::Banishment => {
                 let mut broke = ps.clone();
@@ -324,11 +340,18 @@ pub fn self_check() -> Result<(), String> {
             }
             TomeKind::Horizon => close(1.0 / st.horizon_collect, 2.0),
             TomeKind::Static => {
+                // both things The Static pays: 60 s of overtime and 20 ghost coins found
                 let mut run = RunState::new(AstronautKind::Buzz, crate::content::planets::PlanetKind::Moon, 1, &MetaSave::default());
                 run.static_secs_total = 60.0;
-                let plain = crate::director::silver_payout(&run, false, 0, 0, 1.0, 1.0).total;
-                let doubled = crate::director::silver_payout(&run, false, 0, 0, 1.0, st.static_silver).total;
-                close(st.static_silver, 2.0) && doubled == plain + 60 && close(incoming_mult(&st, false, true), 1.5)
+                run.silver_run = 20;
+                run.static_silver_found = 20;
+                let pay = |mult: f32| crate::director::silver_payout(&run, false, 0, 0, 1.0, mult).total;
+                // rank 1's x1.1 on 20 one-Silver coins is +2 — not rounded away coin by coin
+                let rank1 = 1.0 + TomeKind::Static.def().effects[0].at(1);
+                close(st.static_silver, 2.0)
+                    && pay(st.static_silver) == pay(1.0) + 60 + 20
+                    && pay(rank1) == pay(1.0) + 6 + 2
+                    && close(incoming_mult(&st, false, true), 1.5)
             }
             TomeKind::Ascension => ps.evo_cap() == EVOLUTION_CAP + 1 && close(st.evo_damage, 1.27),
         };

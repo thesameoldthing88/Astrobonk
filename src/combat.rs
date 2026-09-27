@@ -846,7 +846,6 @@ pub fn projectile_move(
     q_pots: Query<(), With<Pot>>,
     mut q: Query<(Entity, &mut Projectile, &mut Transform), Without<Player>>,
     mut hits: MessageWriter<HitMsg>,
-    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -924,7 +923,6 @@ pub fn projectile_move(
             if let Some(pa) = &particles {
                 fx::burst(&mut commands, pa, planet.surface_point(p.dir), p.dir, Pcolor::White, 5, 3.0);
             }
-            tome_tel.ricochets += 1;
         }
         if p.life <= 0.0 {
             if let ProjKind::Rocket { aoe } = p.kind {
@@ -1213,6 +1211,7 @@ pub fn apply_hits(
                 elite: false,
                 xp: 0.0,
                 is_boss: false,
+                is_miniboss: false,
                 is_pot: true,
             });
             sfx.write(SfxMsg(Sfx::Pot));
@@ -1254,6 +1253,7 @@ pub fn apply_hits(
                     elite: e.elite || is_mini,
                     xp: e.xp,
                     is_boss,
+                    is_miniboss: is_mini,
                     is_pot: false,
                 });
                 // §3: the 7:00 spike pays out a guaranteed chest where the miniboss fell.
@@ -1320,11 +1320,12 @@ pub fn apply_player_hits(
         }
         // Cracked Helmet's price is paid before mitigation, like any other damage taken, and
         // so are the tomes' (Elite, Static) against the kind of foe that swung; the §13
-        // enemy-damage assist eases the hit itself.
+        // enemy-damage assist eases the hit itself. A boss or miniboss head carries the elite
+        // flag for its loot, but it is not the "elite" Tome of the Elite hunts.
         let (by_elite, by_static) = msg
             .attacker
             .and_then(|a| q_crowd.get(a).ok())
-            .map(|(en, _)| (en.elite, en.kind == crate::content::enemies::EnemyKind::Ghost))
+            .map(|(en, boss)| (en.elite && !boss, en.kind == crate::content::enemies::EnemyKind::Ghost))
             .unwrap_or((false, false));
         let mut amount = msg.amount
             * run.assist.enemy_damage

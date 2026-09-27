@@ -509,6 +509,29 @@ struct TomeProbe {
     /// Largest drone body / Orbital Yo-Yo swing seen, over what it is without the tome.
     drone_scale: f32,
     yoyo_ratio: f32,
+    // What the tomes did, watched from outside (`tome_probe_watch`): the simulation systems
+    // carry no telemetry of their own.
+    max_crowd_bonus: f32,
+    night_secs: f32,
+    fast_fall_secs: f32,
+    max_momentum_bonus: f32,
+    ricochets: u32,
+    horizon_calls: u32,
+    horizon_arrivals: u32,
+    /// Horde elites killed, and how many of those dropped Tome of the Elite's richer loot.
+    elite_kills: u32,
+    elite_richer: u32,
+    /// Boss and miniboss kills the tome wrongly made richer (must stay 0).
+    boss_richer: u32,
+    /// Hits a ghost of The Static landed on an astronaut (Tome of Static bites harder).
+    ghost_hits: u32,
+    /// Tome of Duplication at the Microwave: (free uses, stage use spent, item copies) before
+    /// the first press, after it, and after the second.
+    microwave: Vec<(u32, bool, u32)>,
+    /// `--coop2` Horizon: the peer's called gem whose flight the probe cut by downing the
+    /// peer for a moment, the tick it did, and whether the host withdrew the call.
+    withdraw: Option<(Entity, u64)>,
+    withdrawn: Option<bool>,
 }
 
 /// Hand every astronaut the kit its tomes act on (a shot weapon for Ricochet, a drone ring
@@ -555,19 +578,64 @@ fn tome_probe_setup(
 }
 
 /// Walk the bot onto the night side once, hop it every couple of seconds (Tome of Gravity's
-/// fall), and watch the orbiting bodies the Tome of Orbit scales.
+/// fall), watch the orbiting bodies the Tome of Orbit scales, and — with Tome of
+/// Duplication — walk the local astronaut to the Microwave twice and press E through the
+/// real `interact_system`.
 #[allow(clippy::too_many_arguments)]
 fn tome_probe_drive(
     mut probe: ResMut<TomeProbe>,
     planet: Res<CurrentPlanet>,
+    run: Res<RunState>,
     mut fx: MessageReader<crate::items::ItemFxMsg>,
     drones: Query<&crate::combat::Drone>,
     mut crowd: Query<(Entity, &mut Enemy), Without<crate::enemies::Boss>>,
     mut hits: MessageWriter<crate::messages::HitMsg>,
-    mut q: Query<(&crate::player::PlayerId, &mut Player, &mut crate::items::ItemProcs, &PlayerState)>,
+    mut q: Query<(&crate::player::PlayerId, &mut Player, &mut crate::items::ItemProcs, &PlayerState, Has<crate::player::LocalPlayer>)>,
+    (interactables, mut keys): (
+        Query<(&crate::interact::Interactable, &Transform)>,
+        ResMut<ButtonInput<KeyCode>>,
+    ),
 ) {
     probe.ticks += 1;
     let t = probe.ticks;
+    // Tome of Encirclement counts foes within TOME_CROWD_RADIUS, and a bot carrying every
+    // tome clears its surroundings before many close in: every 5 s, walk a handful of the
+    // horde in to ring the local astronaut at arm's length.
+    if probe.tomes.contains(&crate::content::tomes::TomeKind::Encirclement) && t % 150 == 75 {
+        let me = q.iter().find(|(.., ps, local)| *local && !ps.dead).map(|(_, p, ..)| p.dir);
+        if let Some(me) = me {
+            let (a, b) = sphere::tangent_frame(me);
+            let ring = crowd.iter_mut().filter(|(_, en)| en.speed > 0.0 && en.hp > 0.0).take(6);
+            for (i, (_, mut en)) in ring.enumerate() {
+                let ang = i as f32 * std::f32::consts::TAU / 6.0;
+                en.dir = sphere::offset_dir(me, a * ang.cos() + b * ang.sin(), TOME_CROWD_RADIUS * 0.5, planet.radius);
+            }
+        }
+    }
+    // Tome of Duplication: two presses at the Microwave, 3 s apart — the free use must go
+    // first and leave the stage's own; each must duplicate an item.
+    if probe.tomes.contains(&crate::content::tomes::TomeKind::Duplication) && (90..=240).contains(&t) {
+        let oven = interactables
+            .iter()
+            .find(|(i, _)| i.kind == crate::interact::InteractKind::Microwave)
+            .map(|(_, tf)| tf.translation.normalize_or_zero());
+        for (_, mut p, mut procs, ps, is_local) in &mut q {
+            let Some(oven) = oven.filter(|_| is_local && !ps.dead) else { continue };
+            let copies = ps.items.iter().map(|s| s.count()).sum::<u32>();
+            let now = (ps.free_microwave, run.microwave_used, copies);
+            if t == 90 || t == 180 || t == 240 {
+                probe.microwave.push(now);
+            }
+            if (90..=100).contains(&t) || (180..=190).contains(&t) {
+                p.dir = oven;
+                p.vel_t = Vec3::ZERO;
+                procs.forget_altitude();
+                if t == 92 || t == 182 {
+                    keys.press(KeyCode::KeyE);
+                }
+            }
+        }
+    }
     // Tome of the Elite pays out on an elite kill, and a short run may not meet one: every
     // 10 s, promote a walker and drop it through the real HitMsg → KillMsg → kill_drops path.
     if t % 300 == 0 && probe.tomes.contains(&crate::content::tomes::TomeKind::Elite) {
@@ -576,7 +644,7 @@ fn tome_probe_drive(
             hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO });
         }
     }
-    for (pid, mut p, mut procs, ps) in &mut q {
+    for (pid, mut p, mut procs, ps, _) in &mut q {
         if ps.dead {
             continue;
         }
@@ -601,6 +669,115 @@ fn tome_probe_drive(
         if let crate::items::ItemFx::Orbit { radius, .. } = m.fx {
             probe.yoyo_ratio = probe.yoyo_ratio.max(radius / crate::items::yoyo_radius(&planet));
         }
+    }
+}
+
+/// What the tomes did, read off the world each tick — the crowd, night, fall and momentum
+/// readings on every sheet, shots mid-skip, gems called home and handed to the magnet, and
+/// the elite and ghost traffic — so the simulation itself carries no probe counters.
+#[allow(clippy::too_many_arguments)]
+fn tome_probe_watch(
+    time: Res<Time>,
+    run: Res<RunState>,
+    mut probe: ResMut<TomeProbe>,
+    sheets: Query<(&Player, &PlayerState)>,
+    shots: Query<(Entity, &crate::combat::Projectile)>,
+    called: Query<(), Changed<crate::pickups::HorizonBound>>,
+    homing: Query<(Entity, &crate::pickups::Pickup), With<crate::pickups::HorizonBound>>,
+    ghosts: Query<&Enemy>,
+    (mut kills, mut player_hits): (
+        MessageReader<crate::messages::KillMsg>,
+        MessageReader<crate::messages::PlayerHitMsg>,
+    ),
+    mut seen: Local<(std::collections::HashSet<Entity>, std::collections::HashSet<Entity>)>,
+) {
+    let dt = time.delta_secs();
+    let (skipped, handed) = &mut *seen;
+    let mut night = false;
+    let mut fast_fall = false;
+    for (p, ps) in &sheets {
+        probe.max_crowd_bonus = probe.max_crowd_bonus.max(ps.crowd_bonus());
+        probe.max_momentum_bonus = probe.max_momentum_bonus.max(ps.momentum_bonus());
+        night |= ps.night && ps.stats.night_damage > 0.0;
+        fast_fall |= !p.grounded && p.vel_r < 0.0 && ps.stats.fall_speed > 1.0;
+    }
+    if night {
+        probe.night_secs += dt;
+    }
+    if fast_fall {
+        probe.fast_fall_secs += dt;
+    }
+    // a shot skips at most once, and hops for RICOCHET_HOP_SECS: each hopping shot is one
+    for (e, shot) in &shots {
+        if shot.hop > 0.0 && skipped.insert(e) {
+            probe.ricochets += 1;
+        }
+    }
+    skipped.retain(|e| shots.contains(*e));
+    probe.horizon_calls += called.iter().count() as u32;
+    for (e, gem) in &homing {
+        if !gem.arc && handed.insert(e) {
+            probe.horizon_arrivals += 1;
+        }
+    }
+    handed.retain(|e| homing.contains(*e));
+    for k in kills.read() {
+        let richer = crate::pickups::elite_loot_mult(k, &run) > 1.0;
+        if k.is_boss || k.is_miniboss {
+            probe.boss_richer += u32::from(richer);
+        } else if k.elite {
+            probe.elite_kills += 1;
+            probe.elite_richer += u32::from(richer);
+        }
+    }
+    for h in player_hits.read() {
+        if h.attacker.and_then(|a| ghosts.get(a).ok()).is_some_and(|en| en.kind == crate::content::enemies::EnemyKind::Ghost) {
+            probe.ghost_hits += 1;
+        }
+    }
+}
+
+/// `--coop2` with Tome of the Horizon: once a gem is flying home to the PEER, down the peer
+/// for two ticks — the host must withdraw the call (drop `HorizonBound`, which is what
+/// `netenemy::stream_pickups` announces as HorizonSettle) and leave the gem lying where it
+/// got to, not flying on to a body that cannot collect it.
+fn tome_probe_withdraw(
+    mut probe: ResMut<TomeProbe>,
+    gems: Query<(Entity, &crate::pickups::Pickup, Option<&crate::pickups::HorizonBound>)>,
+    mut peers: Query<(&crate::player::PlayerId, &mut PlayerState), Without<crate::player::LocalPlayer>>,
+) {
+    let t = probe.ticks;
+    match probe.withdraw {
+        None => {
+            let Some((pid, mut ps)) = peers.iter_mut().find(|(_, ps)| !ps.dead) else { return };
+            let flying = gems.iter().find(|(_, g, hb)| g.arc && hb.is_some_and(|hb| hb.0 == pid.0));
+            if let Some((e, ..)) = flying {
+                ps.dead = true;
+                probe.withdraw = Some((e, t));
+            }
+        }
+        Some((e, at)) if probe.withdrawn.is_none() && t >= at + 2 => {
+            for (_, mut ps) in &mut peers {
+                ps.dead = false;
+            }
+            // collected or merged in between proves nothing either way: try another gem
+            let Ok((_, gem, hb)) = gems.get(e) else {
+                probe.withdraw = None;
+                return;
+            };
+            probe.withdrawn = Some(hb.is_none() && !gem.arc && !gem.flying);
+        }
+        _ => {}
+    }
+}
+
+/// `--staticnow` (headless): a few seconds in, wind the clock out so The Static rises
+/// through the real `run_clock` path — with `--fast-boss` the marks have already fired, so
+/// nothing but The Static arrives. Tome of Static's payout and bite need it to be reached.
+fn static_now(mut run: ResMut<RunState>, mut ticks: Local<u32>) {
+    *ticks += 1;
+    if *ticks == 150 && !run.static_active {
+        run.timer = run.timer.min(0.5);
     }
 }
 
@@ -1015,16 +1192,23 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     let mut save = MetaSave::default();
     if fast_boss {
         // a veteran loadout so the bot survives long enough to meet the late-game kinds
-        save.tome_levels.insert(crate::content::tomes::TomeKind::Damage, TOME_MAX_RANK);
-        save.tome_levels.insert(crate::content::tomes::TomeKind::Health, TOME_MAX_RANK);
+        for t in [crate::content::tomes::TomeKind::Damage, crate::content::tomes::TomeKind::Health] {
+            save.tome_levels.insert(t, TOME_MAX_RANK);
+            save.tome_loadout.push(t);
+        }
     }
     let args: Vec<String> = std::env::args().collect();
     let (probe_tomes, probe_rank) = crate::tomes::tomes_from_args();
     if !probe_tomes.is_empty() {
+        // on top of the fast-boss veteran loadout, so the bot lives to see the tomes act
         let slotted = crate::tomes::save_with(&probe_tomes, probe_rank);
         save.tome_levels.extend(slotted.tome_levels);
-        save.tome_loadout = slotted.tome_loadout;
-        save.tome_slots = slotted.tome_slots;
+        for t in slotted.tome_loadout {
+            if !save.tome_loadout.contains(&t) {
+                save.tome_loadout.push(t);
+            }
+        }
+        save.tome_slots = save.tome_slots.max(save.tome_loadout.len() as u32);
     }
     let assist = args.iter().any(|a| a == "--assist");
     if assist {
@@ -1084,7 +1268,6 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .insert_resource(probe)
         .init_resource::<XpTally>()
         .init_resource::<crate::items::ItemTelemetry>()
-        .init_resource::<crate::tomes::TomeTelemetry>()
         .insert_resource(ItemProbe {
             items: crate::items::items_from_args(),
             deathsave: args.iter().any(|a| a == "--deathsave"),
@@ -1192,9 +1375,21 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         )
         .add_systems(
             Update,
-            (tome_probe_setup, tome_probe_drive.after(bot_drive))
+            (
+                tome_probe_setup,
+                tome_probe_drive.after(bot_drive).before(crate::interact::interact_system),
+                tome_probe_watch,
+                tome_probe_withdraw
+                    .after(tome_probe_drive)
+                    .run_if(|p: Res<TomeProbe>| p.tomes.contains(&crate::content::tomes::TomeKind::Horizon))
+                    .run_if(|| std::env::args().any(|a| a == "--coop2")),
+            )
                 .run_if(|p: Res<TomeProbe>| !p.tomes.is_empty())
                 .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            static_now.run_if(crate::playing).run_if(|| std::env::args().any(|a| a == "--staticnow")),
         )
         .add_systems(
             Update,
@@ -1506,10 +1701,13 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     let tome_probe = world.resource::<TomeProbe>();
     if !tome_probe.tomes.is_empty() {
         use crate::content::tomes::TomeKind as T;
-        let tel = world.resource::<crate::tomes::TomeTelemetry>();
+        let tel = tome_probe;
         let items_tel = world.resource::<crate::items::ItemTelemetry>();
+        // what Tome of Static adds at banking, by the banker's own sheet
+        let static_pay = |mult: f32| crate::director::silver_payout(&run, false, 0, 0, 1.0, mult).total;
+        let static_mult = ps.as_ref().map(|p| p.stats.static_silver).unwrap_or(1.0);
         println!(
-            "TOMES crowd=+{:.0}% night={:.1}s fast_fall={:.1}s momentum=+{:.0}% ricochets={} horizon[calls={} home={}] elite[kills={} richer={}] drone_scale={:.2} yoyo_swing=x{:.2} yoyo_throws={}",
+            "TOMES crowd=+{:.0}% night={:.1}s fast_fall={:.1}s momentum=+{:.0}% ricochets={} horizon[calls={} home={}] elite[kills={} richer={} boss_richer={}] drone_scale={:.2} yoyo_swing=x{:.2} yoyo_throws={}",
             tel.max_crowd_bonus * 100.0,
             tel.night_secs,
             tel.fast_fall_secs,
@@ -1518,11 +1716,22 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             tel.horizon_calls,
             tel.horizon_arrivals,
             tel.elite_kills,
-            tel.elite_bonus_drops,
+            tel.elite_richer,
+            tel.boss_richer,
             tome_probe.drone_scale,
             tome_probe.yoyo_ratio,
             items_tel.yoyo_throws
         );
+        if run.static_secs_total > 0.0 || !tel.microwave.is_empty() {
+            println!(
+                "  TOMES static[{:.0}s ghost_silver={} ghost_hits={} tome_pays=+{}] microwave{:?}",
+                run.static_secs_total,
+                run.static_silver_found,
+                tel.ghost_hits,
+                static_pay(static_mult) - static_pay(1.0),
+                tel.microwave
+            );
+        }
         let has = |t: T| tome_probe.tomes.contains(&t) && tome_probe.rank > 0;
         // what one line is worth at the probe's rank
         let at = |t: T, i: usize| t.def().effects[i].at(tome_probe.rank);
@@ -1550,6 +1759,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         }
         if has(T::Horizon) {
             need(tel.horizon_calls > 0 && tel.horizon_arrivals > 0, "Tome of the Horizon never called XP home".into());
+            if std::env::args().any(|a| a == "--coop2") {
+                need(tel.withdrawn == Some(true), format!("Tome of the Horizon: a downed caller's gem was not withdrawn ({:?})", tel.withdrawn));
+            }
         }
         if has(T::Orbit) {
             let orbit = 1.0 + at(T::Orbit, 0);
@@ -1562,9 +1774,31 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         if has(T::Elite) {
             need(near(run.elite_loot, 1.0 + at(T::Elite, 0)), format!("Tome of the Elite: party elite loot x{:.2}", run.elite_loot));
             need(
-                tel.elite_kills > 0 && tel.elite_bonus_drops == tel.elite_kills,
-                format!("Tome of the Elite: {} of {} elite kills dropped richer", tel.elite_bonus_drops, tel.elite_kills),
+                tel.elite_kills > 0 && tel.elite_richer == tel.elite_kills,
+                format!("Tome of the Elite: {} of {} elite kills dropped richer", tel.elite_richer, tel.elite_kills),
             );
+            need(tel.boss_richer == 0, format!("Tome of the Elite made {} boss/miniboss kills richer", tel.boss_richer));
+        }
+        // The Static, when the run reached it (`--staticnow`): its ghosts' coins were found
+        // and the banker's tome pays on them and on the overtime, once, unrounded per coin
+        if has(T::Static) && run.static_secs_total > 5.0 {
+            let mult = 1.0 + at(T::Static, 0);
+            let want = (run.static_secs_total * SILVER_PER_STATIC_SEC * mult) as u64 - (run.static_secs_total * SILVER_PER_STATIC_SEC) as u64
+                + (run.static_silver_found as f32 * (mult - 1.0)).round() as u64;
+            need(run.static_silver_found > 0, "Tome of Static: no ghost Silver was found in The Static".into());
+            need(
+                static_pay(static_mult) - static_pay(1.0) == want,
+                format!("Tome of Static paid +{} at banking, want +{want}", static_pay(static_mult) - static_pay(1.0)),
+            );
+        }
+        // Tome of Duplication at the Microwave: the free use first (the stage's own left), then
+        // the stage's own, each a duplicate
+        if has(T::Duplication) {
+            let ok = match tel.microwave.as_slice() {
+                [(1, false, a), (0, false, b), (0, true, c)] => b > a && c > b,
+                _ => false,
+            };
+            need(ok, format!("Tome of Duplication at the Microwave went {:?}", tel.microwave));
         }
         for (pid, ps, _) in &item_sheets {
             let who = format!("player {pid}");

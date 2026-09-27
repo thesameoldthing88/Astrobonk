@@ -163,9 +163,15 @@ pub const RICOCHET_HOP_SECS: f32 = 0.3;
 /// horizon is a curved lip ~40 m out"). After `1 / HorizonCollect` s on the ground it flies
 /// home along the surface at HORIZON_FLY_SPEED, lifting up to HORIZON_FLY_LIFT m so a gem
 /// crossing the planet reads as a streak rather than a crawl through the dirt.
+/// The flight sets off at HORIZON_FLY_START m/s, gains HORIZON_FLY_ACCEL m/s every second
+/// up to HORIZON_FLY_SPEED, and within HORIZON_HANDOFF_ARC m of its caller the ordinary
+/// magnet flight takes it in (host and client share these, so both draw one flight).
 pub const HORIZON_ARC: f32 = 40.0;
+pub const HORIZON_FLY_START: f32 = 8.0;
+pub const HORIZON_FLY_ACCEL: f32 = 40.0;
 pub const HORIZON_FLY_SPEED: f32 = 60.0;
 pub const HORIZON_FLY_LIFT: f32 = 3.0;
+pub const HORIZON_HANDOFF_ARC: f32 = 2.5;
 /// The astronaut's flashlight. Tome of Nightfall multiplies the intensity by its Flashlight
 /// stat and the reach by half as much again (a 2× beam throws 1.5× as far).
 pub const FLASHLIGHT_INTENSITY: f32 = 6_000_000.0;
