@@ -540,8 +540,15 @@ fn weapon_probe_watch(
 }
 
 /// The summary's verdict on `--weapons`: each carried weapon did its own §6 thing.
-fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
+fn weapon_probe_verdict(world: &mut World, peers: usize) -> bool {
     use crate::content::weapons::WeaponKind as W;
+    let loadouts: Vec<String> = world
+        .query::<(&crate::player::PlayerId, &PlayerState)>()
+        .iter(world)
+        .map(|(pid, ps)| format!("p{}[{}]", pid.0, ps.weapons.iter().map(|w| w.kind.def().name).collect::<Vec<_>>().join(", ")))
+        .collect();
+    println!("WEAPONS loadouts {}", loadouts.join(" "));
+    let world = &*world;
     let probe = world.resource::<WeaponProbe>();
     let tm = world.resource::<crate::arsenal::ArsenalTelemetry>();
     let planet_r = world.resource::<CurrentPlanet>().radius;

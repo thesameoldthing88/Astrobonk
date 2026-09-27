@@ -732,13 +732,14 @@ pub fn update_weapon_row(
 /// numbers they deal damage from, so "+12% from the descent" is something you can read.
 pub fn update_item_status(
     run: Res<RunState>,
-    q_ps: Query<(&PlayerState, &crate::items::ItemProcs), With<crate::player::LocalPlayer>>,
+    q_ps: Query<(&PlayerState, &crate::items::ItemProcs, &crate::arsenal::WeaponProcs), With<crate::player::LocalPlayer>>,
     mut q: Query<&mut Text, With<ItemStatusText>>,
 ) {
     use crate::config::*;
     use crate::content::items::ItemKind;
+    use crate::content::weapons::{Behavior, WeaponKind};
     let Ok(mut text) = q.single_mut() else { return };
-    let Ok((ps, procs)) = q_ps.single() else { return };
+    let Ok((ps, procs, wprocs)) = q_ps.single() else { return };
     let mut parts: Vec<String> = Vec::new();
     if procs.jam > 0.0 {
         parts.push("JAMMED".into());
@@ -778,6 +779,18 @@ pub fn update_item_status(
     }
     if ps.momentum_bonus() >= 0.005 {
         parts.push(format!("MOMENTUM +{:.0}%", ps.momentum_bonus() * 100.0));
+    }
+    // the weapons that run on a condition: the Yo-Yo's un-hit combo, FULL DISCHARGE's charge
+    if ps.weapons.iter().any(|w| matches!(w.kind.def().behavior, Behavior::Tether { .. })) {
+        let bonus = (crate::arsenal::combo_mult(wprocs.combo) - 1.0) * 100.0;
+        if wprocs.payout > 0.95 {
+            parts.push(format!("YO-YO x{:.0} GARROTE", wprocs.combo.floor()));
+        } else {
+            parts.push(format!("YO-YO x{:.0} +{bonus:.0}%", wprocs.combo.floor()));
+        }
+    }
+    if ps.weapons.iter().any(|w| w.kind == WeaponKind::FullDischarge) {
+        parts.push(format!("DISCHARGE {:.0}%", (wprocs.discharge / FULL_DISCHARGE_SECS * 100.0).min(100.0)));
     }
     let line = parts.join("  ");
     if text.0 != line {
