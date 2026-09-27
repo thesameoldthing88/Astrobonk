@@ -5,6 +5,7 @@
 use crate::content::planets::{FloraStyle, PlanetDef, PlanetKind};
 use crate::sphere::{self, Terrain};
 use bevy::asset::RenderAssetUsages;
+use bevy::light::NotShadowCaster;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use rand::rngs::StdRng;
@@ -478,6 +479,10 @@ pub fn spawn_stage(
             Mesh3d(star_mesh.clone()),
             MeshMaterial3d(star_mat.clone()),
             Transform::from_translation(dir * d).with_scale(Vec3::splat(rng.gen_range(0.8..2.6))),
+            // the sky casts no shadows: directional shadows clamp far casters onto the map, so
+            // a star (or the Earth, or the sun's own disc) that the turning sun passes behind
+            // would print its shadow across the planet
+            NotShadowCaster,
             StageScoped,
         ));
     }
@@ -496,6 +501,7 @@ pub fn spawn_stage(
             Mesh3d(meshes.add(Mesh::from(Sphere::new(90.0)))),
             MeshMaterial3d(earth_mat),
             Transform::from_translation(dir * 1500.0),
+            NotShadowCaster,
             StageScoped,
         ));
         commands.spawn((
@@ -537,6 +543,7 @@ pub fn spawn_stage(
         MeshMaterial3d(sun_mat),
         crate::daynight::SunDisc,
         Transform::from_translation(sun * 1600.0),
+        NotShadowCaster,
         StageScoped,
     ));
 
