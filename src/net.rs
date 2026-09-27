@@ -49,7 +49,9 @@ use std::time::{Duration, SystemTime};
 // PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
 // NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
 // wire is _8.
-pub const PROTOCOL_ID: u64 = 0xA570B0_8;
+// Bumped for P18 (co-op rules): the down/revive/drop-in fields in PlayerVitals, the squad
+// tally and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots on the hazard lane.
+pub const PROTOCOL_ID: u64 = 0xA570B0_9;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -172,15 +174,40 @@ pub const ITEMVIS_ANTIPODE_BOSS: u8 = 64;
 pub const ITEMVIS_INSURED: u8 = 128;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct PlayerVitals {
     pub hp: f32,
     pub max_hp: f32,
     pub level: u32,
+    /// Down: a Tumbling Beacon (§11) — or claimed by The Static (`VITALS_CLAIMED`).
     pub down: bool,
     /// "One more chance" revives spent (§13). A counter, so a joiner's HUD sees the token
     /// go and announces the revive even if a replication update in between was dropped.
     pub revives: u8,
+    // ---- appended (P18): the §11 co-op rules ----
+    /// The Static Meter while down, 0..=255 of full.
+    pub static_meter: u8,
+    /// A teammate's revive in progress, 0..=255 of done.
+    pub revive: u8,
+    /// VITALS_* bits.
+    pub status: u8,
+    /// Drop-in grace left, whole seconds (the autopilot's clock; the HUD shows it).
+    pub grace: u8,
+    /// The level the host seated this astronaut at as a drop-in (0 = there from the start).
+    /// The joiner levels its own sheet up to it (`coop::adopt_drop_in`).
+    pub drop_level: u8,
+}
+
+/// Claimed by The Static: out, and unseen, until the next teleporter.
+pub const VITALS_CLAIMED: u8 = 1;
+/// Hero's Adrenaline is running (the joiner's own prediction runs faster with it).
+pub const VITALS_ADRENALINE: u8 = 2;
+/// A teammate's cryo field is chilling this astronaut (slower, predicted too).
+pub const VITALS_CHILLED: u8 = 4;
+
+/// Quantize a 0..1 meter for the wire.
+fn meter_code(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Host -> client: "you are player N". The client cannot infer this: replicon 0.40 exposes
@@ -248,6 +275,23 @@ pub struct RunSnapMsg {
     /// joiner's HUD shows the ASSISTED tag and its "one more chance" token from these.
     pub assist: crate::save::AssistOptions,
     pub assisted: bool,
+    // ---- appended (P18) ----
+    /// STATIC CASCADE's link charge, 0..1 (every HUD shows it while two storm-callers link).
+    pub cascade_charge: f32,
+    /// The squad's §11 feats so far (`RunState::feats`): a joiner's lobby line names them
+    /// when the run ends. A handful of records at most.
+    pub feats: Vec<FeatRec>,
+}
+
+/// One `duos::SquadFeat` on the wire: explicit codes (`CoopFeat::code`, `hero_code`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct FeatRec {
+    pub feat: u8,
+    pub a: u8,
+    pub a_hero: u8,
+    pub b: u8,
+    pub b_hero: u8,
+    pub count: u16,
 }
 
 /// HOST -> CLIENT: the session is over. Sent just before the host drops the connection, so
@@ -477,6 +521,18 @@ pub enum HazardEvent {
     /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
     /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
     Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
+    // ---- appended (P18): co-op one-shots, see `coop::CoopFx` ----
+    /// `rescuer` hauled `downed` off its Tumbling Beacon at `dir`.
+    Revived { rescuer: u8, downed: u8, dir: [f32; 3] },
+    /// Friendly physics moved astronaut `target` by `vel` (m/s along the ground) and `pop`
+    /// (m/s up) — the joiner it names applies it to its own predicted body.
+    Shove { target: u8, vel: [f32; 3], pop: f32 },
+    /// STATIC CASCADE between `a` and `b`, round the great circle about `axis`.
+    Cascade { a: u8, b: u8, axis: [f32; 3] },
+    /// A named duo (`CoopFeat::code`) landed at `dir`; `first` for its pair this run.
+    Duo { feat: u8, a: u8, b: u8, dir: [f32; 3], first: bool },
+    /// Drop-in `owner` landed from orbit at `dir`, at `level`.
+    DropIn { owner: u8, level: u8, dir: [f32; 3] },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -825,6 +881,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
+                crate::coop::log_coop
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 send_local_input
                     // Must be the LAST touch of InputIntent before movement — anything
                     // that writes intent after this point would move us locally but
@@ -954,6 +1016,19 @@ fn push_run_snapshot(
             static_radio: run.static_radio,
             assist: run.assist,
             assisted: run.assisted,
+            cascade_charge: run.cascade_charge,
+            feats: run
+                .feats
+                .iter()
+                .map(|f| FeatRec {
+                    feat: f.feat.code(),
+                    a: f.a.0,
+                    a_hero: hero_code(f.a.1),
+                    b: f.b.0,
+                    b_hero: hero_code(f.b.1),
+                    count: f.count.min(u16::MAX as u32) as u16,
+                })
+                .collect(),
         },
     });
 }
@@ -1008,6 +1083,19 @@ fn apply_run_snapshot(
         run.static_radio = m.static_radio;
         run.assist = m.assist;
         run.assisted = m.assisted;
+        run.cascade_charge = m.cascade_charge;
+        run.feats = m
+            .feats
+            .iter()
+            .filter_map(|f| {
+                Some(crate::duos::SquadFeat {
+                    feat: crate::content::duos::CoopFeat::from_code(f.feat)?,
+                    a: (f.a, hero_from_code(f.a_hero)),
+                    b: (f.b, hero_from_code(f.b_hero)),
+                    count: f.count as u32,
+                })
+            })
+            .collect();
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
@@ -1113,6 +1201,13 @@ fn adopt_my_vitals(
         if pid.0 == my_id {
             ps.hp = v.hp;
             ps.dead = v.down;
+            // §11: the Beacon's meters, and the timers our own prediction runs with
+            ps.claimed = v.status & VITALS_CLAIMED != 0;
+            ps.static_meter = v.static_meter as f32 / 255.0;
+            ps.revive = v.revive as f32 / 255.0;
+            ps.adrenaline = if v.status & VITALS_ADRENALINE != 0 { crate::config::ADRENALINE_SECS } else { 0.0 };
+            ps.chill = if v.status & VITALS_CHILLED != 0 { crate::config::FRIENDLY_CHILL_SECS } else { 0.0 };
+            ps.grace = v.grace as f32;
             // The host spent our "one more chance": say so here, where the player is.
             if v.revives as u32 > ps.revives {
                 banners.write(crate::messages::BannerMsg("ONE MORE CHANCE!".into()));
@@ -1567,7 +1662,7 @@ fn seat_joining_players(
     save: Option<Res<crate::save::MetaSave>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    existing: Query<&PlayerId>,
+    existing: Query<(&PlayerId, &crate::run::PlayerState)>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     let mut respawn: Vec<(u8, Entity)> = Vec::new();
@@ -1579,7 +1674,9 @@ fn seat_joining_players(
     // despawns peers and respawns only player 0. Without this reconciliation a teammate
     // vanishes for good after the first planet — and on the client their rig disappears
     // with the replicated entity, which looks exactly like a netcode fault.
-    let alive: Vec<u8> = existing.iter().map(|pid| pid.0).collect();
+    let alive: Vec<u8> = existing.iter().map(|(pid, _)| pid.0).collect();
+    // §11 drop-in: a peer seated after the squad has started lands at half its average level
+    let squad_levels: Vec<u32> = existing.iter().map(|(_, ps)| ps.level).collect();
     // A peer's sheet is THEIR build: the host must not fold its own meta tomes into it,
     // even for the moment before their first PlayerBuildMsg lands (with a maxed Tome of
     // Health the placeholder would stand 120 HP taller than the peer really is).
@@ -1608,7 +1705,13 @@ fn seat_joining_players(
             slots.heroes.insert(id, hero);
         }
         let hero = slots.hero_for(id, run.character);
-        crate::player::spawn_player(
+        let drop_in = crate::coop::drop_in_level(&run, &squad_levels);
+        let sheet = drop_in.map(|level| {
+            let mut ps = crate::run::PlayerState::new(hero, &peer_save());
+            crate::coop::drop_in_sheet(&mut ps, level, &peer_save());
+            ps
+        });
+        let body = crate::player::spawn_player(
             &mut commands,
             &mut meshes,
             &mut materials,
@@ -1618,10 +1721,14 @@ fn seat_joining_players(
             id,
             hero,
             false, // remote: no LocalPlayer marker, no camera, driven by their input
-            None,
+            sheet,
         );
-        info!("NET seated client {client} as player {id} ({})", hero.def().name);
-        crate::playlog::line(format!("NET seated client {client} as player {id} ({})", hero.def().name));
+        if drop_in.is_some() {
+            commands.entity(body).insert(crate::coop::OrbitalDrop::default());
+        }
+        let how = drop_in.map(|l| format!(", dropping in at level {l}")).unwrap_or_default();
+        info!("NET seated client {client} as player {id} ({}){how}", hero.def().name);
+        crate::playlog::line(format!("NET seated client {client} as player {id} ({}){how}", hero.def().name));
         banners.write(crate::messages::BannerMsg(format!("PLAYER {} JOINED", id + 1)));
     }
 
@@ -1681,7 +1788,7 @@ fn unseat_leaving_players(
 /// HOST. Route each client's intent onto the astronaut it owns. This is the whole point
 /// of `InputIntent`: from here down, a remote player is indistinguishable from the local
 /// one, so movement/physics/combat need no networking awareness at all.
-fn apply_remote_input(
+pub(crate) fn apply_remote_input(
     slots: Res<PeerSlots>,
     mut incoming: MessageReader<FromClient<PlayerInputMsg>>,
     mut astronauts: Query<(&PlayerId, &mut InputIntent), Without<LocalPlayer>>,
@@ -1944,6 +2051,13 @@ fn push_player_vitals(
         v.level = ps.level;
         v.down = ps.dead;
         v.revives = ps.revives.min(u8::MAX as u32) as u8;
+        v.static_meter = meter_code(ps.static_meter);
+        v.revive = meter_code(ps.revive);
+        v.status = (if ps.claimed { VITALS_CLAIMED } else { 0 })
+            | (if ps.adrenaline > 0.0 { VITALS_ADRENALINE } else { 0 })
+            | (if ps.chill > 0.0 { VITALS_CHILLED } else { 0 });
+        v.grace = ps.grace.ceil().clamp(0.0, 255.0) as u8;
+        v.drop_level = ps.drop_level.min(u8::MAX as u32) as u8;
     }
 }
 
@@ -2012,6 +2126,7 @@ fn announce_run_over(
 /// CLIENT: the host's run ended. Back to the menu, still connected, to wait for its next
 /// one — which `client_follow_host_run` enters like the first, from a fresh snapshot.
 fn receive_run_over(
+    run: Res<crate::run::RunState>,
     mut msgs: MessageReader<RunOverMsg>,
     mut sync: ResMut<RunSync>,
     mut note: ResMut<crate::ui::menus::CoopNote>,
@@ -2028,7 +2143,9 @@ fn receive_run_over(
         RUN_OVER_ABANDONED => "the host abandoned the run.",
         _ => "the squad got BONKED.",
     };
-    note.0 = format!("RUN OVER: {why}\nWaiting for the host's next run...   JOIN CO-OP again leaves the session");
+    // §11: the squad's callouts, as the host's results screen names them
+    let squad: String = crate::director::squad_lines(&run.feats).iter().take(4).map(|l| format!("\n{l}")).collect();
+    note.0 = format!("RUN OVER: {why}{squad}\nWaiting for the host's next run...   JOIN CO-OP again leaves the session");
     // Forget the run outright: nothing of it may seed the next world.
     *sync = RunSync { min_gen: m.run_gen + 1, ..default() };
     // A panel or the pause menu may be up; the menu must not inherit a stopped clock.

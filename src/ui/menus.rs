@@ -985,6 +985,13 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                             }
                         });
                 }
+                // §11: what the squad pulled off together — the set-pieces, duos and rescues
+                if !data.squad.is_empty() {
+                    root.spawn(txt("SQUAD HIGHLIGHTS", FONT_MED, Color::srgb(0.6, 0.85, 1.0)));
+                    for line in &data.squad {
+                        root.spawn(txt(line.clone(), FONT_SMALL, Color::srgb(0.75, 0.9, 1.0)));
+                    }
+                }
                 // §13: an assisted run still earns its Silver, but says so — and ranks apart.
                 if let Some(summary) = &data.assisted {
                     root.spawn(txt(format!("ASSISTED RUN: {summary}"), FONT_MED, Color::srgb(0.55, 0.9, 1.0)));

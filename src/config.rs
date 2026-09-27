@@ -225,6 +225,12 @@ pub const STATIC_RATE_BASE: f32 = 4.2;
 pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
 /// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
 pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
+/// The rest of the §11 table: per-enemy HP 100 / 110 / 120 / 130 % ("the encirclement ring
+/// is fuller, not just faster") and boss HP 100 / 165 / 225 / 285 % — sub-linear, so a
+/// coordinated squad still gets its fast-kill hit. Indexed by LIVING astronauts: a downed
+/// one does not keep the horde at full party size (KNOWN_ISSUES L17).
+pub const PARTY_HP_SCALE: [f32; 4] = [1.0, 1.1, 1.2, 1.3];
+pub const PARTY_BOSS_HP_SCALE: [f32; 4] = [1.0, 1.65, 2.25, 2.85];
 
 // ── Silver payout (GDD §10) ──────────────────────────────────────────────────
 pub const SILVER_SURVIVAL_SECS_PER: f32 = 6.0; // 1 Silver per 6 s survived
@@ -578,3 +584,88 @@ pub const REVIVE_TOKEN_IFRAMES: f32 = 3.0;
 /// the second chance does not open inside the same ring that closed the first.
 pub const REVIVE_NOVA_RADIUS: f32 = 7.0;
 pub const REVIVE_NOVA_KNOCK: f32 = 42.0;
+
+// ── Co-op rules (GDD §11, P18): down & revive, drop-in, friendly physics, ultimates ──
+/// The Tumbling Beacon: a downed astronaut rolls down the terrain's fall line (the same
+/// noise field the mesh and collision use), pulled at gravity × sin(slope) × this…
+pub const BEACON_ROLL_GAIN: f32 = 1.4;
+/// …losing this share of its speed per second (it comes to rest in a crater's bowl)…
+pub const BEACON_ROLL_DRAG: f32 = 1.1;
+/// …never faster than this (m/s), and not at all on ground flatter than BEACON_MIN_GRADE.
+pub const BEACON_ROLL_MAX: f32 = 7.5;
+pub const BEACON_MIN_GRADE: f32 = 0.03;
+/// The rolling body is a log this thick: roll angle = distance / radius.
+pub const BEACON_BODY_RADIUS: f32 = 0.45;
+/// The distress flare: a column this many planet radii tall, so its top clears the horizon
+/// from most of the planet (the HUD's beacon markers cover the far side).
+pub const BEACON_FLARE_RADII: f32 = 1.1;
+/// A teammate standing within this arc of a Beacon for REVIVE_SECS brings it back up. Out
+/// of the ring, progress drains over REVIVE_DECAY_SECS instead of resetting — a dodge out
+/// and back in is not a restart.
+pub const REVIVE_RADIUS: f32 = 3.5;
+pub const REVIVE_SECS: f32 = 3.0;
+pub const REVIVE_DECAY_SECS: f32 = 6.0;
+/// Up again at this share of max HP, with a breath of invulnerability.
+pub const REVIVE_HP_FRAC: f32 = 0.5;
+pub const REVIVE_IFRAMES: f32 = 2.0;
+/// The Static Meter fills over this long while down (a half-lap sprint on the Moon plus the
+/// revive), faster while The Static is up; full, The Static claims the astronaut until the
+/// next teleporter, where it rejoins at REJOIN_HP_FRAC.
+pub const STATIC_METER_SECS: f32 = 40.0;
+pub const STATIC_METER_OVERTIME: f32 = 1.5;
+pub const REJOIN_HP_FRAC: f32 = 0.5;
+/// Hero's Adrenaline: the rescuer runs this much faster for this long.
+pub const ADRENALINE_SPEED: f32 = 0.2;
+pub const ADRENALINE_SECS: f32 = 5.0;
+/// Friendly fire is OFF for damage, ON for physics (§11). A knockback swing, a rocket's
+/// blast or a Slam boops a teammate caught in it — at most this fast (m/s along the ground,
+/// plus a hop), and at most once per FRIENDLY_SHOVE_CD for one astronaut.
+pub const FRIENDLY_SHOVE_MAX: f32 = 7.0;
+pub const FRIENDLY_SWING_SHOVE: f32 = 5.0;
+pub const FRIENDLY_BLAST_SHOVE: f32 = 6.5;
+pub const FRIENDLY_POP: f32 = 3.0;
+pub const FRIENDLY_SHOVE_CD: f32 = 0.8;
+/// A teammate's cryo field chills you too: this much slower while inside it.
+pub const FRIENDLY_CHILL_SLOW: f32 = 0.25;
+pub const FRIENDLY_CHILL_SECS: f32 = 0.6;
+/// A Tesla arc passing this close to a teammate jolts them into a hop.
+pub const FRIENDLY_JOLT_RADIUS: f32 = 1.6;
+pub const FRIENDLY_JOLT_POP: f32 = 4.5;
+/// Drop-in (§11 onboarding): a peer seated this far into a run is a drop-in. It lands at
+/// half the squad's average level, falling from orbit (DROPIN_HEIGHT) onto the planet, and
+/// fights on autopilot whenever its player is idle for DROPIN_GRACE_SECS.
+pub const DROPIN_MIN_ELAPSED: f32 = 20.0;
+pub const DROPIN_GRACE_SECS: f32 = 30.0;
+pub const DROPIN_HEIGHT: f32 = 40.0;
+/// The landing is a shove: the crowd within this arc is knocked back (m/s), no damage.
+pub const DROPIN_LAND_RADIUS: f32 = 6.0;
+pub const DROPIN_LAND_KNOCK: f32 = 22.0;
+/// Autopilot: kite away from the crowd within AUTOPILOT_SENSE, circle rather than stall, and
+/// head for the nearest teammate when further than AUTOPILOT_REGROUP (arc m) from them.
+pub const AUTOPILOT_SENSE: f32 = 14.0;
+pub const AUTOPILOT_REGROUP: f32 = 30.0;
+/// STATIC CASCADE (§11 flagship ultimate): two storm-callers (Tesla Coil / STORM CORE) at
+/// least this far apart round the sphere charge a link over CASCADE_CHARGE_SECS, then wrap
+/// the whole planet in a lightning belt along the great circle through both: every foe
+/// within CASCADE_BAND metres of it takes both owners' chain hit × CASCADE_DAMAGE_MULT
+/// (bosses × CASCADE_BOSS_MULT of that). One belt per CASCADE_COOLDOWN.
+pub const CASCADE_MIN_SEP_DEG: f32 = 120.0;
+pub const CASCADE_CHARGE_SECS: f32 = 3.0;
+pub const CASCADE_COOLDOWN: f32 = 20.0;
+pub const CASCADE_BAND: f32 = 5.0;
+pub const CASCADE_DAMAGE_MULT: f32 = 8.0;
+pub const CASCADE_BOSS_MULT: f32 = 0.35;
+/// How long the belt crackles on screen, and how far above the ground it rides.
+pub const CASCADE_VIS_SECS: f32 = 1.4;
+pub const CASCADE_VIS_LIFT: f32 = 1.4;
+/// Named duo combos (§11): a teammate's setup hit (chill / herd / rivet) counts for this
+/// long; the finisher's payoff: Deep Freeze Protocol shatters (a burst of the kill's max HP ×
+/// DUO_SHATTER_FRAC within DUO_SHATTER_RADIUS), Magnet Circus melts (laser × DUO_MELT_MULT),
+/// Rivet & Rescue pins (thorns / wrench × DUO_RIVET_MULT).
+pub const DUO_WINDOW: f32 = 2.0;
+pub const DUO_SHATTER_RADIUS: f32 = 3.5;
+pub const DUO_SHATTER_FRAC: f32 = 0.5;
+pub const DUO_MELT_MULT: f32 = 1.3;
+pub const DUO_RIVET_MULT: f32 = 1.5;
+/// At most one duo burst per this long crosses the wire (the tally always counts).
+pub const DUO_FX_MIN_INTERVAL: f32 = 0.25;

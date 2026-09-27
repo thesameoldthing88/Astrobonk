@@ -167,6 +167,13 @@ pub struct RunState {
     /// Character of the local/primary player — kept so menus and results screens
     /// have something to show without querying the world.
     pub character: AstronautKind,
+    /// §11 co-op set-pieces this run — STATIC CASCADE, the named duo combos, the rescues —
+    /// per pair: the results screen's squad callout. HOST state (the host counts them),
+    /// mirrored to joiners in `RunSnapMsg` so their lobby line can name them too.
+    pub feats: Vec<crate::duos::SquadFeat>,
+    /// STATIC CASCADE's link charge, 0..1, while two storm-callers stand a hemisphere apart
+    /// (HUD). Host-advanced, streamed.
+    pub cascade_charge: f32,
 }
 
 /// PER-PLAYER state, attached as a component to each astronaut entity. In co-op every
@@ -230,6 +237,27 @@ pub struct PlayerState {
     /// A counter rather than a flag so a joiner's HUD, which sees it through
     /// `PlayerVitals`, can tell a revive happened even if it missed the frame it did.
     pub revives: u32,
+    // ---- §11 co-op (P18): down & revive, drop-in, friendly physics. `dead` above is the
+    // DOWN state — a Tumbling Beacon — and every "out of action" check already reads it.
+    // HOST-owned like `hp`; a joiner adopts its own from `net::PlayerVitals`. ----
+    /// The Static Meter while down, 0..1: full, The Static claims this astronaut.
+    pub static_meter: f32,
+    /// A teammate's revive in progress, 0..1 (REVIVE_SECS in the Beacon's ring).
+    pub revive: f32,
+    /// Claimed by The Static: out (and unseen) until the next teleporter, which brings it
+    /// back at REJOIN_HP_FRAC (`rejoin`).
+    pub claimed: bool,
+    /// Hero's Adrenaline left (s): the rescuer runs ADRENALINE_SPEED faster.
+    pub adrenaline: f32,
+    /// A teammate's cryo field is chilling us (s left) — friendly fire is on for physics.
+    pub chill: f32,
+    /// Drop-in grace left (s): while it lasts, an idle player's astronaut fights on autopilot.
+    pub grace: f32,
+    /// The level this astronaut dropped in at (half the squad's average), 0 if it was there
+    /// from the start. Set by the host on the seat; a joiner levels itself up to it.
+    pub drop_level: u32,
+    /// Teammates this astronaut hauled off their Beacon this run.
+    pub rescues: u32,
 }
 
 /// Every copy of one item a player holds. Grades are kept per copy because each copy was
@@ -294,6 +322,8 @@ impl RunState {
             assist: save.assist,
             assisted: save.assist.is_assisted(),
             character,
+            feats: Vec::new(),
+            cascade_charge: 0.0,
         }
     }
 
@@ -340,6 +370,14 @@ impl PlayerState {
             tether_used: false,
             ghost_weapon: None,
             revives: 0,
+            static_meter: 0.0,
+            revive: 0.0,
+            claimed: false,
+            adrenaline: 0.0,
+            chill: 0.0,
+            grace: 0.0,
+            drop_level: 0,
+            rescues: 0,
         };
         s.recompute_stats(save, 0);
         s.hp = s.stats.max_hp;
@@ -548,7 +586,53 @@ impl PlayerState {
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Speed) {
             m *= 1.5;
         }
+        // §11: Hero's Adrenaline for a rescuer; a teammate's cryo field slows us too
+        if self.adrenaline > 0.0 {
+            m *= 1.0 + config::ADRENALINE_SPEED;
+        }
+        if self.chill > 0.0 {
+            m *= 1.0 - config::FRIENDLY_CHILL_SLOW;
+        }
         m
+    }
+
+    /// 0 HP with no save left: down, a Tumbling Beacon (§11). Solo, that ends the run
+    /// (`director::downed_watch`); in co-op a teammate can bring it back up (`coop`).
+    pub fn go_down(&mut self) {
+        self.dead = true;
+        self.hp = 0.0;
+        self.static_meter = 0.0;
+        self.revive = 0.0;
+        self.claimed = false;
+        self.grace = 0.0;
+        self.chill = 0.0;
+        self.frenzy_timer = 0.0;
+    }
+
+    /// A teammate stood in the Beacon's ring long enough: back up at REVIVE_HP_FRAC.
+    pub fn revive_up(&mut self) {
+        self.dead = false;
+        self.claimed = false;
+        self.static_meter = 0.0;
+        self.revive = 0.0;
+        self.hp = (self.stats.max_hp * config::REVIVE_HP_FRAC).max(1.0);
+        self.iframes = self.iframes.max(config::REVIVE_IFRAMES);
+    }
+
+    /// Through a teleporter: a downed or claimed astronaut rejoins the squad on the next
+    /// world at REJOIN_HP_FRAC (§11 "claimed until the next teleporter, rejoin at 50%").
+    /// Nothing happens to one still standing. True when it brought someone back.
+    pub fn rejoin(&mut self) -> bool {
+        if !self.dead {
+            return false;
+        }
+        self.dead = false;
+        self.claimed = false;
+        self.static_meter = 0.0;
+        self.revive = 0.0;
+        self.hp = (self.stats.max_hp * config::REJOIN_HP_FRAC).max(1.0);
+        self.iframes = self.iframes.max(config::REVIVE_IFRAMES);
+        true
     }
 
     pub fn pickup_range(&self) -> f32 {

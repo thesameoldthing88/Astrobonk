@@ -1,6 +1,7 @@
 //! Cross-module messages (Bevy 0.18 Message API).
 
 use crate::content::enemies::EnemyKind;
+use crate::content::weapons::WeaponKind;
 use bevy::prelude::*;
 
 /// Damage dealt to an enemy-side entity (enemies, bosses, pots). `amount` is final.
@@ -14,6 +15,20 @@ pub struct HitMsg {
     pub amount: f32,
     pub crit: bool,
     pub knock: Vec3,
+    /// What dealt it: a weapon (its family drives the §11 duo combos, `duos::DuoLedger`),
+    /// a thorns reflection, or anything else (items, techs, the comet, set-pieces).
+    pub by: HitBy,
+}
+
+/// Attribution for a `HitMsg`, beyond the astronaut in `source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HitBy {
+    Weapon(WeaponKind),
+    /// Thorns reflecting an enemy's hit back at it (`combat::apply_player_hits`).
+    Thorns,
+    /// Items, movement techs, the Comet Combo, co-op set-pieces, dev/test kills.
+    #[default]
+    Other,
 }
 
 /// Player took a hit (pre-mitigation).

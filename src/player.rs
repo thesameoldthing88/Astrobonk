@@ -220,7 +220,7 @@ pub fn spawn_player(
     // Carried progression, when this astronaut already existed (a stage change). `None`
     // starts a fresh sheet. Without this, every player's build is wiped on teleport.
     carried: Option<PlayerState>,
-) {
+) -> Entity {
     let def = character.def();
     // fan players out around the drop point so they don't spawn inside each other
     let dir = if id == 0 {
@@ -268,7 +268,7 @@ pub fn spawn_player(
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
-                crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false, revives: 0 },
+                crate::net::PlayerVitals { level: 1, ..Default::default() },
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 crate::net::NetItemVis::default(),
@@ -281,6 +281,7 @@ pub fn spawn_player(
         .insert_if(LocalPlayer, || is_local)
         .id();
     build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor);
+    root
 }
 
 /// Which hero's suit an astronaut's rig was built in. Compared against the sheet by
@@ -610,6 +611,11 @@ pub fn player_input(
     mut q: Query<(&mut Player, &mut PlayerState, &Transform, &InputIntent, &mut crate::techs::MoveTech)>,
 ) {
     for (mut p, mut run, ptf, intent, mut tech) in &mut q {
+    // A downed astronaut is a Tumbling Beacon: no input moves it, only the ground
+    // (`coop::tumble`) — and nobody revives themselves (§11).
+    if run.dead {
+        continue;
+    }
     let dt = time.delta_secs();
     let wish = intent.wish;
 
@@ -786,6 +792,11 @@ pub fn player_physics(
             procs.hover_left = ANTIGRAV_HOVER_SECS;
             riding = true;
         }
+    }
+
+    // Down: the Tumbling Beacon rolls down the fall line instead of being driven (§11).
+    if run.dead {
+        crate::coop::tumble(&mut p, &planet, run.claimed, dt);
     }
 
     if !riding {
@@ -1095,11 +1106,16 @@ pub fn camera_rig(
     planet: Res<CurrentPlanet>,
     phase: Res<RunPhase>,
     save: Res<crate::save::MetaSave>,
-    q_player: Query<(Entity, &Player, &Transform), (With<LocalPlayer>, Without<PlayerRig>)>,
+    q_player: Query<(Entity, &Player, &Transform, &PlayerState), (With<LocalPlayer>, Without<PlayerRig>)>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
     mut q_proj: Query<&mut Projection, With<PlayerRig>>,
+    // teammates, for a claimed astronaut's camera to follow (below)
+    squad: Query<
+        (&Transform, Option<&PlayerState>, Option<&crate::net::PlayerVitals>),
+        (Or<(With<Player>, With<crate::remote::RemoteAstronaut>)>, Without<LocalPlayer>, Without<PlayerRig>),
+    >,
 ) {
-    let Ok((pe, p, ptf)) = q_player.single() else { return };
+    let Ok((pe, p, ptf, ps)) = q_player.single() else { return };
     let Ok(mut cam) = q_cam.single_mut() else { return };
     let dt = time.delta_secs();
 
@@ -1118,7 +1134,21 @@ pub fn camera_rig(
     // Tether's rewind, P06's blink, a joiner snapped by the host) it GLIDES there over
     // CAM_TELEPORT_GLIDE_SECS — re-aiming at the new spot in one frame would whip the view
     // round (camera law: never snap). Walking can't trip it: the threshold rides on speed.
-    let body = ptf.translation;
+    // Claimed by The Static (§11), our body is gone until the next teleporter: the camera
+    // follows the nearest teammate still standing instead. The switch reads as a teleport
+    // of the followed body, so it GLIDES there (camera law: never snap), and back again.
+    let spectating = ps.claimed.then(|| {
+        squad
+            .iter()
+            .filter(|(_, sps, v)| match (sps, v) {
+                (Some(sps), _) => !sps.dead,
+                (None, Some(v)) => !v.down,
+                _ => false,
+            })
+            .map(|(tf, ..)| tf.translation)
+            .min_by(|a, b| a.distance_squared(ptf.translation).total_cmp(&b.distance_squared(ptf.translation)))
+    });
+    let body = spectating.flatten().unwrap_or(ptf.translation);
     match rig.last_body {
         Some((e, last)) if e == pe => {
             let jump = sphere::arc_dist(last.normalize_or_zero(), body.normalize_or_zero(), planet.radius);

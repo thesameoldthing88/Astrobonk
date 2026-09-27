@@ -136,6 +136,7 @@ fn advance(
                         amount: 300.0 + peak as f32 * 18.0,
                         crit: true,
                         knock: kdir * 12.0 * ps.stats.knockback,
+                        by: HitBy::Other,
                     });
                 }
             }

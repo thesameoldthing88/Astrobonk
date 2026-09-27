@@ -38,6 +38,9 @@ pub struct ResultsData {
     /// The run used §13 assists: what was on when it ended. Shown on results, and the daily
     /// score went to the separate assisted board.
     pub assisted: Option<String>,
+    /// §11 co-op callouts: STATIC CASCADE, the named duo combos and the rescues, one line
+    /// per pair (`duos::SquadFeat::line`).
+    pub squad: Vec<String>,
 }
 
 /// HOST/SOLO: keep the run's assist options current with this machine's settings, so a
@@ -64,7 +67,7 @@ pub fn run_clock(
     mut materials: ResMut<Assets<StandardMaterial>>,
     enemy_assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    q_player: Query<&Player>,
+    q_player: Query<(&Player, &PlayerState)>,
     mut telemetry: ResMut<crate::items::ItemTelemetry>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -86,8 +89,9 @@ pub fn run_clock(
 
     // Spawn anchor: the party CENTROID, so a boss doesn't erupt in one player's lap and
     // half a planet away from the other. Only the spawn calls below need it, so the clock
-    // above keeps running even with nobody alive.
-    let dirs: Vec<Vec3> = q_player.iter().map(|p| p.dir).collect();
+    // above keeps running even with nobody alive. The squad STANDING: a Beacon or a body
+    // The Static claimed doesn't pull a boss (or the teleporter) toward it (L17).
+    let dirs: Vec<Vec3> = q_player.iter().filter(|(_, ps)| !ps.dead).map(|(p, _)| p.dir).collect();
     let anchor = dirs
         .iter()
         .copied()
@@ -95,7 +99,7 @@ pub fn run_clock(
         .try_normalize()
         .or_else(|| dirs.first().copied());
 
-    let scaling = Scaling::for_run(&run, dirs.len());
+    let scaling = Scaling::for_run(&run, dirs.len().max(1));
 
     // The marks belong to the clock, and the clock stops when The Static rises.
     if !run.static_active {
@@ -196,6 +200,7 @@ pub fn stage_transition(
     q_ps: Query<(&PlayerState, &crate::player::PlayerId, Has<crate::player::LocalPlayer>)>,
     scoped: Query<Entity, With<StageScoped>>,
     mut banners: MessageWriter<BannerMsg>,
+    mut telemetry: ResMut<crate::coop::CoopTelemetry>,
 ) {
     let Some(target) = pending.0 else { return };
     pending.0 = None;
@@ -223,6 +228,15 @@ pub fn stage_transition(
         .map(|(ps, id, local)| (id.0, ps.clone(), local))
         .collect();
     carried.sort_by_key(|(id, _, _)| *id);
+    // §11: whoever the squad left on a Beacon — or The Static claimed — comes through the
+    // teleporter with it and rejoins at REJOIN_HP_FRAC (M15: they used to stay dead for the
+    // rest of the run).
+    for (id, ps, _) in carried.iter_mut() {
+        if ps.rejoin() {
+            telemetry.rejoins += 1;
+            info!("COOP player {id} rejoins on the next world");
+        }
+    }
 
     // tear down the old stage
     for e in &scoped {
@@ -407,10 +421,20 @@ pub fn bank_results(
             let now = run.assist.summary();
             if now.is_empty() { "assists used earlier in the run".to_string() } else { now }
         }),
+        squad: squad_lines(&run.feats),
     });
 
     *phase = RunPhase::Playing; // reset for next run
     run.result = None;
+}
+
+/// The results screen's squad callout (§11: "named duo combos surfaced on the results
+/// screen"): the set-pieces first — STATIC CASCADE, then the duos — then the rescues, each
+/// ordered by how often the pair landed it.
+pub fn squad_lines(feats: &[crate::duos::SquadFeat]) -> Vec<String> {
+    let mut v: Vec<&crate::duos::SquadFeat> = feats.iter().collect();
+    v.sort_by_key(|f| (f.feat.code(), std::cmp::Reverse(f.count)));
+    v.into_iter().map(|f| f.line()).collect()
 }
 
 /// The §10 Silver payout, itemised.
@@ -514,7 +538,7 @@ pub fn dev_miniboss_now(
         }
         *alive_for += time.delta_secs();
         if *alive_for > 6.0 {
-            hits.write(HitMsg { source: None, target: e, amount: enemy.hp + 1.0, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: None, target: e, amount: enemy.hp + 1.0, crit: false, knock: Vec3::ZERO, by: HitBy::Other });
         }
     }
 }

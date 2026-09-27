@@ -701,6 +701,7 @@ pub fn orbit_chunks(
                 amount: c.damage * cm * elite,
                 crit,
                 knock: offset.normalize_or_zero() * 6.0,
+                by: HitBy::Other,
             });
             c.hit.push(te);
             telemetry.yoyo_hits += 1;
@@ -798,7 +799,7 @@ pub fn comet_tail(
                 if en.speed <= 0.0 || tpos.distance(c) > r + en.scale * 0.5 || !struck.insert(te) {
                     continue;
                 }
-                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO });
+                hits.write(HitMsg { source: Some(e), target: te, amount: burst, crit: false, knock: Vec3::ZERO, by: HitBy::Other });
                 telemetry.trail_hits += 1;
             }
         }
@@ -846,7 +847,7 @@ pub fn trail_patches(
             if en.speed <= 0.0 || tpos.distance(pos) > COMET_TAIL_RADIUS + en.scale * 0.5 {
                 continue;
             }
-            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO });
+            hits.write(HitMsg { source: Some(p.owner), target: te, amount, crit: false, knock: Vec3::ZERO, by: HitBy::Other });
             telemetry.trail_hits += 1;
         }
     }

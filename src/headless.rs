@@ -187,14 +187,36 @@ fn bot_drive(
     if matches!(*phase, RunPhase::Dead) || tech_probe.holding {
         return;
     }
+    // §11: where the squad's Beacons lie (the bot answers them, as a player would)
+    let beacons: Vec<Vec3> = q.iter().filter(|(_, ps, ..)| ps.dead && !ps.claimed).map(|(_, _, tf, _)| tf.translation).collect();
 
     for (mut p, mut run, ptf, is_local) in &mut q {
+    // A Beacon rolls on its own (`coop::tumble`), and a drop-in in its grace is the
+    // autopilot's (`coop::autopilot_peers`, under `--dropin`).
+    if run.dead || run.grace > 0.0 || (!is_local && std::env::args().any(|a| a == "--dropin")) {
+        continue;
+    }
 
     // miniboss cache first (it is the thing under test when one exists); then
     // hurt -> kite away from the nearest threat; healthy -> chase gems; else wander
     let mut heading = None;
     let cache = if is_local { q_cache.iter().next().map(|t| t.translation) } else { None };
-    if let Some(cpos) = cache {
+    let beacon = beacons
+        .iter()
+        .copied()
+        .filter(|b| b.distance_squared(ptf.translation) > 1.0)
+        .min_by(|a, b| a.distance_squared(ptf.translation).total_cmp(&b.distance_squared(ptf.translation)));
+    if let Some(bpos) = beacon {
+        let v = bpos - ptf.translation;
+        let vt = (v - p.dir * v.dot(p.dir)).normalize_or_zero();
+        // close enough: stand in the ring (stopping) while the revive fills
+        if vt != Vec3::ZERO && v.length() > REVIVE_RADIUS * 0.5 {
+            heading = Some(vt);
+        } else {
+            p.vel_t = Vec3::ZERO;
+            continue;
+        }
+    } else if let Some(cpos) = cache {
         if cpos.distance(ptf.translation) < INTERACT_RANGE {
             keys.press(KeyCode::KeyE);
         }
@@ -660,7 +682,7 @@ fn tome_probe_drive(
     if t % 300 == 0 && probe.tomes.contains(&crate::content::tomes::TomeKind::Elite) {
         if let Some((e, mut en)) = crowd.iter_mut().find(|(_, en)| en.speed > 0.0 && en.hp > 0.0) {
             en.elite = true;
-            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO });
+            hits.write(crate::messages::HitMsg { source: None, target: e, amount: en.hp + 1.0, crit: false, knock: Vec3::ZERO, by: crate::messages::HitBy::Other });
         }
     }
     for (pid, mut p, mut procs, ps, _) in &mut q {
@@ -1739,9 +1761,17 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
+        .init_resource::<crate::fx::ScreenFlash>()
+        .init_resource::<crate::coop::CoopTelemetry>()
+        .init_resource::<crate::duos::DuoLedger>()
+        .init_resource::<crate::duos::CascadeState>()
+        .insert_resource(CoopProbe18::from_args())
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
+        .add_message::<crate::coop::FriendlyForce>()
+        .add_message::<crate::coop::CoopFxMsg>()
+        .add_message::<crate::duos::DuoMsg>()
         .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::techs::TechFxMsg>()
         .add_message::<crate::messages::HitMsg>()
@@ -1750,7 +1780,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_message::<crate::messages::NumberMsg>()
         .add_message::<crate::messages::BannerMsg>()
         .add_message::<crate::messages::SfxMsg>()
-        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, headless_enter))
+        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, crate::coop::setup_coop_assets, headless_enter))
         .add_systems(
             Update,
             (
@@ -1934,6 +1964,53 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             crate::director::dev_miniboss_now
                 .run_if(crate::playing)
                 .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
+        )
+        // §11 co-op rules (P18) — the host's half as main.rs runs it, plus the presentation
+        // that carries logic worth exercising (the Beacon's pose and dressing, the belt)
+        .add_systems(
+            Update,
+            (
+                crate::coop::friendly_physics.before(crate::player::player_physics),
+                crate::coop::beacon_rescue.after(crate::player::player_physics),
+                crate::coop::orbital_drops.after(crate::player::player_physics),
+                crate::duos::static_cascade,
+                crate::duos::duo_payoffs.after(crate::combat::apply_hits),
+                crate::coop::tumble_pose.after(crate::player::player_physics),
+                crate::coop::hide_claimed,
+                crate::coop::beacon_flares,
+                crate::coop::coop_fx_presentation,
+                crate::duos::animate_cascade_belts,
+            )
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (
+                coop_probe_fx,
+                revive_probe
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .run_if(|p: Res<CoopProbe18>| p.revive),
+                cascade_probe
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .run_if(|p: Res<CoopProbe18>| p.cascade),
+                duos_probe.run_if(|p: Res<CoopProbe18>| p.duos),
+                dropin_probe.after(bot_drive).run_if(|p: Res<CoopProbe18>| p.dropin),
+                party_probe.run_if(|p: Res<CoopProbe18>| p.coop4),
+            )
+                .run_if(crate::playing),
+        )
+        // `--dropin`: the drop-in is driven through its intent, as a joiner's body is on a
+        // host — the host's autopilot writes that intent while its player is idle
+        .add_systems(
+            Update,
+            (crate::coop::autopilot_peers, crate::player::player_input)
+                .chain()
+                .after(bot_drive)
+                .before(crate::player::player_physics)
+                .run_if(crate::playing)
+                .run_if(|p: Res<CoopProbe18>| p.dropin),
         );
 
     // enter InRun immediately
@@ -2415,6 +2492,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: boss never spawned in fast-boss mode");
         ok = false;
     }
+    if !coop_probe_report(world) {
+        ok = false;
+    }
     if ok {
         println!("SMOKE OK");
     } else {
@@ -2441,6 +2521,12 @@ fn headless_enter(
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
+    // `--coop4`: the full §11 squad — three peers, the ids a 4-player lobby seats
+    if std::env::args().any(|a| a == "--coop4") {
+        for id in 1..crate::net::MAX_PLAYERS as u8 {
+            crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, id, run_state.character, false, None);
+        }
+    }
     crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
@@ -2465,4 +2551,754 @@ fn silver_self_check() -> Result<(), String> {
         return Err(format!("a death should bank everything but the tier bonus, got {}", dead.total));
     }
     Ok(())
+}
+
+// ─── §11 co-op rules (P18) ────────────────────────────────────────────────────
+
+/// The §11 probes (P18), each staged on the real paths and asserted:
+///   * `--revive`  (with `--coop2`/`--coop4`): the peer goes down on a slope and must ROLL
+///     downhill, fill the Static Meter at its rate, ignore shots and shrine rings (L18/L19),
+///     come back up after REVIVE_SECS in the host's ring at REVIVE_HP_FRAC with Hero's
+///     Adrenaline for the host; then, left alone, be claimed by The Static (hidden, out of
+///     the party scale) and rejoin through the next teleporter at REJOIN_HP_FRAC (M15).
+///   * `--cascade` (with `--coop2`): two STORM CORE owners 60° apart never link; 150° apart
+///     they charge and wrap the planet — hits, belt, tally — then wait out the cooldown.
+///   * `--duos`    (with `--coop2`): each named duo through the real `apply_hits` (setup by
+///     the host, finisher by the peer; the melt multiplier, the shatter burst), and neither
+///     a solo "combo" nor one past the window counts.
+///   * `--dropin`: a peer seated mid-run lands from orbit at half the squad's level, and
+///     the autopilot fights for it through its grace — then stops.
+///   * `--coop4`:  a party of four: the §11 HP scale on every crowd spawn and the boss.
+#[derive(Resource, Default)]
+struct CoopProbe18 {
+    revive: bool,
+    cascade: bool,
+    duos: bool,
+    dropin: bool,
+    coop4: bool,
+    ticks: u32,
+    stage: u8,
+    t0: u32,
+    fails: Vec<String>,
+    notes: Vec<String>,
+    done: bool,
+    // --revive
+    down_dir: Vec3,
+    down_h: f32,
+    grade: f32,
+    shrine: Option<Entity>,
+    shot: Option<Entity>,
+    // --cascade
+    idle_charge: f32,
+    // --duos
+    staged: Vec<Entity>,
+    // --dropin
+    peer_peak: f32,
+    peer_path: f32,
+    peer_last: Vec3,
+    expect_level: u32,
+    // --coop4
+    crowd_checked: u32,
+    crowd_bad: u32,
+    boss_ratio: Option<(f32, f32)>,
+    /// CoopFx one-shots seen, by kind: revived, shove, cascade, duo, drop-in.
+    fx: [u32; 5],
+}
+
+impl CoopProbe18 {
+    fn from_args() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let has = |f: &str| args.iter().any(|a| a == f);
+        // exactly one peer: a squad of four has other bots who would answer the Beacon
+        let peer = has("--coop2") && !has("--coop4");
+        Self {
+            revive: peer && has("--revive"),
+            cascade: peer && has("--cascade"),
+            duos: peer && has("--duos"),
+            dropin: has("--dropin") && !has("--coop2") && !has("--coop4"),
+            coop4: has("--coop4"),
+            ..default()
+        }
+    }
+    fn any(&self) -> bool {
+        self.revive || self.cascade || self.duos || self.dropin || self.coop4
+    }
+    fn fail(&mut self, why: impl Into<String>) {
+        let why = why.into();
+        println!("  COOP PROBE FAIL: {why}");
+        self.fails.push(why);
+        self.done = true;
+    }
+    fn next(&mut self) {
+        self.stage += 1;
+        self.t0 = self.ticks;
+    }
+    fn secs_in_stage(&self) -> f32 {
+        (self.ticks - self.t0) as f32 * 0.033
+    }
+}
+
+fn coop_probe_fx(mut probe: ResMut<CoopProbe18>, mut fx: MessageReader<crate::coop::CoopFxMsg>) {
+    use crate::coop::CoopFx;
+    for m in fx.read() {
+        let k = match m.fx {
+            CoopFx::Revived { .. } => 0,
+            CoopFx::Shove { .. } => 1,
+            CoopFx::Cascade { .. } => 2,
+            CoopFx::Duo { .. } => 3,
+            CoopFx::DropIn { .. } => 4,
+        };
+        probe.fx[k] += 1;
+    }
+}
+
+/// A direction `arc` metres from `from`, heading `h` radians round its tangent frame.
+fn offset(from: Vec3, h: f32, arc: f32, radius: f32) -> Vec3 {
+    let (t, b) = sphere::tangent_frame(from);
+    sphere::offset_dir(from, (t * h.cos() + b * h.sin()).normalize(), arc, radius)
+}
+
+fn pin(p: &mut Player, dir: Vec3) {
+    p.dir = dir;
+    p.vel_t = Vec3::ZERO;
+    p.vel_r = 0.0;
+    p.height = 0.0;
+    p.grounded = true;
+}
+
+/// `--revive`: see `CoopProbe18`. Runs after the bot, before the physics.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn revive_probe(
+    mut commands: Commands,
+    mut probe: ResMut<CoopProbe18>,
+    mut run: ResMut<RunState>,
+    mut pending: ResMut<crate::director::PendingStage>,
+    planet: Res<CurrentPlanet>,
+    telemetry: Res<crate::coop::CoopTelemetry>,
+    mut q: Query<(Entity, &crate::player::PlayerId, &mut Player, &mut PlayerState, &Visibility)>,
+    mut shrines: Query<(Entity, &mut crate::interact::ChargeShrine, &Transform), Without<Player>>,
+    shots: Query<(), With<crate::enemies::EnemyProjectile>>,
+    mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
+) {
+    if probe.done {
+        return;
+    }
+    probe.ticks += 1;
+    let tick = probe.ticks;
+    if tick == 1 {
+        // a two-world chain, so the rejoin has a teleporter to go through
+        let next = if planet.kind == PlanetKind::Mars { PlanetKind::Moon } else { PlanetKind::Mars };
+        run.chain = vec![run.chain[0], next];
+        run.tier = 2;
+        return;
+    }
+    let find = |q: &Query<(Entity, &crate::player::PlayerId, &mut Player, &mut PlayerState, &Visibility)>, id: u8| {
+        q.iter().find(|(_, pid, ..)| pid.0 == id).map(|(e, _, p, ps, v)| (e, p.dir, ps.dead, ps.claimed, *v))
+    };
+    // (either can be missing for the frame a stage change re-embodies them)
+    let (Some((host_e, host_dir, ..)), Some((peer_e, peer_dir, peer_dead, peer_claimed, peer_vis))) = (find(&q, 0), find(&q, 1)) else {
+        return;
+    };
+    let r = planet.radius;
+    if probe.stage > 0 && probe.secs_in_stage() > 12.0 {
+        let s = probe.stage;
+        probe.fail(format!("revive probe stuck in stage {s}"));
+        return;
+    }
+    match probe.stage {
+        // on a slope near the host, the peer goes down
+        0 if tick >= 45 => {
+            let mut best = (host_dir, 0.0f32);
+            for k in 0..24 {
+                for arc in [10.0, 16.0, 22.0, 30.0] {
+                    let d = offset(host_dir, k as f32 * 0.2618, arc, r);
+                    let g = planet.terrain.slope(d, r).length();
+                    if g > best.1 {
+                        best = (d, g);
+                    }
+                }
+            }
+            probe.down_dir = best.0;
+            probe.grade = best.1;
+            probe.down_h = planet.surface(best.0);
+            if let Ok((_, _, mut p, _, _)) = q.get_mut(peer_e) {
+                pin(&mut p, best.0);
+            }
+            hits.write(crate::messages::PlayerHitMsg { victim: peer_e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+            probe.next();
+        }
+        // alone for two seconds: it rolls, the meter fills at its rate
+        1 => {
+            let far = offset(peer_dir, 0.0, 60.0, r);
+            if let Ok((_, _, mut p, _, _)) = q.get_mut(host_e) {
+                pin(&mut p, far);
+            }
+            if probe.secs_in_stage() < 2.0 {
+                return;
+            }
+            let Ok((_, _, _, ps, _)) = q.get(peer_e) else { return };
+            if !ps.dead {
+                probe.fail("the peer never went down (a save caught it?)");
+                return;
+            }
+            let rolled = sphere::arc_dist(probe.down_dir, peer_dir, r);
+            let dh = planet.surface(peer_dir) - probe.down_h;
+            let want_meter = probe.secs_in_stage() / STATIC_METER_SECS;
+            if (ps.static_meter - want_meter).abs() > 0.02 {
+                let m = ps.static_meter;
+                probe.fail(format!("Static Meter at {m:.3} after 2 s, want ~{want_meter:.3}"));
+                return;
+            }
+            if probe.grade > 0.08 && (rolled < 0.3 || dh > -0.02) {
+                let g = probe.grade;
+                probe.fail(format!("the Beacon did not roll downhill on a {g:.2} grade (moved {rolled:.2} m, dh {dh:+.2} m)"));
+                return;
+            }
+            let g = probe.grade;
+            probe.notes.push(format!("rolled {rolled:.1} m downhill (grade {g:.2}, dh {dh:+.2} m), meter {:.3}", ps.static_meter));
+            probe.next();
+        }
+        // the host stands in the ring: back up in REVIVE_SECS
+        2 => {
+            let beside = offset(peer_dir, 1.0, 1.5, r);
+            if let Ok((_, _, mut p, _, _)) = q.get_mut(host_e) {
+                pin(&mut p, beside);
+            }
+            if peer_dead {
+                return;
+            }
+            let secs = probe.secs_in_stage();
+            let Ok((_, _, _, ps, _)) = q.get(peer_e) else { return };
+            let frac = ps.hp / ps.stats.max_hp;
+            let Ok((_, _, _, host, _)) = q.get(host_e) else { return };
+            let mut calm = host.clone();
+            calm.adrenaline = 0.0;
+            let boost = host.move_speed_mult() / calm.move_speed_mult();
+            if !(REVIVE_SECS - 0.1..=REVIVE_SECS + 0.4).contains(&secs)
+                || (frac - REVIVE_HP_FRAC).abs() > 0.02
+                || host.adrenaline < ADRENALINE_SECS - 0.5
+                || (boost - (1.0 + ADRENALINE_SPEED)).abs() > 0.01
+                || host.rescues != 1
+                || telemetry.revives != 1
+            {
+                probe.fail(format!(
+                    "revive: {secs:.2}s, hp {frac:.2}, adrenaline {:.1}s x{boost:.2}, rescues {}, telemetry {}",
+                    host.adrenaline, host.rescues, telemetry.revives
+                ));
+                return;
+            }
+            probe.notes.push(format!("revived in {secs:.2} s at {:.0}% HP, rescuer x{boost:.2} for {:.1} s", frac * 100.0, host.adrenaline));
+            hits.write(crate::messages::PlayerHitMsg { victim: peer_e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+            probe.next();
+        }
+        // down again, nobody coming: shots pass over it, a ring ignores it (L18, L19)
+        3 => {
+            let far = offset(peer_dir, 0.0, 60.0, r);
+            if let Ok((_, _, mut p, _, _)) = q.get_mut(host_e) {
+                pin(&mut p, far);
+            }
+            if !peer_dead {
+                return; // the hit lands next frame
+            }
+            if probe.shrine.is_none() {
+                // the nearest unfinished ring, under the Beacon, half charged
+                let Some((se, _, _)) = shrines.iter().filter(|(_, s, _)| !s.done).min_by(|a, b| {
+                    let da = a.2.translation.normalize_or_zero().dot(peer_dir);
+                    let db = b.2.translation.normalize_or_zero().dot(peer_dir);
+                    db.total_cmp(&da)
+                }) else {
+                    probe.fail("no charge shrine to test L19 on");
+                    return;
+                };
+                probe.shrine = Some(se);
+                if let Ok((_, mut s, _)) = shrines.get_mut(se) {
+                    s.progress = 0.5;
+                }
+                // a shot fired straight through the Beacon
+                let from = offset(peer_dir, 2.0, 3.0, r);
+                let heading = (peer_dir - from * peer_dir.dot(from)).normalize_or_zero();
+                probe.shot = Some(
+                    commands
+                        .spawn((
+                            crate::enemies::EnemyProjectile { dir: from, heading, speed: 10.0, damage: 5.0, life: 2.0, hover: 1.0 },
+                            Transform::from_translation(planet.surface_point(from) + from),
+                        ))
+                        .id(),
+                );
+            }
+            // keep the Beacon inside the ring (it would roll out of it)
+            if let (Some(se), Ok((_, _, mut p, _, _))) = (probe.shrine, q.get_mut(peer_e)) {
+                if let Ok((_, _, stf)) = shrines.get(se) {
+                    pin(&mut p, stf.translation.normalize_or_zero());
+                }
+            }
+            if probe.secs_in_stage() < 1.0 {
+                return;
+            }
+            let prog = probe.shrine.and_then(|se| shrines.get(se).ok()).map(|(_, s, _)| s.progress).unwrap_or(1.0);
+            let shot_alive = probe.shot.is_some_and(|e| shots.get(e).is_ok());
+            if prog > 0.5 || !shot_alive {
+                probe.fail(format!("a Beacon still charged a ring (progress {prog:.3}) or ate a shot (shot alive: {shot_alive})"));
+                return;
+            }
+            probe.notes.push(format!("a downed body left the ring draining ({prog:.2}) and let the shot through"));
+            if let Ok((_, _, _, mut ps, _)) = q.get_mut(peer_e) {
+                ps.static_meter = 0.97; // the fill rate was checked in stage 1
+            }
+            probe.next();
+        }
+        // claimed: hidden, out of the party, until the teleporter
+        4 => {
+            let far = offset(peer_dir, 0.0, 60.0, r);
+            if let Ok((_, _, mut p, _, _)) = q.get_mut(host_e) {
+                pin(&mut p, far);
+            }
+            if !peer_claimed {
+                return;
+            }
+            if probe.secs_in_stage() < 0.5 {
+                return;
+            }
+            let party = crate::run::scaling::living_party(q.iter().map(|(_, _, _, ps, _)| &*ps));
+            let want_party = q.iter().count() - 1;
+            if peer_vis != Visibility::Hidden || party != want_party || telemetry.claims != 1 {
+                probe.fail(format!("claimed body visible={peer_vis:?}, living party {party} (want {want_party}), claims {}", telemetry.claims));
+                return;
+            }
+            probe.notes.push(format!("claimed by The Static: hidden, party scale counts {party}"));
+            pending.0 = Some(run.stage + 1);
+            probe.next();
+        }
+        // through the teleporter: back at REJOIN_HP_FRAC
+        5 => {
+            if run.stage != 1 {
+                return;
+            }
+            let Ok((_, _, _, ps, _)) = q.get(peer_e) else { return };
+            let frac = ps.hp / ps.stats.max_hp;
+            if ps.dead || ps.claimed || (frac - REJOIN_HP_FRAC).abs() > 0.02 || telemetry.rejoins != 1 {
+                probe.fail(format!("rejoin: dead={} claimed={} hp {frac:.2} rejoins {}", ps.dead, ps.claimed, telemetry.rejoins));
+                return;
+            }
+            probe.notes.push(format!("rejoined on {} at {:.0}% HP", run.planet().def().name, frac * 100.0));
+            probe.done = true;
+        }
+        _ => {}
+    }
+}
+
+/// `--cascade`: see `CoopProbe18`. Runs after the bot, before the physics.
+#[allow(clippy::too_many_arguments)]
+fn cascade_probe(
+    mut probe: ResMut<CoopProbe18>,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    telemetry: Res<crate::coop::CoopTelemetry>,
+    belts: Query<(), With<crate::duos::CascadeBelt>>,
+    mut q: Query<(&crate::player::PlayerId, &mut Player, &mut PlayerState)>,
+) {
+    use crate::content::weapons::WeaponKind;
+    if probe.done {
+        return;
+    }
+    probe.ticks += 1;
+    if probe.ticks < 30 {
+        return;
+    }
+    let r = planet.radius;
+    let Some(host_dir) = q.iter().find(|(pid, ..)| pid.0 == 0).map(|(_, p, _)| p.dir) else { return };
+    let apart = |deg: f32| offset(host_dir, 0.7, deg.to_radians() * r, r);
+    if probe.stage == 0 {
+        for (_, _, mut ps) in &mut q {
+            ps.weapons.push(crate::run::WeaponInstance { kind: WeaponKind::StormCore, level: 1, cd: 0.0 });
+        }
+        probe.next();
+        return;
+    }
+    let deg = if probe.stage == 1 { 60.0 } else { 150.0 };
+    let peer_at = apart(deg);
+    for (pid, mut p, mut ps) in &mut q {
+        // both stand through the probe: a downed owner breaks the link
+        ps.iframes = ps.iframes.max(0.5);
+        let at = if pid.0 == 0 { host_dir } else { peer_at };
+        pin(&mut p, at);
+    }
+    match probe.stage {
+        // too close to link
+        1 => {
+            probe.idle_charge = probe.idle_charge.max(run.cascade_charge);
+            if probe.secs_in_stage() < 3.0 * CASCADE_CHARGE_SECS / 2.0 {
+                return;
+            }
+            if probe.idle_charge > 0.0 || telemetry.cascades > 0 {
+                let c = probe.idle_charge;
+                probe.fail(format!("storm-callers 60 degrees apart charged a link ({c:.2})"));
+                return;
+            }
+            probe.next();
+        }
+        // opposite hemispheres: charge, fire
+        2 => {
+            if telemetry.cascades == 0 || probe.fx[2] == 0 {
+                if probe.secs_in_stage() > CASCADE_CHARGE_SECS + 1.5 {
+                    let why = format!("no STATIC CASCADE after {:.1} s linked (charge {:.2})", probe.secs_in_stage(), run.cascade_charge);
+                    probe.fail(why);
+                }
+                return;
+            }
+            let secs = probe.secs_in_stage();
+            if !(CASCADE_CHARGE_SECS - 0.1..=CASCADE_CHARGE_SECS + 0.4).contains(&secs) {
+                probe.fail(format!("the link took {secs:.2} s to fire, want {CASCADE_CHARGE_SECS} s"));
+                return;
+            }
+            probe.notes.push(format!("STATIC CASCADE after {secs:.2} s linked"));
+            probe.next();
+        }
+        // the belt stands, the foes in it were hit, the pair is tallied — and the cooldown holds
+        3 => {
+            if probe.secs_in_stage() < 0.2 {
+                return;
+            }
+            if probe.secs_in_stage() < 0.25 {
+                let n_belt = belts.iter().count();
+                let tallied = run.feats.iter().any(|f| f.feat == crate::content::duos::CoopFeat::StaticCascade && f.count == 1);
+                if telemetry.cascade_hits == 0 || n_belt == 0 || !tallied || probe.fx[2] != 1 {
+                    let why = format!(
+                        "cascade: {} hits, {n_belt} belt segments, tallied {tallied}, fx {}",
+                        telemetry.cascade_hits, probe.fx[2]
+                    );
+                    probe.fail(why);
+                    return;
+                }
+                probe.notes.push(format!("{} foes in the belt, {n_belt} belt segments", telemetry.cascade_hits));
+            }
+            if telemetry.cascades > 1 {
+                probe.fail("a second cascade inside the cooldown");
+                return;
+            }
+            if probe.secs_in_stage() > 4.0 {
+                probe.done = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `--duos`: see `CoopProbe18`. Hits are written straight into the real `apply_hits`.
+#[allow(clippy::too_many_arguments)]
+fn duos_probe(
+    mut probe: ResMut<CoopProbe18>,
+    run: Res<RunState>,
+    planet: Res<CurrentPlanet>,
+    telemetry: Res<crate::coop::CoopTelemetry>,
+    q: Query<(Entity, &crate::player::PlayerId, &Player)>,
+    mut crowd: Query<(Entity, &mut Enemy, &mut Transform), (Without<crate::enemies::Boss>, Without<crate::interact::Pot>, Without<Player>)>,
+    mut hits: MessageWriter<crate::messages::HitMsg>,
+) {
+    use crate::content::duos::CoopFeat;
+    use crate::content::weapons::WeaponKind as W;
+    use crate::messages::{HitBy, HitMsg};
+    if probe.done {
+        return;
+    }
+    probe.ticks += 1;
+    let (Some(host), Some(peer)) = (
+        q.iter().find(|(_, id, _)| id.0 == 0).map(|(e, _, p)| (e, p.dir)),
+        q.iter().find(|(_, id, _)| id.0 == 1).map(|(e, ..)| e),
+    ) else {
+        return;
+    };
+    let hit = |hits: &mut MessageWriter<HitMsg>, src: Entity, target: Entity, amount: f32, by: HitBy| {
+        hits.write(HitMsg { source: Some(src), target, amount, crit: false, knock: Vec3::ZERO, by });
+    };
+    let t = probe.secs_in_stage();
+    match probe.stage {
+        // six foes, parked at the far side where no weapon reaches them
+        0 if probe.ticks >= 60 => {
+            let far = -host.1;
+            let spots: Vec<Vec3> = (0..6).map(|i| offset(far, i as f32 * 1.0472, if i == 1 { 1.5 } else { 6.0 }, planet.radius)).collect();
+            let picked: Vec<Entity> = crowd.iter().filter(|(_, en, _)| en.speed > 0.0).map(|(e, ..)| e).take(6).collect();
+            if picked.len() < 6 {
+                return; // wait for a horde
+            }
+            for (k, e) in picked.iter().enumerate() {
+                if let Ok((_, mut en, mut tf)) = crowd.get_mut(*e) {
+                    // E0 is Deep Freeze's victim; E1 stands beside it to be shattered
+                    let d = if k == 1 { offset(spots[0], 0.0, 1.5, planet.radius) } else { spots[k] };
+                    en.dir = d;
+                    en.speed = 0.0;
+                    en.hp = if k == 1 { 1000.0 } else { 100.0 };
+                    en.max_hp = en.hp;
+                    en.elite = false;
+                    tf.translation = planet.surface_point(d);
+                }
+            }
+            probe.staged = picked;
+            probe.next();
+        }
+        // setups by the host
+        1 => {
+            let s = probe.staged.clone();
+            hit(&mut hits, host.0, s[0], 1.0, HitBy::Weapon(W::CryoVent)); // Deep Freeze
+            hit(&mut hits, host.0, s[2], 1.0, HitBy::Weapon(W::Boomerang)); // Magnet Circus
+            hit(&mut hits, host.0, s[3], 1.0, HitBy::Weapon(W::RivetGun)); // Rivet & Rescue
+            hit(&mut hits, host.0, s[4], 1.0, HitBy::Weapon(W::CryoVent)); // self-finish (no)
+            hit(&mut hits, host.0, s[5], 1.0, HitBy::Weapon(W::CryoVent)); // too late (no)
+            probe.next();
+        }
+        // the melt, measured
+        2 if t >= 0.1 => {
+            let s = probe.staged.clone();
+            hit(&mut hits, peer, s[2], 10.0, HitBy::Weapon(W::LaserPistol));
+            probe.next();
+        }
+        // the finishers
+        3 if t >= 0.1 => {
+            let s = probe.staged.clone();
+            let melted = crowd.get(s[2]).map(|(_, en, _)| en.hp).unwrap_or(0.0);
+            let want = 100.0 - 1.0 - 10.0 * DUO_MELT_MULT;
+            if (melted - want).abs() > 0.05 {
+                probe.fail(format!("Magnet Circus melt left {melted:.2} HP, want {want:.2}"));
+                return;
+            }
+            hit(&mut hits, peer, s[0], 1.0e4, HitBy::Weapon(W::DeathRay));
+            hit(&mut hits, peer, s[2], 1.0e4, HitBy::Weapon(W::GatlingLaser));
+            hit(&mut hits, peer, s[3], 1.0e4, HitBy::Thorns);
+            hit(&mut hits, host.0, s[4], 1.0e4, HitBy::Weapon(W::DeathRay));
+            probe.next();
+        }
+        // past the window
+        4 if t >= DUO_WINDOW + 0.4 => {
+            let s = probe.staged.clone();
+            hit(&mut hits, peer, s[5], 1.0e4, HitBy::Weapon(W::MiningLaser));
+            probe.next();
+        }
+        5 if t >= 0.3 => {
+            let shattered = crowd.get(probe.staged[1]).map(|(_, en, _)| 1000.0 - en.hp).unwrap_or(0.0);
+            let got = |f: CoopFeat| telemetry.feats[f.code() as usize];
+            let pair_ok = |f: CoopFeat| run.feats.iter().any(|x| x.feat == f && x.a.0 == 0 && x.b.0 == 1 && x.count == 1);
+            let want_shatter = 100.0 * DUO_SHATTER_FRAC;
+            if got(CoopFeat::DeepFreeze) != 1
+                || got(CoopFeat::MagnetCircus) != 1
+                || got(CoopFeat::RivetRescue) != 1
+                || !CoopFeat::DUOS.iter().all(|f| pair_ok(*f))
+                || (shattered - want_shatter).abs() > 0.5
+                || probe.fx[3] != 3
+            {
+                let why = format!(
+                    "duos: tally {:?}, squad feats {}, shatter took {shattered:.1} (want {want_shatter:.1}), fx {}",
+                    telemetry.feats,
+                    run.feats.len(),
+                    probe.fx[3]
+                );
+                probe.fail(why);
+                return;
+            }
+            probe.notes.push(format!(
+                "Deep Freeze (shatter {shattered:.0}), Magnet Circus (melt x{DUO_MELT_MULT}), Rivet & Rescue (thorns) each counted once for P1+P2; a solo pair and a late finisher did not"
+            ));
+            probe.done = true;
+        }
+        _ => {}
+    }
+}
+
+/// `--dropin`: see `CoopProbe18`. Seats the peer the way `net::seat_joining_players` does.
+#[allow(clippy::too_many_arguments)]
+fn dropin_probe(
+    mut commands: Commands,
+    mut probe: ResMut<CoopProbe18>,
+    mut run: ResMut<RunState>,
+    save: Res<MetaSave>,
+    planet: Res<CurrentPlanet>,
+    telemetry: Res<crate::coop::CoopTelemetry>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(&crate::player::PlayerId, &Player, &mut PlayerState, &crate::player::InputIntent)>,
+) {
+    if probe.done {
+        return;
+    }
+    probe.ticks += 1;
+    let tick = probe.ticks;
+    // the host earns a squad level worth dropping in to
+    if tick == 30 {
+        for (pid, _, mut ps, _) in &mut q {
+            if pid.0 == 0 {
+                while ps.level < 10 {
+                    let need = (ps.xp_needed - ps.xp).max(0.0);
+                    ps.xp += need;
+                    ps.gain_xp(0.0);
+                }
+            }
+        }
+        return;
+    }
+    if tick == 60 {
+        // mid-run: the seat is a drop-in only past DROPIN_MIN_ELAPSED
+        let at_start = crate::coop::drop_in_level(&run, &[10]);
+        run.total_elapsed = run.total_elapsed.max(DROPIN_MIN_ELAPSED + 40.0);
+        let levels: Vec<u32> = q.iter().map(|(_, _, ps, _)| ps.level).collect();
+        let Some(level) = crate::coop::drop_in_level(&run, &levels) else {
+            probe.fail("a seat 60 s into the run was not a drop-in");
+            return;
+        };
+        if at_start.is_some() && tick as f32 * 0.033 < DROPIN_MIN_ELAPSED {
+            probe.fail("a seat at the start of the run counted as a drop-in");
+            return;
+        }
+        probe.expect_level = level;
+        let mut ps = PlayerState::new(run.character, &save);
+        crate::coop::drop_in_sheet(&mut ps, level, &save);
+        let body = crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run, &save, 1, run.character, false, Some(ps));
+        commands.entity(body).insert(crate::coop::OrbitalDrop::default());
+        probe.next();
+        return;
+    }
+    if probe.stage == 0 {
+        return;
+    }
+    let Some((_, p, ps, intent)) = q.iter().find(|(pid, ..)| pid.0 == 1) else { return };
+    probe.peer_peak = probe.peer_peak.max(p.height);
+    let t = probe.secs_in_stage();
+    match probe.stage {
+        // falling from orbit, then the landing
+        1 => {
+            if telemetry.dropin_landings == 0 || probe.fx[4] == 0 {
+                if t > 6.0 {
+                    let why = format!("the drop-in never landed (peak {:.1} m)", probe.peer_peak);
+                    probe.fail(why);
+                }
+                return;
+            }
+            if probe.peer_peak < DROPIN_HEIGHT * 0.9 || ps.level != probe.expect_level || probe.expect_level < 5 || probe.fx[4] != 1 {
+                let why = format!(
+                    "drop-in: peak {:.1} m, level {} (want {} = half the squad's), fx {}",
+                    probe.peer_peak, ps.level, probe.expect_level, probe.fx[4]
+                );
+                probe.fail(why);
+                return;
+            }
+            probe.peer_last = p.dir;
+            probe.next();
+        }
+        // the grace: idle, the autopilot fights for it
+        2 => {
+            if !ps.dead {
+                probe.peer_path += sphere::arc_dist(probe.peer_last, p.dir, planet.radius);
+            }
+            probe.peer_last = p.dir;
+            if ps.grace > 0.0 {
+                return;
+            }
+            if probe.peer_path < 25.0 || telemetry.autopilot_secs < DROPIN_GRACE_SECS * 0.5 {
+                let why = format!(
+                    "autopilot moved the drop-in {:.1} m over {:.1} s of grace",
+                    probe.peer_path, telemetry.autopilot_secs
+                );
+                probe.fail(why);
+                return;
+            }
+            probe.next();
+        }
+        // grace over: an idle player's astronaut stands still again
+        3 => {
+            if t < 1.5 {
+                return;
+            }
+            if intent.wish != Vec3::ZERO || (!ps.dead && p.vel_t.length() > 1.0) {
+                probe.fail(format!("the autopilot kept driving after the grace (wish {:?}, speed {:.1})", intent.wish, p.vel_t.length()));
+                return;
+            }
+            let (lvl, path, secs, peak) = (ps.level, probe.peer_path, telemetry.autopilot_secs, probe.peer_peak);
+            probe.notes.push(format!("dropped from {peak:.0} m at LV {lvl} (half the squad's); autopilot ran {path:.0} m over {secs:.1} s, then let go"));
+            probe.done = true;
+        }
+        _ => {}
+    }
+}
+
+/// `--coop4`: every crowd spawn and the boss at the §11 party HP scale of the squad standing.
+#[allow(clippy::type_complexity)]
+fn party_probe(
+    mut probe: ResMut<CoopProbe18>,
+    run: Res<RunState>,
+    squad: Query<&PlayerState>,
+    fresh: Query<(&Enemy, Option<&crate::enemies::Boss>), (Added<Enemy>, Without<crate::interact::Pot>)>,
+) {
+    let living = crate::run::scaling::living_party(squad.iter());
+    let sc = crate::run::scaling::Scaling::for_run(&run, living);
+    for (en, boss) in &fresh {
+        if let Some(b) = boss {
+            if b.kind.def().is_stage_boss && probe.boss_ratio.is_none() {
+                probe.boss_ratio = Some((en.max_hp / b.kind.def().hp, sc.boss_hp));
+            }
+            continue;
+        }
+        if en.elite || en.kind == crate::content::enemies::EnemyKind::Ghost || run.static_active {
+            continue;
+        }
+        probe.crowd_checked += 1;
+        let ratio = en.max_hp / en.kind.def().hp;
+        if (ratio - sc.hp).abs() > sc.hp * 0.01 {
+            probe.crowd_bad += 1;
+        }
+    }
+}
+
+/// The summary lines and verdict of the §11 probes. False on any failure.
+fn coop_probe_report(world: &mut World) -> bool {
+    let tel = world.resource::<crate::coop::CoopTelemetry>();
+    println!(
+        "COOP downs={} revives={} claims={} rejoins={} roll={:.1}m shoves={} chills={} jolts={} dropins={} landed={} autopilot={:.1}s cascades={} cascade_hits={} feats={:?} shatter_hits={}",
+        tel.downs, tel.revives, tel.claims, tel.rejoins, tel.beacon_roll_m, tel.shoves, tel.chills, tel.jolts,
+        tel.dropins, tel.dropin_landings, tel.autopilot_secs, tel.cascades, tel.cascade_hits, tel.feats, tel.shatter_hits
+    );
+    let probe = world.resource::<CoopProbe18>();
+    if !probe.any() {
+        return true;
+    }
+    let mut ok = probe.fails.is_empty();
+    for n in &probe.notes {
+        println!("  {n}");
+    }
+    let staged = [
+        (probe.revive, "REVIVE"),
+        (probe.cascade, "CASCADE"),
+        (probe.duos, "DUOS"),
+        (probe.dropin, "DROPIN"),
+    ];
+    for (on, name) in staged {
+        if !on {
+            continue;
+        }
+        if !probe.done && probe.fails.is_empty() {
+            println!("FAIL: {name} probe never finished (stage {})", probe.stage);
+            ok = false;
+        } else if probe.fails.is_empty() {
+            println!("{name} OK");
+        } else {
+            println!("FAIL: {name}: {}", probe.fails.join("; "));
+        }
+    }
+    if probe.coop4 {
+        let run = world.resource::<RunState>();
+        let four = crate::run::scaling::Scaling::for_run(run, 4);
+        println!(
+            "PARTY of 4: crowd HP x{:.2} (checked {} spawns, {} off), boss {:?}, live cap {}",
+            crate::config::PARTY_HP_SCALE[3],
+            probe.crowd_checked,
+            probe.crowd_bad,
+            probe.boss_ratio,
+            four.live_cap
+        );
+        let boss_ok = probe.boss_ratio.is_none_or(|(got, want)| (got - want).abs() <= want * 0.01);
+        if probe.crowd_checked == 0 || probe.crowd_bad > 0 || !boss_ok || four.live_cap != (ENEMY_CAP as f32 * PARTY_SPAWN_SCALE[3]) as usize {
+            println!("FAIL: the party of four is not scaled per §11");
+            ok = false;
+        } else {
+            println!("PARTY4 OK");
+        }
+    }
+    ok
 }
