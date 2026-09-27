@@ -209,6 +209,12 @@ fn main() {
         )
         .add_systems(
             Update,
+            dev_evolve_now
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--evolvenow")),
+        )
+        .add_systems(
+            Update,
             dev_stage_now
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| std::env::args().any(|a| a == "--stagenow")),
@@ -936,6 +942,34 @@ fn dev_give_weapons(
         }
     }
     *done = true;
+}
+
+/// DEV `--evolvenow`: 6 s into the run, evolve the local astronaut's newest weapon that has
+/// an evolution, through the real `apply_upgrade` (a joiner's reaches the host in its build
+/// heartbeat) — to watch the §12 fanfare without playing a weapon to level 7.
+fn dev_evolve_now(
+    time: Res<Time>,
+    save: Res<save::MetaSave>,
+    global: Res<run::RunState>,
+    mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
+    mut waited: Local<f32>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *waited += time.delta_secs();
+    if *waited < 6.0 {
+        return;
+    }
+    let Ok(mut ps) = q.single_mut() else { return };
+    *done = true;
+    // the newest evolvable weapon (a `--give` one before the hero's own)
+    let Some(base) = ps.weapons.iter().rev().map(|w| w.kind).find(|w| w.def().evolves_to.is_some()) else { return };
+    if ps.apply_upgrade(&run::UpgradeOption::Evolve(base), &save, global.greed_stacks) {
+        // (not counted toward the Evolve quest: a dev key must not bank progress)
+        info!("DEV --evolvenow: {} evolved", base.def().name);
+    }
 }
 
 /// Close any leftover modal state when leaving a run.
