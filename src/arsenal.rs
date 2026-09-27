@@ -1123,9 +1123,11 @@ pub fn bell_bodies(
         };
         let since = (now - procs.last_toll).max(0.0);
         let swing = (since * 13.0).sin() * (-since * 2.6).exp() * 0.9;
-        tf.translation = ptf.translation + up * (2.2 + (now * 1.7).sin() * 0.08) + side * 0.75;
+        // small, and off the shoulder: the chase camera looks past it, not through it
+        let back = side.cross(up);
+        tf.translation = ptf.translation + up * (1.45 + (now * 1.7).sin() * 0.06) + side * 0.85 + back * 0.25;
         tf.rotation = sphere::frame_quat(up, b) * Quat::from_rotation_x(swing);
-        let s = if kind == WeaponKind::Angelus { 1.35 } else { 1.0 };
+        let s = if kind == WeaponKind::Angelus { 0.75 } else { 0.6 };
         tf.scale = Vec3::splat(s);
     }
     for (owner, kind) in want {
