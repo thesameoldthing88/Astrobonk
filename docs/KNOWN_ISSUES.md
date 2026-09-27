@@ -1443,6 +1443,13 @@ Evidence is CODE unless stated otherwise. Each item carries its own Status.
 - **Symptom:** On the joiner, completed rings keep their markers, there is never a teleporter marker, and chests the host opened keep theirs.
 - **Suggested fix:** Replicate ring completion and chest use (planned as out of scope for the playtest; see §8), and add the teleporter via docket item 4.
 
+#### L66. The UI font has no em dash (or other non-ASCII glyphs)
+
+- **Severity:** Low · **Area:** UI · **Evidence:** SCREENSHOT (windowed run, 2026-09-27) · **Status:** Open (owner: P24/P35)
+- **Where:** Any UI string with a character outside the bundled font's range, e.g. the `YOU — THE HORDE` stage banner.
+- **Symptom:** The em dash draws as a tofu box: "YOU □ THE HORDE". Other typographic characters (curly quotes, ellipsis, accented letters such as RAGÙ) are at risk the same way.
+- **Suggested fix:** Audit `src/ui/` and `src/content/` strings for non-ASCII characters; either ship a font with the glyphs (generated in code, per the zero-asset rule) or substitute ASCII (" - ", "...") at the text-building boundary.
+
 ### 4.7 Dev tooling and debt
 
 #### L56. The dev CLI is compiled into release and re-scans args every frame

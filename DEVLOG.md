@@ -1,5 +1,22 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P08 lands: seven new enemies and per-world spawn tables
+- **P08:** the batch-1 §9 bestiary, each with its own behaviour, silhouette and one emissive
+  accent: Rollo (great-circle roller that runs away downhill and bonks on walls), Trencher
+  (tunnels under a ridge, uppercuts grounded astronauts), Aegis Drone (slow-turning front shield,
+  10% through it, reads BLOCK), Sunskimmer (whining kamikaze diver, shootable at altitude via its
+  column hitbox), Beacon Tick (6 s tracker that pulls the horde), Mimic Chest (14% of chests,
+  rolled with the layout; eats the price, shockwaves, flees, refunds the payer on death), Longshot
+  Beamer Prime (leads its mark; hills block the railbolt). The director draws kinds from per-world
+  spawn tables; `enemies::spawn_enemy_at` is the one entry point for adds.
+- **Co-op:** kind codes 9-15, a new enemy-state lane for what a client cannot derive, five
+  hazard-lane events; `PROTOCOL_ID` 0xA570B0_B (after P07/P12's bumps).
+- **Reconciled on landing:** P07's night pace (`Sun::enemy_speed`) and Beacon tracking combine
+  in the movers; P12 stuns hold the Rollo, Trencher, Skimmer, Tick, Mimic and Aegis (a stunned
+  Skimmer mid-dive pops); P12's Bell-mark crit and the Aegis block share `apply_hits`.
+- **Verified:** smoke 6/6; `--bestiary all` solo and co-op; windowed `--dev --enemies all`.
+- **Found:** the UI font draws the em dash as a box ("YOU □ THE HORDE") — logged as L66.
+
 ## 2026-09-27 — P12 lands: the Tier-1 weapons play as §6 describes
 - **P12:** `arsenal.rs` gives the six newest weapons their own behaviours — lobbed Meatball Comet
   (RAGÙ RAIN splits x3), Static Cling's hug field (FULL DISCHARGE's periodic nova), the Ricochet
