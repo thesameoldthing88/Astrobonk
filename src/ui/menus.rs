@@ -694,7 +694,23 @@ pub fn refresh_tome_library(
 
 // ------------------------------------------------------------- char select
 
-pub fn spawn_char_select(mut commands: Commands, save: Res<MetaSave>, selected: Res<Selected>) {
+/// The "HOSTING: tell the other player to join <ip>" line, for the screens a host walks
+/// through after pressing HOST CO-OP. The note used to live only under the main menu's
+/// co-op buttons, which are torn down the same frame the note is written (M20), so a host
+/// never saw the address it had to read out.
+fn hosting_line(root: &mut ChildSpawnerCommands, role: &crate::net::NetRole, note: &CoopNote) {
+    if *role == crate::net::NetRole::Host && !note.0.is_empty() {
+        root.spawn((txt(note.0.clone(), FONT_SMALL, Color::srgb(0.5, 0.9, 1.0)), TextLayout::new_with_justify(Justify::Center)));
+    }
+}
+
+pub fn spawn_char_select(
+    mut commands: Commands,
+    save: Res<MetaSave>,
+    selected: Res<Selected>,
+    role: Res<crate::net::NetRole>,
+    note: Res<CoopNote>,
+) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
         .with_children(|overlay| {
@@ -704,6 +720,7 @@ pub fn spawn_char_select(mut commands: Commands, save: Res<MetaSave>, selected: 
                     FONT_BIG,
                     Color::WHITE,
                 ));
+                hosting_line(root, &role, &note);
                 // The roster scrolls under the mouse wheel when a large UI scale leaves it
                 // more than fits, while the title and BACK stay on screen. The list asks for
                 // the whole screen height and shrinks to what the title and BACK leave (a
@@ -835,12 +852,13 @@ pub fn char_select_input(
 
 // ------------------------------------------------------------- planet select
 
-pub fn spawn_planet_select(mut commands: Commands, save: Res<MetaSave>) {
+pub fn spawn_planet_select(mut commands: Commands, save: Res<MetaSave>, role: Res<crate::net::NetRole>, note: Res<CoopNote>) {
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
         .with_children(|overlay| {
             overlay.spawn(menu_column()).with_children(|root| {
                 root.spawn(txt("PICK A WORLD TO SAVE", FONT_BIG, Color::WHITE));
+                hosting_line(root, &role, &note);
                 root.spawn((Node { column_gap: Val::Px(16.0), ..default() },)).with_children(|row| {
                     for p in [PlanetKind::Moon, PlanetKind::Mars] {
                         let d = p.def();

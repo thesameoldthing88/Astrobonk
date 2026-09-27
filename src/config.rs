@@ -226,6 +226,10 @@ pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
 /// Seconds of the §3 spawn-mix arc a chained world starts ahead per step of depth, on top
 /// of joining the arc where its shorter countdown begins (`scaling::mix_secs`).
 pub const MIX_DEPTH_HEAD_START_SECS: f32 = 60.0;
+/// The HUD's horizon test (`hud::update_edge_markers`) treats the planet as a ball this
+/// many metres under its mean surface (or under the target's own ground, if lower): what
+/// the camera-to-target line passes through that ball for is over the horizon.
+pub const EDGE_MARKER_OCCLUDER_INSET: f32 = 0.5;
 /// The overflow valve (`enemies::director_spawn`, GDD §9). A crowd enemy this many arc
 /// metres from every astronaut is over any horizon — the spawn band is 42–58 m, and on the
 /// Dark Moon, the smallest world, nothing is more than 330 m away — so dissolving it into The Static costs

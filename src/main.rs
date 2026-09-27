@@ -712,7 +712,12 @@ fn enter_run(
     mut sync: ResMut<net::RunSync>,
     mine: Res<net::MyPlayerId>,
     mut storm: ResMut<events_world::DustStorm>,
+    mut banners: MessageWriter<messages::BannerMsg>,
 ) {
+    // M20: the host's address, where it will be read — its own HUD, as the run opens
+    if *role == net::NetRole::Host {
+        banners.write(messages::BannerMsg(format!("HOSTING: TEAMMATES JOIN AT {}", net::local_ip())));
+    }
     *comet_res = comet::Comet::default();
     *storm = events_world::DustStorm::default();
     // first-run onboarding, only for a brand-new player on a normal run
