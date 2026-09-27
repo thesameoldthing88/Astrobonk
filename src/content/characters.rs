@@ -182,7 +182,7 @@ impl AstronautKind {
                 desc: "The house always bonks.",
                 weapon: WeaponKind::Boomerang,
                 passive: Passive::Luck(0.30),
-                passive_desc: "+30% Luck; level-up refreshes are always free",
+                passive_desc: "+30% Luck; a free level-up refresh every level",
                 suit: Color::srgb(0.85, 0.20, 0.55),
                 visor: Color::srgb(1.0, 0.85, 0.3),
                 unlock_desc: "Open 20 Legendary chests (lifetime)",

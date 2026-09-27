@@ -47,9 +47,9 @@ fn scripted_choice(
         panic!("SMOKE FAIL: a banished card was dealt again ({:?})", panel.options);
     }
     script.levelups += 1;
-    // Refresh until the free ones are gone, then once more at a price. Bounded, because
-    // Lady Fortuna's refreshes stay free forever and "once it costs Gold" never comes.
-    for _ in 0..=FREE_REFRESHES {
+    // Refresh until the free ones are gone, then once more at a price. Bounded: Lady Fortuna
+    // opens every hand with one more free reroll than anyone else.
+    for _ in 0..=FREE_REFRESHES + 1 {
         let (gold, price) = (ps.gold, ps.refresh_price());
         let ok = ps.spend_refresh();
         match (price, ok) {
@@ -1869,6 +1869,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::techs::TechFxMsg>()
         .add_message::<crate::messages::HitMsg>()
+        .add_message::<crate::messages::SlowMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
         .add_message::<crate::messages::NumberMsg>()
