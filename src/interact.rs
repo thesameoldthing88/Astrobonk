@@ -349,7 +349,7 @@ pub fn spawn_interactables(
     let pedestal = meshes.add(Mesh::from(Cylinder::new(0.8, 0.5)));
     let icon = meshes.add(Mesh::from(Sphere::new(0.4)));
 
-    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| {
+    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| -> Entity {
         let c = InteractDefs::color(kind);
         let mat = materials.add(StandardMaterial {
             base_color: c,
@@ -383,13 +383,21 @@ pub fn spawn_interactables(
                     _ => Mesh3d(icon.clone()),
                 };
                 p.spawn((shape, MeshMaterial3d(mat), Transform::from_xyz(0.0, 1.0, 0.0)));
-            });
+            })
+            .id()
     };
 
-    // Chests
+    // Chests — some of them Mimics (§9). The roll is drawn for every chest from the layout
+    // stream, so both machines agree which ones bite; its first breath is hashed off where
+    // it stands, so the tell starts out of step from chest to chest.
     for _ in 0..7 {
         let dir = place_dir(&mut rng, planet, &keep, player_dir, 12.0);
-        spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        let mimic = rng.gen_bool(MIMIC_CHEST_CHANCE);
+        let chest = spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
+        if mimic {
+            let first = MIMIC_TELL_SECS.0 + (dir.x * 43.7 + dir.y * 9.1).fract().abs() * (MIMIC_TELL_SECS.1 - MIMIC_TELL_SECS.0);
+            commands.entity(chest).insert(crate::bestiary::MimicDisguise { tell: first, breath: 0.0 });
+        }
     }
     // Shady guys with pre-rolled stock (fixed at stage entry, luck applies now)
     for _ in 0..2 {
@@ -551,7 +559,7 @@ pub fn interact_system(
     mut panels: (ResMut<ChestPanel>, ResMut<ShopPanel>),
     mut pending: ResMut<crate::director::PendingStage>,
     q_player: Query<(Entity, &Transform), (With<Player>, With<crate::player::LocalPlayer>)>,
-    mut q: Query<(Entity, &mut Interactable, &Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut Interactable, &Transform, Has<crate::bestiary::MimicDisguise>), Without<Player>>,
     mut pickups: Query<&mut Pickup>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
@@ -567,7 +575,7 @@ pub fn interact_system(
     let mut rng = rand::thread_rng();
 
     let mut nearest: Option<(Entity, f32)> = None;
-    for (e, i, tf) in q.iter() {
+    for (e, i, tf, _) in q.iter() {
         if i.used {
             continue;
         }
@@ -581,7 +589,7 @@ pub fn interact_system(
         prompt.0 = None;
         return;
     };
-    let Ok((_, mut inter, tf)) = q.get_mut(entity) else {
+    let Ok((_, mut inter, tf, is_mimic)) = q.get_mut(entity) else {
         prompt.0 = None;
         return;
     };
@@ -618,6 +626,14 @@ pub fn interact_system(
         InteractKind::Chest => {
             if ps.gold < cost_now {
                 banners.write(BannerMsg("NOT ENOUGH GOLD".into()));
+                return;
+            }
+            if is_mimic {
+                // Greed, punished (§9): trying the lid pays the price into its mouth. It
+                // springs (`bestiary::mimic_spring`); kill it and the payer gets it back.
+                ps.gold -= cost_now;
+                inter.used = true;
+                commands.entity(entity).insert(crate::bestiary::MimicSprung { payer: actor_entity, paid: cost_now });
                 return;
             }
             let item = *inter.chest_item.get_or_insert_with(|| roll_item(&ps, ps.stats.luck, &mut rng));

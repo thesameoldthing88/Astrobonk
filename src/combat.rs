@@ -1443,14 +1443,29 @@ pub fn apply_hits(
     q_local: Query<(), With<crate::player::LocalPlayer>>,
     (mut shake, mut hitstop, time, role): (ResMut<Shake>, ResMut<Hitstop>, Res<Time>, Res<crate::net::NetRole>),
     mut enemies: Query<
-        (&mut Enemy, &Transform, Option<&Boss>, Option<&crate::enemies::MinibossSlot>, Has<arsenal::BellMark>),
+        (
+            &mut Enemy,
+            &Transform,
+            Option<&Boss>,
+            Option<&crate::enemies::MinibossSlot>,
+            Option<&mut crate::bestiary::AegisShield>,
+            Option<&crate::bestiary::Mimic>,
+            Has<arsenal::BellMark>,
+        ),
         Without<Pot>,
     >,
     mut pots: Query<(&mut Pot, &Transform)>,
     mut kills: MessageWriter<KillMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
-    mut tm: ResMut<arsenal::ArsenalTelemetry>,
+    // (§9) where a hit's shooter stands — the Aegis Drone's shield reads the line of it —
+    // and a dead Mimic's swallowed gold, back to whoever paid it; (§6) the arsenal's tallies
+    (shooters, mut refunds, mut telemetry, mut tm): (
+        Query<&Player>,
+        MessageWriter<crate::bestiary::RefundMsg>,
+        ResMut<crate::bestiary::BestiaryTelemetry>,
+        ResMut<arsenal::ArsenalTelemetry>,
+    ),
 ) {
     let mut rng = rand::thread_rng();
     let now = time.elapsed_secs();
@@ -1476,7 +1491,7 @@ pub fn apply_hits(
             commands.entity(msg.target).despawn();
             continue;
         }
-        if let Ok((mut e, tf, boss, slot, marked)) = enemies.get_mut(msg.target) {
+        if let Ok((mut e, tf, boss, slot, shield, mimic, marked)) = enemies.get_mut(msg.target) {
             if e.hp <= 0.0 {
                 continue;
             }
@@ -1488,9 +1503,34 @@ pub fn apply_hits(
                 crit = true;
                 tm.mark_crits += 1;
             }
+            // The Aegis Drone's shield: a hit along its facing cone lands a sliver and does
+            // not stagger it (§9 — flank it). A shape-coded BLOCK read-out, throttled per drone.
+            let mut blocked = false;
+            if let Some(mut sh) = shield {
+                let shooter = msg.source.and_then(|s| shooters.get(s).ok()).map(|p| p.dir);
+                if crate::bestiary::shield_blocks(e.dir, sh.facing, msg.knock, shooter) {
+                    blocked = true;
+                    amount *= AEGIS_BLOCK_FRACTION;
+                    telemetry.aegis_blocks += 1;
+                    if sh.block_fx <= 0.0 {
+                        sh.block_fx = AEGIS_BLOCK_FX_SECS;
+                        numbers.write(NumberMsg { pos: tf.translation, amount: 0.0, kind: NumKind::Block });
+                    }
+                } else {
+                    telemetry.aegis_open_hits += 1;
+                }
+            }
             e.hp -= amount;
-            e.flash = 1.0;
-            let knock_scale = if boss.is_some() { 0.05 } else { 1.0 };
+            if !blocked {
+                e.flash = 1.0;
+            }
+            let knock_scale = if boss.is_some() {
+                0.05
+            } else if blocked {
+                0.2
+            } else {
+                1.0
+            };
             e.knock += msg.knock * knock_scale;
             if let Some(w) = msg.weapon {
                 // a cold field slows by ITS OWN amount, and only its own hits do (L14)
@@ -1505,11 +1545,13 @@ pub fn apply_hits(
                     tm.stuns += 1;
                 }
             }
-            numbers.write(NumberMsg {
-                pos: tf.translation,
-                amount,
-                kind: if crit { NumKind::Crit } else { NumKind::Hit },
-            });
+            if !blocked {
+                numbers.write(NumberMsg {
+                    pos: tf.translation,
+                    amount,
+                    kind: if crit { NumKind::Crit } else { NumKind::Hit },
+                });
+            }
             if crit {
                 sfx.write(SfxMsg(Sfx::Crit));
             }
@@ -1522,11 +1564,16 @@ pub fn apply_hits(
             if e.hp <= 0.0 {
                 let is_boss = boss.map(|b| b.kind.def().is_stage_boss).unwrap_or(false);
                 let is_mini = boss.is_some() && !is_boss;
+                if let Some(m) = mimic {
+                    if let (Some(payer), true) = (m.payer, m.paid > 0) {
+                        refunds.write(crate::bestiary::RefundMsg { payer, gold: m.paid, pos: tf.translation });
+                    }
+                }
                 kills.write(KillMsg {
                     pos: tf.translation,
                     dir: e.dir,
                     kind: Some(e.kind),
-                    elite: e.elite || is_mini,
+                    elite: e.elite || is_mini || e.kind.elite_loot(),
                     xp: e.xp,
                     is_boss,
                     is_miniboss: is_mini,

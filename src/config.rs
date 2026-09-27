@@ -163,6 +163,103 @@ pub const TELEGRAPH_LIFT: f32 = 0.3;
 /// A Beamer's aim line length, metres.
 pub const AIM_LINE_LEN: f32 = 24.0;
 
+// ── GDD §9 new enemies, batch 1 (P08) — behaviour in `bestiary.rs` ─────────────
+/// Rollo rolls a great circle toward its mark: it eases to CRUISE on the flat, gains
+/// SLOPE_ACCEL m/s² per unit of downhill grade (loses it uphill) between MIN and MAX, and
+/// turns at most TURN_RATE rad/s — slower than a player circling it, so a side-step makes it
+/// overshoot. Rolling into a crater wall (uphill grade over WALL_GRADE) or a rock above
+/// BONK_SPEED stuns it for STUN_SECS and costs it BONK_SELF of its max HP: bait it.
+pub const ROLLO_CRUISE_SPEED: f32 = 7.0;
+pub const ROLLO_MIN_SPEED: f32 = 2.0;
+pub const ROLLO_MAX_SPEED: f32 = 12.5;
+pub const ROLLO_EASE: f32 = 0.9;
+pub const ROLLO_SLOPE_ACCEL: f32 = 16.0;
+pub const ROLLO_TURN_RATE: f32 = 0.9;
+pub const ROLLO_WALL_GRADE: f32 = 0.42;
+pub const ROLLO_BONK_SPEED: f32 = 5.5;
+pub const ROLLO_STUN_SECS: f32 = 1.8;
+pub const ROLLO_BONK_SELF: f32 = 0.35;
+/// The Trencher: surfaced, it dives once its mark is between MIN and DIVE arc metres, sinks
+/// for SINK_SECS, tunnels at TUNNEL_SPEED (a sprint just outruns it) for up to TUNNEL_SECS,
+/// then marks the spot for WINDUP_SECS and uppercuts everyone GROUNDED within RADIUS — they
+/// take DAMAGE_MULT × its bite and are launched at LAUNCH_VEL. Airborne astronauts are not
+/// touched: it punishes staying on the ground. COOLDOWN before it dives again.
+pub const TRENCH_MIN_ARC: f32 = 4.0;
+pub const TRENCH_DIVE_ARC: f32 = 20.0;
+pub const TRENCH_SINK_SECS: f32 = 0.45;
+pub const TRENCH_TUNNEL_SPEED: f32 = 8.0;
+pub const TRENCH_TUNNEL_SECS: f32 = 4.0;
+pub const TRENCH_WINDUP_SECS: f32 = 0.75;
+pub const TRENCH_UPPERCUT_RADIUS: f32 = 3.0;
+pub const TRENCH_DAMAGE_MULT: f32 = 1.4;
+pub const TRENCH_LAUNCH_VEL: f32 = 13.0;
+pub const TRENCH_ERUPT_SECS: f32 = 0.5;
+pub const TRENCH_COOLDOWN: f32 = 6.0;
+/// Metres over the ground above which an astronaut counts as airborne for the uppercut.
+pub const TRENCH_AIRBORNE_HEIGHT: f32 = 0.35;
+/// Metres of tunnel between two ridge mounds, and how long a mound stands.
+pub const TRENCH_MOUND_STEP: f32 = 0.7;
+pub const TRENCH_MOUND_SECS: f32 = 1.8;
+/// The Aegis Drone's shield: a cone of SHIELD_HALF radians either side of where it faces,
+/// swung toward its mark at TURN_RATE rad/s (a player running a 5 m circle at run speed
+/// outpaces it). A blocked hit lands BLOCK_FRACTION of its damage.
+pub const AEGIS_SHIELD_HALF: f32 = 1.15;
+pub const AEGIS_TURN_RATE: f32 = 1.4;
+pub const AEGIS_BLOCK_FRACTION: f32 = 0.1;
+/// Least seconds between two BLOCK read-outs from one drone.
+pub const AEGIS_BLOCK_FX_SECS: f32 = 0.35;
+/// The Sunskimmer cruises at ALTITUDE (metres over the ground), commits once its mark is
+/// within DIVE_ARC, marks the landing and dives for DIVE_SECS, then blows up over RADIUS.
+/// Anyone this high over the ground rides the blast out. The whine plays for a local
+/// astronaut within WHINE_ARC when one commits (§9: at night you hear it first).
+pub const SKIM_ALTITUDE: f32 = 12.0;
+pub const SKIM_DIVE_ARC: f32 = 15.0;
+pub const SKIM_DIVE_SECS: f32 = 1.3;
+pub const SKIM_BLAST_RADIUS: f32 = 3.2;
+pub const SKIM_BLAST_CLEAR_HEIGHT: f32 = 2.5;
+pub const SKIM_WHINE_ARC: f32 = 38.0;
+/// Where a column-hitbox flier (`EnemyKind::column_hitbox`) is filed in the spatial hash:
+/// this far over the ground, where the weapons fly.
+pub const COLUMN_HIT_HEIGHT: f32 = 1.0;
+/// The Beacon Tick's tracker: TRACKER_SECS on the astronaut it touched. While it lasts the
+/// horde reads that astronaut as LURE × their real distance (so off-screen enemies path to
+/// them over a nearer teammate), and anything farther than SPEEDUP_ARC from its mark moves
+/// SPEED_MULT faster toward them.
+pub const TRACKER_SECS: f32 = 6.0;
+pub const TRACKER_LURE: f32 = 0.35;
+pub const TRACKER_SPEEDUP_ARC: f32 = 30.0;
+pub const TRACKER_SPEED_MULT: f32 = 1.35;
+/// The Mimic Chest: the share of stage chests that are mimics (rolled with the layout), how
+/// long it telegraphs its 360° shockwave (RADIUS, DAMAGE_MULT × its bite) after the lid is
+/// tried, and how long it flees at FLEE_SPEED (under run speed: it can be caught) before it
+/// digs out with the gold it swallowed.
+pub const MIMIC_CHEST_CHANCE: f64 = 0.14;
+pub const MIMIC_SHOCK_SECS: f32 = 0.45;
+pub const MIMIC_SHOCK_RADIUS: f32 = 5.0;
+pub const MIMIC_SHOCK_DAMAGE_MULT: f32 = 1.5;
+pub const MIMIC_FLEE_SPEED: f32 = 6.8;
+pub const MIMIC_FLEE_SECS: f32 = 12.0;
+/// Seconds between a disguised mimic's breaths — the tell a sharp eye can catch.
+pub const MIMIC_TELL_SECS: (f32, f32) = (3.5, 6.5);
+/// The Longshot Beamer Prime: holds STANDOFF arc metres off, paints anyone within RANGE —
+/// over the horizon — for CHARGE_SECS (the last LOCK_SECS locked), leading its mark by the
+/// railbolt's flight time. The bolt flies BOLT_SPEED on a line of fire over the curve, and
+/// any terrain that rises above that line stops it: cover is a hill's shadow.
+pub const PRIME_STANDOFF: f32 = 38.0;
+pub const PRIME_RANGE: f32 = 62.0;
+pub const PRIME_CHARGE_SECS: f32 = 1.6;
+pub const PRIME_LOCK_SECS: f32 = 0.35;
+pub const PRIME_COOLDOWN: f32 = 4.5;
+pub const PRIME_BOLT_SPEED: f32 = 46.0;
+pub const PRIME_AIM_LINE_LEN: f32 = 36.0;
+/// How far below the line of fire the ground must stay for the bolt to pass.
+pub const PRIME_BOLT_CLEARANCE: f32 = 0.25;
+/// The enemy-state lane (`netenemy::stream_enemy_states`): what a client cannot derive of
+/// the new kinds (under-crust, dive height, shield facing, sniper aim), per second.
+pub const NET_ENEMY_STATE_HZ: f32 = 10.0;
+/// Emissive strength of a new kind's accent (lens, core, rim) over its accent colour.
+pub const ENEMY_ACCENT_GLOW: f32 = 4.0;
+
 pub const GEM_CAP: usize = 550;
 pub const PICKUP_BASE_RANGE: f32 = 3.2;
 pub const PICKUP_FLY_SPEED: f32 = 26.0;

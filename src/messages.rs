@@ -54,6 +54,8 @@ pub enum NumKind {
     Crit,
     Heal,
     Dodge,
+    /// An Aegis Drone's shield took the hit (§9).
+    Block,
 }
 
 /// Floating combat text request.
@@ -100,6 +102,13 @@ pub enum Sfx {
     Whoopee,
     Splat,
     Discharge,
+    // ---- §9 new enemies (P08) ----
+    /// A Sunskimmer commits to its dive.
+    Whine,
+    /// A chest turns out to be a Mimic.
+    Chomp,
+    /// A Beacon Tick plants its tracker.
+    Tag,
 }
 
 #[derive(Message)]

@@ -52,7 +52,10 @@ use std::time::{Duration, SystemTime};
 // P07: the sun's phase and The Crawl's sites in RunSnapMsg, HazardEvent::Spore -> _9.
 // P12 (merged after P07): the replicated `arsenal::NetWeaponVis` (the Yo-Yo combo) and the
 // Evolve / Wisp hazard events -> _A.
-pub const PROTOCOL_ID: u64 = 0xA570B0_A;
+// P08 (merged after P12): kind codes 9-15 (the §9 batch-1 enemies), five appended
+// HazardEvents (OwnedTelegraph, CurveBolt, Uppercut, Tracked, MimicSprung) and the
+// EnemyStateMsg lane -> _B.
+pub const PROTOCOL_ID: u64 = 0xA570B0_B;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -498,6 +501,22 @@ pub enum HazardEvent {
     Evolve { owner: u8, weapon: u8 },
     /// THE ANGELUS raised a friendly wisp for `owner` at `dir` (`power`: its hit, host-only).
     Wisp { owner: u8, dir: [f32; 3], power: f32 },
+    // ---- appended (P08): the §9 new enemies, see `bestiary` ----
+    /// A telegraph that belongs to one crowd enemy (`enemy`, its NetId): a Trencher's
+    /// uppercut spot, a Sunskimmer's landing. The client ties its copy to that proxy, so it
+    /// vanishes the moment the enemy dies rather than promising a hit that never comes.
+    OwnedTelegraph { enemy: u16, dir: [f32; 3], radius: f32, max: f32, ring: bool },
+    /// A Longshot Beamer Prime's railbolt: a shot along a line of fire over the curve
+    /// (`bestiary::CurveShot`) — its radius eases from `r0` to `r1` over `span` metres.
+    CurveBolt { dir: [f32; 3], heading: [f32; 3], speed: f32, life: f32, r0: f32, r1: f32, span: f32 },
+    /// A Trencher erupted at `dir`; bit `i` of `launched` = PlayerId `i` was thrown up (that
+    /// joiner's own predicted body goes up with its host copy).
+    Uppercut { dir: [f32; 3], launched: u8 },
+    /// A Beacon Tick tagged astronaut `owner` for `secs`: the beacon over them.
+    Tracked { owner: u8, secs: f32 },
+    /// The disguised chest at `dir` was a Mimic: the joiner drops its copy of the chest (the
+    /// monster itself streams as a crowd enemy).
+    MimicSprung { dir: [f32; 3] },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -524,6 +543,20 @@ pub struct EnemySnapMsg {
     pub n_spawn: u16,
     pub n_update: u16,
     pub n_despawn: u16,
+    pub data: Vec<u8>,
+}
+
+/// One chunk of the ENEMY-STATE lane (P08): what a client cannot derive from a crowd
+/// enemy's position — a Trencher under the crust, a Sunskimmer's dive height, an Aegis
+/// Drone's shield facing, a Beamer Prime's leading aim. Sent at NET_ENEMY_STATE_HZ for the
+/// new-kind enemies each client has resident (their proxies exist), unreliable: every
+/// record is the whole state, so a lost one is simply superseded.
+///
+/// Layout of `data`: `n` records of STATE_RECORD_BYTES, hand-packed like `EnemySnapMsg`
+/// (see `netenemy::encode_state`).
+#[derive(Message, Serialize, Deserialize, Clone, Debug)]
+pub struct EnemyStateMsg {
+    pub n: u16,
     pub data: Vec<u8>,
 }
 
@@ -777,6 +810,9 @@ impl Plugin for NetPlugin {
             // Without this the stream is gated on ServerTick and silently dropped for any
             // client that isn't AuthorizedClient yet.
             .make_message_independent::<EnemySnapMsg>()
+            // the new kinds' look (P08) — after the crowd itself in priority
+            .add_server_message::<EnemyStateMsg>(Channel::Unreliable)
+            .make_message_independent::<EnemyStateMsg>()
             .init_resource::<MyPlayerId>()
             .add_systems(Startup, apply_cli_net)
             .init_resource::<PeerSlots>()
@@ -2394,6 +2430,20 @@ fn reset_after_session(
 //    Repro: headless `--daynight [--coop2] [--planet …]`, `--hazards --planet mars|darkmoon
 //    [--coop2]`; windowed coop.sh … --planet darkmoon --dev --staticnow and compare the
 //    two sides' SKY / GIMMICK lines.
+// 2i. NEW ENEMIES (P08, see bestiary.rs) — the seven §9 batch-1 kinds are ordinary crowd
+//    records (kind codes 9-15). What a client cannot derive from position rides a new
+//    ENEMY-STATE lane (EnemyStateMsg, 7-byte records at NET_ENEMY_STATE_HZ, only for ids
+//    already resident on that client): a Trencher's cycle (so the proxy sinks under the
+//    crust and throws its own ridge mounds), a Sunskimmer's altitude and dive, an Aegis
+//    Drone's shield facing (it turns slower than the proxy's chase would say), a Beamer
+//    Prime's leading aim. The one-shots ride the hazard lane: OwnedTelegraph (a ring that
+//    dies with its proxy), CurveBolt (the Prime's railbolt), Uppercut (a joiner in the
+//    launch mask throws its own predicted body up), Tracked (the beacon over a tagged
+//    astronaut) and MimicSprung (the joiner drops its copy of the disguised chest — which
+//    chests are Mimics is rolled with the layout, so both machines already agree).
+//    Everything that hurts, and the Mimic's refund to the purse that paid, is the host's.
+//    Repro: headless `--bestiary [--coop2] [--planet mars]`; windowed coop.sh … --dev
+//    --enemies all and compare the joiner's `states=` count on its NETENEMY line.
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with
