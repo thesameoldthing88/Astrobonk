@@ -19,6 +19,25 @@ pub enum FloraStyle {
     GlowShrooms,
 }
 
+/// How a world is lit (§4 day/night, §12 "Color & lighting per world"). The sun's key light
+/// sweeps the surface over a stage (`daynight`); ambient is deliberately dim so the night
+/// side is dark and the flashlight earns its keep.
+#[derive(Clone, Copy, Debug)]
+pub struct SkyDef {
+    /// Illuminance of the sun's key light (lux) on the day side.
+    pub sun_lux: f32,
+    /// Ambient brightness and tint with the local astronaut in full day. The deep-night end
+    /// of the blend is the world's toon night fill (`ToonLook::night`, §12: the Moon's night
+    /// blue-black under Earthlight, Mars's a muddy brown, the Dark Moon's near-black).
+    pub ambient_day: f32,
+    pub ambient_day_color: Color,
+    /// Where the spin axis points: a turn about the core's Y axis (radians). The axis itself
+    /// always lies in the crash site's horizon, so the sun passes over it.
+    pub axis_yaw: f32,
+    /// How far (radians) the sun's path leans off the equator — a pole in long twilight.
+    pub declination: f32,
+}
+
 pub struct PlanetDef {
     pub kind: PlanetKind,
     pub name: &'static str,
@@ -45,6 +64,7 @@ pub struct PlanetDef {
     /// The §3 planet multiplier `T` on enemy HP and damage — "hotter/weirder deeper" (§8),
     /// so a world's bite matches where it sits in the campaign map.
     pub threat: f32,
+    pub light: SkyDef,
 }
 
 /// A world's toon grade (locked direction #7), applied by `toon::apply_world_look` whenever
@@ -93,6 +113,14 @@ impl PlanetKind {
                 has_earthrise: true,
                 meteor_showers: true,
                 threat: 1.0,
+                // hard white sun, crisp shadows; the night is blue-black under Earthlight
+                light: SkyDef {
+                    sun_lux: 6_500.0,
+                    ambient_day: 80.0,
+                    ambient_day_color: Color::srgb(0.65, 0.7, 0.9),
+                    axis_yaw: 0.0,
+                    declination: 0.2,
+                },
             },
             Mars => PlanetDef {
                 kind: *self,
@@ -118,6 +146,14 @@ impl PlanetKind {
                 has_earthrise: false,
                 meteor_showers: true,
                 threat: 1.1,
+                // a dim amber haze by day, muddy brown by night
+                light: SkyDef {
+                    sun_lux: 5_500.0,
+                    ambient_day: 90.0,
+                    ambient_day_color: Color::srgb(0.95, 0.72, 0.58),
+                    axis_yaw: 1.3,
+                    declination: 0.32,
+                },
             },
             DarkMoon => PlanetDef {
                 kind: *self,
@@ -143,6 +179,14 @@ impl PlanetKind {
                 has_earthrise: false,
                 meteor_showers: false,
                 threat: 1.25,
+                // almost no key light, and a near-black night: the fungus IS the light
+                light: SkyDef {
+                    sun_lux: 3_200.0,
+                    ambient_day: 60.0,
+                    ambient_day_color: Color::srgb(0.62, 0.52, 0.9),
+                    axis_yaw: 2.4,
+                    declination: 0.12,
+                },
             },
         }
     }

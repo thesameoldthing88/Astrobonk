@@ -18,6 +18,8 @@ use bevy::time::TimeUpdateStrategy;
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod world_probe;
+
 /// `--choices`: what the bot's scripted level-up economy has exercised so far.
 #[derive(Default)]
 struct ChoiceScript {
@@ -669,7 +671,7 @@ fn tome_probe_drive(
         }
         if t == 60 {
             // just past the terminator on the dark side, fanned out per player
-            let night = -crate::planet::sunward();
+            let night = -crate::daynight::Sun::of(&run).toward;
             let (a, _) = sphere::tangent_frame(night);
             p.dir = sphere::offset_dir(night, a, 4.0 * pid.0 as f32, planet.radius);
             p.vel_t = Vec3::ZERO;
@@ -1756,9 +1758,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
         .and_then(|_| crate::tomes::self_check())
         .and_then(|_| crate::techs::self_check())
-        .and_then(|_| crate::net::edge_presses_self_check());
+        .and_then(|_| crate::net::edge_presses_self_check())
+        .and_then(|_| crate::daynight::self_check())
+        .and_then(|_| crate::gimmicks::self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -1874,8 +1878,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
         .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .insert_resource(world_probe::WorldProbe::from_args(&args))
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
+        .init_resource::<crate::gimmicks::WorldFlora>()
+        .init_resource::<crate::gimmicks::Crawl>()
+        .init_resource::<crate::gimmicks::GimmickTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
         .insert_resource(save)
         .insert_resource(run)
@@ -1953,9 +1961,39 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::items::singularity_update,
                 crate::items::push_net_item_vis,
                 crate::items::item_visuals,
-                crate::items::apply_sun_shrink,
             )
                 .chain()
+                .run_if(crate::playing),
+        )
+        // §4 day/night + §8 world gimmicks — the host's half as main.rs runs it (headless IS
+        // the host); of the presentation only the Farside gem swap (it is a handle swap)
+        .add_systems(
+            Update,
+            (
+                crate::daynight::advance_sun,
+                crate::gimmicks::crawl_sim.before(crate::enemies::director_spawn),
+                crate::gimmicks::spore_clock,
+                crate::gimmicks::spore_sim.after(crate::enemies::rebuild_hash),
+                crate::daynight::farside_gems,
+                crate::daynight::night_static.after(crate::enemies::enemy_move),
+            )
+                .chain()
+                .run_if(crate::playing),
+        )
+        // --daynight / --hazards (P07)
+        .add_systems(
+            Update,
+            (
+                world_probe::world_probe_stage
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .before(crate::pickups::kill_drops),
+                world_probe::world_probe_watch
+                    .after(crate::enemies::enemy_move)
+                    .after(crate::gimmicks::crawl_sim)
+                    .after(crate::daynight::night_static),
+            )
+                .run_if(world_probe::WorldProbe::on)
                 .run_if(crate::playing),
         )
         // §4 movement techs — the host's half as main.rs runs it (headless IS the host);
@@ -1997,7 +2035,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_systems(
             Update,
             crate::items::item_fx_presentation
-                .after(crate::items::apply_sun_shrink)
+                .after(crate::items::item_visuals)
                 .run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         .add_systems(
@@ -2233,8 +2271,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // kill drops XP (`pickups::kill_drops` pays its ghosts' Silver instead): the XP pipeline
     // is judged on the runs that walk a horde, not on this one.
     // `--overflow` ends in The Static the same way, after burying the bot's horizon in a
-    // staged flood, so it is left out too.
-    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--overflow");
+    // staged flood, and `--hazards` on the Dark Moon winds the clock to The Crawl.
+    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--overflow")
+        && !(world.resource::<world_probe::WorldProbe>().hazards && planet_kind == PlanetKind::DarkMoon);
     if xp_run && run.kills > 50 && xp_grants == 0 && gems_left == 0 {
         println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
@@ -2359,8 +2398,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             }
         }
         // held for a full period (the probe's own clock: fast-boss winds total_elapsed)
-        if has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_SHARD_PERIOD + 1.0 {
+        if has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_EAT_SECS + 1.0 {
             need(tel.sun_steps > 0 && run.sun_shrink > 0.0, "Devoured Sun Shard never shrank the sun");
+        }
+        // §3 diegetic difficulty: Cursed Δ eats the sun too, in proportion (P07)
+        if has(I::CursedMoonRock) && !has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_EAT_SECS + 1.0 {
+            need(run.difficulty > 0.0 && run.sun_shrink > 0.0, "Cursed Moon Rock's Difficulty never ate the sun");
         }
         for (pid, ps, vis) in &item_sheets {
             let who = format!("player {pid}");
@@ -2618,6 +2661,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         if ok {
             println!("ASSIST OK: density, damage, one more chance, run flagged");
         }
+    }
+    if !world_probe::report(world) {
+        ok = false;
     }
     if enemies == 0 && !run.boss_dead {
         println!("FAIL: spawner produced no live enemies");

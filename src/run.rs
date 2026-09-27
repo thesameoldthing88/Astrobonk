@@ -189,12 +189,16 @@ pub struct RunState {
     /// state like `static_radio`, set each frame by `items::item_upkeep`; drops are the
     /// host's, so it never crosses the wire.
     pub elite_loot: f32,
-    /// Devoured Sun Shard's diegetic lever: how far the day side has shrunk toward total
-    /// night, 0..1. The host advances it; `RunSnapMsg` carries it so both machines light the
-    /// same sky. P07's day/night terminator reads this.
+    /// How far the sun has turned this stage (radians; `daynight::Sun` turns it into the
+    /// sunward direction). The host advances it, `RunSnapMsg` carries it and a client
+    /// dead-reckons between snapshots, so both machines light — and judge night by — one sun.
+    pub sun_phase: f32,
+    /// §3 diegetic difficulty: how far the day side has shrunk toward night-lock, 0..1 —
+    /// eaten by the Devoured Sun Shard and the party's Difficulty (`daynight::advance_sun`).
+    /// Kept across stages: the world stays dying. Streamed like `sun_phase`.
     pub sun_shrink: f32,
-    /// HOST: seconds a Shard has been carried since the sun last shrank.
-    pub sun_shard_secs: f32,
+    /// HOST: seconds since the sun was last eaten.
+    pub sun_eat_secs: f32,
     /// The §13 "difficulty as options" in force right now — the HOST's, kept current from
     /// its settings by `director::sync_assist_options` and streamed to joiners.
     pub assist: AssistOptions,
@@ -258,8 +262,11 @@ pub struct PlayerState {
     pub encircle_dirs: u8,
     /// Foes within TOME_CROWD_RADIUS (capped) — Tome of Encirclement.
     pub crowd: u32,
-    /// Standing on the night side — Tome of Nightfall.
+    /// Standing on the night side (`daynight::Sun::is_night`) — Tome of Nightfall.
     pub night: bool,
+    /// Seconds left of Mars's thorn-flora slow (`gimmicks::thorn_contact`). Set by
+    /// `player_physics` on every body a machine moves, so a joiner predicts its own snag.
+    pub thorned: f32,
     /// Seconds of unbroken movement, 0..MOMENTUM_RAMP_SECS — Tome of Momentum.
     pub momentum: f32,
     /// Dead Man's Tether already rewound this run (it is once per run, so it rides the
@@ -333,8 +340,9 @@ impl RunState {
             difficulty: 0.0,
             static_radio: false,
             elite_loot: 1.0,
+            sun_phase: 0.0,
             sun_shrink: 0.0,
-            sun_shard_secs: 0.0,
+            sun_eat_secs: 0.0,
             assist: save.assist,
             assisted: save.assist.is_assisted(),
             character,
@@ -381,6 +389,7 @@ impl PlayerState {
             encircle_dirs: 0,
             crowd: 0,
             night: false,
+            thorned: 0.0,
             momentum: 0.0,
             tether_used: false,
             ghost_weapon: None,
@@ -592,6 +601,9 @@ impl PlayerState {
         let mut m = self.stats.move_speed * self.widow_mult();
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Speed) {
             m *= 1.5;
+        }
+        if self.thorned > 0.0 {
+            m *= config::THORN_SLOW;
         }
         m
     }

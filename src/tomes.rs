@@ -9,7 +9,7 @@
 //! |---|---|---|
 //! | Orbit | Orbit | `combat::weapon_fire` (drone ring/speed/size), `combat::fire_volley` (return weapons), `items::orbital_yoyo` |
 //! | Encirclement | CrowdDamage | `items::encirclement_scan` counts → `PlayerState::crowd_bonus` |
-//! | Nightfall | NightDamage, Flashlight | `player::player_physics` sets `night` (`planet::is_night`) → `night_bonus`; `apply_flashlights` |
+//! | Nightfall | NightDamage, Flashlight | `player::player_physics` sets `night` (`daynight::Sun::is_night`) → `night_bonus`; `apply_flashlights` |
 //! | Gravity | FallSpeed (+JumpHeight) | `player::player_physics` |
 //! | Swarm | ProcRate | `items::proc_period` |
 //! | Salvage | ChestDiscount | chest and Shady Guy prices (`interact`); P16's Microwave price reads it too |
@@ -366,9 +366,11 @@ pub fn self_check() -> Result<(), String> {
         return Err("a discrete tome's headline did not arrive at rank 1".into());
     }
 
-    // ---- the night side is the lit side's opposite, and the Sun Shard eats the day ----
-    let sun = crate::planet::sunward();
-    if crate::planet::is_night(sun, 0.0) || !crate::planet::is_night(-sun, 0.0) || !crate::planet::is_night(sun, 1.0) {
+    // ---- Nightfall's night is the one sun's: the lit side's opposite, and the Sun Shard
+    // eats the day (the rest of the sun is pinned by `daynight::self_check`) ----
+    let sun = crate::daynight::Sun::at(crate::content::planets::PlanetKind::Moon, 1.0, 0.0);
+    let eaten = crate::daynight::Sun { shrink: 1.0, ..sun };
+    if sun.is_night(sun.toward) || !sun.is_night(-sun.toward) || !eaten.is_night(sun.toward) {
         return Err("is_night disagrees with the sun".into());
     }
 

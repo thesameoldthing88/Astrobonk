@@ -729,17 +729,29 @@ pub fn update_weapon_row(
 }
 
 /// One line of what the local astronaut's conditional items and tomes are doing — the
-/// numbers they deal damage from, so "+12% from the descent" is something you can read.
+/// numbers they deal damage from, so "+12% from the descent" is something you can read —
+/// and the ground's own rules where they stand (night, Farside, thorns).
 pub fn update_item_status(
     run: Res<RunState>,
-    q_ps: Query<(&PlayerState, &crate::items::ItemProcs), With<crate::player::LocalPlayer>>,
+    planet: Res<crate::planet::CurrentPlanet>,
+    q_ps: Query<(&PlayerState, &crate::items::ItemProcs, &crate::player::Player), With<crate::player::LocalPlayer>>,
     mut q: Query<&mut Text, With<ItemStatusText>>,
 ) {
     use crate::config::*;
     use crate::content::items::ItemKind;
     let Ok(mut text) = q.single_mut() else { return };
-    let Ok((ps, procs)) = q_ps.single() else { return };
+    let Ok((ps, procs, body)) = q_ps.single() else { return };
     let mut parts: Vec<String> = Vec::new();
+    // the ground's rules first: they apply to everyone standing here
+    if ps.night && ps.night_bonus() <= 0.0 {
+        parts.push("NIGHT".into());
+    }
+    if crate::daynight::is_farside(crate::daynight::has_farside(planet.kind), body.dir) {
+        parts.push("FARSIDE".into());
+    }
+    if ps.thorned > 0.0 {
+        parts.push("THORNS".into());
+    }
     if procs.jam > 0.0 {
         parts.push("JAMMED".into());
     }

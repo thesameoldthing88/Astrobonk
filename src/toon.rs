@@ -370,7 +370,6 @@ fn grading(saturation: f32, exposure: f32) -> ColorGrading {
 fn apply_world_look(
     planet: Option<Res<CurrentPlanet>>,
     mut clear: ResMut<ClearColor>,
-    mut ambient: ResMut<GlobalAmbientLight>,
     mut cams: Query<(&mut ToonInk, &mut ColorGrading, &Projection)>,
 ) {
     let Some(planet) = planet else { return };
@@ -382,8 +381,8 @@ fn apply_world_look(
     let def = planet.kind.def();
     let look = planet.kind.look();
     clear.0 = def.sky;
-    ambient.color = look.night;
-    ambient.brightness = look.night_brightness;
+    // The ambient is NOT set here: `daynight::apply_sky` owns it every frame, blending this
+    // look's night fill into the world's daylight ambient as the terminator passes.
     let ink = look.ink.to_linear();
     for (mut toon, mut grade, proj) in &mut cams {
         toon.color = Vec4::new(ink.red, ink.green, ink.blue, 1.0);
@@ -408,13 +407,17 @@ fn apply_ink_settings(save: Option<Res<MetaSave>>, mut cams: Query<&mut ToonInk>
 /// The rim follows the stage's sun wherever it points (P07's day/night cycle turns it) and
 /// dims with it (the Devoured Sun Shard); no sun (menus, between stages) means no rim.
 fn track_sun(
-    suns: Query<(&DirectionalLight, &GlobalTransform, &crate::items::SunLight)>,
+    suns: Query<(&DirectionalLight, &GlobalTransform), With<crate::daynight::SunLight>>,
+    planet: Option<Res<CurrentPlanet>>,
     mut cams: Query<&mut ToonInk>,
 ) {
+    // the share of this world's full sun still burning (daynight::apply_sky dims it as the
+    // Devoured Sun Shard / Cursed Δ eat the day)
+    let full = planet.map(|p| p.kind.def().light.sun_lux).unwrap_or(1.0).max(1.0);
     let (rim, color) = match suns.iter().next() {
-        Some((light, tf, sun)) => {
+        Some((light, tf)) => {
             let toward = -tf.forward().as_vec3();
-            let share = (light.illuminance / sun.base.max(1.0)).clamp(0.0, 1.0);
+            let share = (light.illuminance / full).clamp(0.0, 1.0);
             let c = light.color.to_linear();
             (toward.extend(TOON_RIM_STRENGTH * share), Vec4::new(c.red, c.green, c.blue, 1.0))
         }
