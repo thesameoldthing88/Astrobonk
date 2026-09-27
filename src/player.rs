@@ -1313,7 +1313,7 @@ pub fn player_upkeep(
     run.difficulty = q.iter().map(|p| p.stats.difficulty).fold(0.0f32, f32::max);
     for mut run in &mut q {
     run.reticle_timer = (run.reticle_timer + dt) % 1.5;
-    if run.hp > 0.0 {
+    if run.hp > 0.0 && !run.dead {
         let regen = run.stats.regen / 60.0;
         run.hp = (run.hp + regen * dt).min(run.stats.max_hp);
     }
