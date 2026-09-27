@@ -1979,34 +1979,49 @@ pub fn telegraphs(
 /// fill that sweeps out to the lethal edge by impact, a slam's inner safe ring — and, in
 /// high-contrast mode, a white outline hull on every telegraph, aim line, crack, shot and
 /// the verdict beam. Children, so they move, scale and despawn with their hazard; there are
-/// at most a few dozen hazards alive, never one per crowd enemy.
+/// at most a few dozen hazards alive, never one per crowd enemy. Toggling high contrast
+/// mid-run (pause menu) outlines, or strips, every hazard already standing.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn decorate_hazards(
     mut commands: Commands,
     assets: Res<EnemyAssets>,
     save: Res<crate::save::MetaSave>,
-    tels: Query<(Entity, &Telegraph), Added<Telegraph>>,
-    lines: Query<Entity, Added<AimLine>>,
-    cracks: Query<Entity, Added<CrackDecal>>,
-    shots: Query<Entity, Or<(Added<EnemyProjectile>, Added<MortarShell>)>>,
-    beams: Query<Entity, Added<AnubotBeamVis>>,
+    tels: Query<(Entity, Ref<Telegraph>)>,
+    lines: Query<(Entity, Ref<AimLine>)>,
+    cracks: Query<(Entity, Ref<CrackDecal>)>,
+    shots: Query<(Entity, Option<Ref<EnemyProjectile>>, Option<Ref<MortarShell>>), Or<(With<EnemyProjectile>, With<MortarShell>)>>,
+    beams: Query<(Entity, Ref<AnubotBeamVis>)>,
+    decor: Query<(Entity, &HazardDecor)>,
+    mut last_hc: Local<Option<bool>>,
 ) {
     let hc = save.accessibility.high_contrast;
+    let toggled = last_hc.is_some_and(|was| was != hc);
+    *last_hc = Some(hc);
+    if toggled && !hc {
+        for (e, d) in &decor {
+            if *d == HazardDecor::Outline {
+                commands.entity(e).try_despawn();
+            }
+        }
+    }
+    // a hazard gets an outline when it appears, or when outlines were just switched on
+    let wants_outline = |added: bool| hc && (added || toggled);
     let outline = |mesh: &Handle<Mesh>, tf: Transform| {
         (HazardDecor::Outline, Mesh3d(mesh.clone()), MeshMaterial3d(assets.outline_mat.clone()), tf)
     };
     for (e, tg) in &tels {
+        let added = tg.is_added();
+        if !added && !wants_outline(false) {
+            continue;
+        }
         // `get_entity`: a hazard can be retired in the very frame it is first seen here.
         let Ok(mut ec) = commands.get_entity(e) else { continue };
+        let safe = Transform::from_scale(Vec3::splat(SLAM_SAFE_FRACTION));
         ec.with_children(|c| {
-            if tg.radius > 0.0 {
+            if added && tg.radius > 0.0 {
                 if tg.ring {
-                    let safe = Transform::from_scale(Vec3::splat(SLAM_SAFE_FRACTION));
                     c.spawn((HazardDecor::SafeRing, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
                     c.spawn((HazardDecor::Sweep, Mesh3d(assets.ring_mesh.clone()), MeshMaterial3d(assets.ring_mat.clone()), safe));
-                    if hc {
-                        c.spawn(outline(&assets.ring_outline_mesh, safe));
-                    }
                 } else {
                     c.spawn((
                         HazardDecor::Sweep,
@@ -2016,21 +2031,31 @@ pub fn decorate_hazards(
                     ));
                 }
             }
-            if hc {
+            if wants_outline(added) {
                 c.spawn(outline(&assets.ring_outline_mesh, Transform::IDENTITY));
+                if tg.radius > 0.0 && tg.ring {
+                    c.spawn(outline(&assets.ring_outline_mesh, safe));
+                }
             }
         });
     }
     if !hc {
         return;
     }
+    let beam_hull = Transform::from_scale(Vec3::new(1.08, 1.6, 1.004));
     let hulls = lines
         .iter()
-        .map(|e| (e, &assets.aim_outline_mesh, Transform::IDENTITY))
-        .chain(cracks.iter().map(|e| (e, &assets.crack_outline_mesh, Transform::IDENTITY)))
-        .chain(shots.iter().map(|e| (e, &assets.proj_outline_mesh, Transform::IDENTITY)))
-        .chain(beams.iter().map(|e| (e, &assets.beam_mesh, Transform::from_scale(Vec3::new(1.08, 1.6, 1.004)))));
-    for (e, mesh, tf) in hulls {
+        .map(|(e, r)| (e, r.is_added(), &assets.aim_outline_mesh, Transform::IDENTITY))
+        .chain(cracks.iter().map(|(e, r)| (e, r.is_added(), &assets.crack_outline_mesh, Transform::IDENTITY)))
+        .chain(shots.iter().map(|(e, p, m)| {
+            let added = p.is_some_and(|r| r.is_added()) || m.is_some_and(|r| r.is_added());
+            (e, added, &assets.proj_outline_mesh, Transform::IDENTITY)
+        }))
+        .chain(beams.iter().map(|(e, r)| (e, r.is_added(), &assets.beam_mesh, beam_hull)));
+    for (e, added, mesh, tf) in hulls {
+        if !wants_outline(added) {
+            continue;
+        }
         let Ok(mut ec) = commands.get_entity(e) else { continue };
         ec.with_children(|c| {
             c.spawn(outline(mesh, tf));
