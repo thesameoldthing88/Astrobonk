@@ -96,6 +96,8 @@ pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
 /// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
 /// lookup's ~4 m reach), so none stands on one.
 pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
+/// Metres an interactable (pot, chest, shrine…) keeps clear of a solid prop's rim (L7).
+pub const INTERACT_PROP_CLEARANCE: f32 = 1.0;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;
