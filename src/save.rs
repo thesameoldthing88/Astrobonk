@@ -66,10 +66,12 @@ pub struct Accessibility {
     pub palette: Palette,
     /// "Danger = white outline": every telegraph, aim line and enemy shot gets a white hull.
     pub high_contrast: bool,
-    /// Kills the evolution white-flash, clamps bloom, softens hit-flash glow and hurt tint.
+    /// Kills the evolution white-flash, clamps bloom, greys the hit-flash, dims particles and
+    /// the hurt tint.
     pub flash_reduction: bool,
-    /// Nothing strobes faster than 3/s: hit-flashes, chain zaps, death bursts, telegraph
-    /// pulses; DEATH RAY / STORM CORE glow softened.
+    /// Nothing strobes faster than 3/s: hit-flashes, death bursts and telegraph pulses are
+    /// rate-limited; STORM CORE / Tesla zaps become dim slow fades and the DEATH RAY a dim
+    /// see-through beam, under clamped bloom.
     pub photosensitive: bool,
     /// Bevy `UiScale`, `UI_SCALE_MIN..=UI_SCALE_MAX`.
     pub ui_scale: f32,

@@ -511,31 +511,12 @@ fn crack_mesh(width: f32) -> Mesh {
     m.build_ccw()
 }
 
-/// Danger materials in a palette: (ring, ring fill, shot, beam charge, beam fire) as
-/// (base, emissive). The Standard palette keeps the exact canon look.
-fn danger_looks(p: Palette) -> [(Color, LinearRgba); 5] {
-    if p == Palette::Standard {
-        return [
-            (Color::srgb(1.0, 0.25, 0.1), LinearRgba::rgb(3.0, 0.5, 0.1)),
-            (Color::srgba(1.0, 0.25, 0.1, 0.2), LinearRgba::rgb(0.6, 0.1, 0.02)),
-            (Color::srgb(0.9, 0.3, 0.9), LinearRgba::rgb(2.4, 0.5, 2.4)),
-            (Color::srgba(1.0, 0.7, 0.2, 0.35), LinearRgba::rgb(1.2, 0.7, 0.1)),
-            (Color::srgb(1.0, 0.3, 0.15), LinearRgba::rgb(4.0, 0.8, 0.2)),
-        ];
-    }
-    // A white lift under the hue keeps a saturated blue glow from reading as dark.
-    let glow = |c: Color, k: f32, lift: f32| {
-        let l = c.to_linear();
-        LinearRgba::rgb(l.red * k + lift, l.green * k + lift, l.blue * k + lift)
-    };
+/// Danger material colors in a palette: ring, ring fill, shot, beam charge, beam fire. The
+/// materials are unlit — they draw exactly this base color — and the Standard palette keeps
+/// the exact canon look.
+fn danger_looks(p: Palette) -> [Color; 5] {
     let d = p.danger();
-    [
-        (d, glow(d, 3.0, 0.25)),
-        (d.with_alpha(0.2), glow(d, 0.6, 0.05)),
-        (p.danger_shot(), glow(p.danger_shot(), 2.4, 0.25)),
-        (p.danger_charge(), glow(d, 1.2, 0.1)),
-        (d, glow(d, 4.0, 0.4)),
-    ]
+    [d, d.with_alpha(0.2), p.danger_shot(), p.danger_charge(), p.beam_fire()]
 }
 
 pub fn setup_enemy_assets(
@@ -648,7 +629,6 @@ pub fn setup_enemy_assets(
         }),
         ring_fill_mat: materials.add(StandardMaterial {
             base_color: Color::srgba(1.0, 0.25, 0.1, 0.2),
-            emissive: LinearRgba::rgb(0.6, 0.1, 0.02),
             unlit: true,
             alpha_mode: AlphaMode::Blend,
             double_sided: true,
@@ -665,7 +645,6 @@ pub fn setup_enemy_assets(
         proj_outline_mesh: meshes.add(Mesh::from(Sphere::new(0.38))),
         outline_mat: materials.add(StandardMaterial {
             base_color: Color::WHITE,
-            emissive: LinearRgba::rgb(1.4, 1.4, 1.4),
             unlit: true,
             cull_mode: Some(bevy::render::render_resource::Face::Front),
             depth_bias: 30.0,
@@ -2086,9 +2065,10 @@ pub fn animate_hazard_decor(
     }
 }
 
-/// PRESENTATION: put the danger materials in the viewer's palette, and the hit-flash glow at
-/// the flash-reduction setting. The materials are shared handles, so recoloring every
-/// telegraph, shot and beam on the planet is five asset writes — no per-entity work.
+/// PRESENTATION: put the danger materials in the viewer's palette, and the hit-flash at the
+/// flash-reduction setting. The materials are shared handles, so recoloring every telegraph,
+/// shot and beam on the planet is a handful of asset writes — no per-entity work. All of
+/// them are unlit, so it is the base color that carries both the hue and the brightness.
 pub fn apply_danger_palette(
     save: Res<crate::save::MetaSave>,
     assets: Option<Res<EnemyAssets>>,
@@ -2101,15 +2081,14 @@ pub fn apply_danger_palette(
     }
     let Some(assets) = assets else { return };
     let targets = [&assets.ring_mat, &assets.ring_fill_mat, &assets.proj_mat, &assets.beam_charge_mat, &assets.beam_fire_mat];
-    for (handle, (base, glow)) in targets.into_iter().zip(danger_looks(want.0)) {
+    for (handle, base) in targets.into_iter().zip(danger_looks(want.0)) {
         if let Some(m) = materials.get_mut(handle) {
             m.base_color = base;
-            m.emissive = glow;
         }
     }
     if let Some(m) = materials.get_mut(&assets.flash_mat) {
-        let k = if want.1 { HIT_FLASH_EMISSIVE_REDUCED } else { HIT_FLASH_EMISSIVE };
-        m.emissive = LinearRgba::rgb(k, k, k);
+        let g = if want.1 { HIT_FLASH_GREY_REDUCED } else { 1.0 };
+        m.base_color = Color::srgb(g, g, g);
     }
     *applied = Some(want);
 }

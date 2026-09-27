@@ -363,12 +363,18 @@ pub fn kill_drops(
             }
         }
 
-        // Photosensitivity: crowd death bursts share one under-3/s budget — The Static
-        // dying in waves is otherwise a strobe. Elites and bosses always get theirs.
-        let show_burst = msg.elite
-            || msg.is_boss
-            || !save.accessibility.photosensitive
-            || flash_gate.allow(fx::GATE_KILL_BURSTS, time.elapsed_secs());
+        // Photosensitivity: death bursts draw on the screen's one under-3/s flash budget —
+        // The Static dying in waves is otherwise a strobe. A boss always gets its burst (one
+        // a stage, and the kill needs its confirmation), and it spends the budget too.
+        let now = time.elapsed_secs();
+        let show_burst = if !save.accessibility.photosensitive {
+            true
+        } else if msg.is_boss {
+            flash_gate.mark(now);
+            true
+        } else {
+            flash_gate.allow(now)
+        };
         if let (Some(pa), true) = (&particles, show_burst) {
             let color = if msg.elite { Pcolor::Gold } else { Pcolor::Green };
             let n = if msg.is_boss { 40 } else if msg.elite { 16 } else { 6 };

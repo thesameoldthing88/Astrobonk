@@ -690,9 +690,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     let rules = crate::run::scaling::self_check()
         .and_then(|_| crate::run::rules_self_check(&MetaSave::default()))
         .and_then(|_| silver_self_check())
-        .and_then(|_| crate::save::settings_self_check());
+        .and_then(|_| crate::save::settings_self_check())
+        .and_then(|_| crate::fx::flash_gate_self_check())
+        .and_then(|_| crate::ui::settings::ui_scale_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, settings)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, settings, flash gate, ui fit)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);

@@ -235,6 +235,16 @@ pub const NET_RECONCILE_RATE: f32 = 2.5;
 /// UI scale range, §13 "UI scale 75–150%".
 pub const UI_SCALE_MIN: f32 = 0.75;
 pub const UI_SCALE_MAX: f32 = 1.5;
+/// The smallest canvas, in UI units, every screen is laid out to hold: 1280x720 at the 150%
+/// maximum. A window too small for the chosen scale gets the largest scale that still gives
+/// the UI this much room (1280x720 and the Steam Deck's 1280x800 both allow the full 150%).
+pub const UI_FIT_CANVAS: (f32, f32) = (1280.0 / 1.5, 720.0 / 1.5);
+/// In-run choice panels (level-up, chest, shop) keep clear of the HUD's top band (timer) and
+/// bottom band (weapon tray, HP, XP, level), in UI units — the HUD scales with the UI too.
+pub const HUD_TOP_BAND: f32 = 64.0;
+/// The top band while a boss bar is up under the timer (80 px + its name line + the bar).
+pub const HUD_TOP_BAND_BOSS: f32 = 120.0;
+pub const HUD_BOTTOM_BAND: f32 = 118.0;
 /// Damage-number size multiplier range.
 pub const NUMBER_SIZE_MIN: f32 = 0.6;
 pub const NUMBER_SIZE_MAX: f32 = 2.0;
@@ -260,24 +270,30 @@ pub const AIM_DASH_SPEED: f32 = 9.0;
 /// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
 pub const BLOOM_INTENSITY: f32 = 0.15;
 pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
-/// Emissive strength of the enemy hit-flash material, and under flash reduction: still a
-/// flat white read (it is the single most important readability tool, §12), minus the
-/// bloom halo that turns a swarm under an aura into a strobing white cloud.
-pub const HIT_FLASH_EMISSIVE: f32 = 4.0;
-pub const HIT_FLASH_EMISSIVE_REDUCED: f32 = 0.8;
-/// Particle glow, and under flash reduction.
-pub const PARTICLE_EMISSIVE: f32 = 2.5;
-pub const PARTICLE_EMISSIVE_REDUCED: f32 = 0.9;
-/// Peak alpha of the full-screen hurt tint, and under flash reduction.
-pub const HURT_TINT_MAX: f32 = 0.4;
-pub const HURT_TINT_MAX_REDUCED: f32 = 0.12;
+/// Every glow below lives on UNLIT materials, which draw their base color and ignore
+/// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
+/// the camera bloom then has less to spread, too.
+/// The enemy hit-flash under flash reduction: a pale grey instead of pure white. Still a flat
+/// read (it is the single most important readability tool, §12), minus the glare that turns
+/// a swarm under an aura into a strobing white cloud.
+pub const HIT_FLASH_GREY_REDUCED: f32 = 0.62;
+/// Particle brightness under flash reduction (share of the canon color).
+pub const PARTICLE_BRIGHTNESS_REDUCED: f32 = 0.55;
+/// The full-screen hurt tint: peak alpha when a hit takes HP (or shield), and under flash
+/// reduction, fading out over HURT_TINT_SECS.
+pub const HURT_TINT_PEAK: f32 = 0.22;
+pub const HURT_TINT_PEAK_REDUCED: f32 = 0.12;
+pub const HURT_TINT_SECS: f32 = 0.4;
 /// The evolution white-flash (flash reduction removes it outright).
 pub const EVOLVE_FLASH_ALPHA: f32 = 0.75;
 pub const EVOLVE_FLASH_SECS: f32 = 0.4;
-/// Glow multiplier on DEATH RAY / STORM CORE / Tesla visuals in photosensitivity mode
-/// (the weapon materials glow at 3.0 otherwise).
-pub const WEAPON_GLOW: f32 = 3.0;
-pub const WEAPON_GLOW_PHOTO: f32 = 0.9;
+/// Photosensitivity mode (§13 "disables Storm Core strobe, softens Death Ray bloom"): the
+/// DEATH RAY / STORM CORE / Tesla materials drop to this opacity — a dim, see-through beam
+/// instead of a saturated slab of light...
+pub const PHOTO_WEAPON_ALPHA: f32 = 0.3;
+/// ...and a chain zap, instead of popping on for 0.12 s at the fire rate, fades in and out
+/// over this long, at most once per PHOTO_MIN_FLASH_INTERVAL on the whole screen.
+pub const PHOTO_ZAP_SECS: f32 = 0.45;
 
 // ── Difficulty as options (GDD §13) ───────────────────────────────────────────
 /// Enemy density slider: scales the spawn rate AND the live-enemy cap. Only ever eases.

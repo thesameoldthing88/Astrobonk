@@ -5,7 +5,6 @@
 use crate::config::*;
 use crate::planet::StageScoped;
 use crate::save::MetaSave;
-use bevy::platform::collections::HashMap;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use rand::Rng;
@@ -52,32 +51,58 @@ pub fn hitstop_system(
 // ---------------------------------------------------------------- flash guards
 
 /// Photosensitivity mode's rate limiter (§13: "throttles ... flicker to <3 flashes/sec").
-/// Each strobing source asks before it lights up, under its own key — one astronaut's chain
-/// zaps, the horde's death bursts — and is refused until PHOTO_MIN_FLASH_INTERVAL has passed
-/// since that source last flashed. Only consulted in photosensitivity mode.
-#[derive(Resource, Default)]
+/// What counts is the VIEWER's screen, so every strobing source — any astronaut's chain
+/// zaps, the horde's death bursts (The Static dying in waves) — draws from ONE budget: at
+/// most one flash per PHOTO_MIN_FLASH_INTERVAL, whoever caused it. Only consulted in
+/// photosensitivity mode; a refused flash is simply not drawn (damage is never gated).
+#[derive(Resource)]
 pub struct FlashGate {
-    last: HashMap<u64, f32>,
+    last: f32,
 }
 
-/// FlashGate key for the horde's death bursts (one shared budget: a wave dying at once is
-/// exactly the strobe the mode exists to stop).
-pub const GATE_KILL_BURSTS: u64 = u64::MAX;
+impl Default for FlashGate {
+    fn default() -> Self {
+        Self { last: f32::NEG_INFINITY }
+    }
+}
 
 impl FlashGate {
-    pub fn allow(&mut self, key: u64, now: f32) -> bool {
-        match self.last.get(&key) {
-            Some(t) if now - *t < PHOTO_MIN_FLASH_INTERVAL => false,
-            _ => {
-                self.last.insert(key, now);
-                // keys are per-astronaut and a handful of globals, but never let it grow
-                if self.last.len() > 64 {
-                    self.last.retain(|_, t| now - *t < PHOTO_MIN_FLASH_INTERVAL);
-                }
-                true
-            }
+    pub fn allow(&mut self, now: f32) -> bool {
+        // `now < last`: the clock restarted under us (a new run) — never lock out forever
+        if now - self.last >= PHOTO_MIN_FLASH_INTERVAL || now < self.last {
+            self.last = now;
+            true
+        } else {
+            false
         }
     }
+
+    /// A flash that must show regardless (a boss's death) still spends the budget.
+    pub fn mark(&mut self, now: f32) {
+        self.last = now;
+    }
+}
+
+/// Headless self-check: the photosensitivity budget is ONE per screen — a second source (a
+/// teammate's zaps, a death burst) inside the interval is refused — and it reopens after it.
+pub fn flash_gate_self_check() -> Result<(), String> {
+    let mut g = FlashGate::default();
+    let dt = PHOTO_MIN_FLASH_INTERVAL;
+    if !g.allow(10.0) || g.allow(10.0 + dt * 0.5) || g.allow(10.0 + dt * 0.99) {
+        return Err("flash gate let two flashes through one interval".into());
+    }
+    if !g.allow(10.0 + dt * 1.01) {
+        return Err("flash gate stayed shut past its interval".into());
+    }
+    g.mark(20.0);
+    if g.allow(20.0 + dt * 0.5) {
+        return Err("a forced flash (boss death) did not spend the budget".into());
+    }
+    // the budget is what WCAG 2.3.1 asks: under three flashes in any second
+    if 1.0 / dt >= 3.0 {
+        return Err(format!("PHOTO_MIN_FLASH_INTERVAL {dt} allows {:.1} flashes/s", 1.0 / dt));
+    }
+    Ok(())
 }
 
 /// A full-screen color flash (the evolution white-flash). Flash reduction suppresses it at
@@ -131,9 +156,11 @@ pub fn update_screen_flash(
     }
 }
 
-/// Flash reduction clamps the camera's bloom; it and the palette also retune the particle
-/// glow (and the danger-colored sparks). Shared material handles and one camera, so a
-/// settings change costs a handful of writes.
+/// Flash reduction (and photosensitivity mode, whose "softens Death Ray bloom" is the same
+/// clamp) turns the camera's bloom down; flash reduction also dims the particles, and the
+/// palette retints the danger-colored sparks. The particle materials are unlit — they draw
+/// their base color only — so dimming means darkening that color. Shared material handles
+/// and one camera, so a settings change costs a handful of writes.
 pub fn apply_fx_settings(
     save: Res<MetaSave>,
     particles: Option<Res<ParticleAssets>>,
@@ -141,27 +168,28 @@ pub fn apply_fx_settings(
     mut blooms: Query<&mut Bloom>,
     mut applied: Local<Option<(bool, crate::content::palettes::Palette)>>,
 ) {
-    let want = (save.accessibility.flash_reduction, save.accessibility.palette);
-    if *applied == Some(want) && blooms.iter().all(|b| b.intensity == bloom_for(want.0)) {
+    let a = &save.accessibility;
+    let bloom = if a.flash_reduction || a.photosensitive { BLOOM_INTENSITY_REDUCED } else { BLOOM_INTENSITY };
+    // (the camera is respawned with every run, so its bloom is checked, not remembered)
+    for mut b in &mut blooms {
+        if b.intensity != bloom {
+            b.intensity = bloom;
+        }
+    }
+    let want = (a.flash_reduction, a.palette);
+    if *applied == Some(want) {
         return;
     }
-    for mut b in &mut blooms {
-        b.intensity = bloom_for(want.0);
-    }
     let Some(pa) = particles else { return };
-    let k = if want.0 { PARTICLE_EMISSIVE_REDUCED } else { PARTICLE_EMISSIVE };
+    let k = if want.0 { PARTICLE_BRIGHTNESS_REDUCED } else { 1.0 };
     for (kind, handle) in &pa.mats {
         let base = if *kind == Pcolor::Danger { want.1.danger() } else { kind.color() };
         if let Some(m) = materials.get_mut(handle) {
-            m.base_color = base;
-            m.emissive = base.to_linear() * k;
+            let l = base.to_linear();
+            m.base_color = LinearRgba::rgb(l.red * k, l.green * k, l.blue * k).into();
         }
     }
     *applied = Some(want);
-}
-
-fn bloom_for(flash_reduction: bool) -> f32 {
-    if flash_reduction { BLOOM_INTENSITY_REDUCED } else { BLOOM_INTENSITY }
 }
 
 /// Pause/unpause virtual time when the phase changes.
@@ -258,7 +286,7 @@ pub fn setup_particles(
                 *k,
                 materials.add(StandardMaterial {
                     base_color: c,
-                    emissive: c.to_linear() * PARTICLE_EMISSIVE,
+                    emissive: c.to_linear() * 2.5,
                     unlit: true,
                     ..default()
                 }),

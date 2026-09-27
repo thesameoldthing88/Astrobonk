@@ -73,7 +73,7 @@ pub fn setup_weapon_assets(
             kind,
             materials.add(StandardMaterial {
                 base_color: c,
-                emissive: c.to_linear() * WEAPON_GLOW,
+                emissive: c.to_linear() * 3.0,
                 unlit: true,
                 alpha_mode: AlphaMode::Blend,
                 ..default()
@@ -158,10 +158,14 @@ pub struct Beam {
     pub tick_cd: f32,
 }
 
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub struct Fader {
     pub life: f32,
     pub max: f32,
+    /// A soft fade (photosensitivity mode's chain zaps): the cross-section swells from
+    /// nothing to this width and back over the life, so the light ramps instead of popping.
+    /// `None` is the canon quick shrink.
+    pub swell: Option<f32>,
 }
 
 #[derive(Component)]
@@ -208,13 +212,14 @@ fn roll_crit(crit_chance: f32, crit_damage: f32, rng: &mut impl Rng) -> (f32, bo
 }
 
 /// The weapons whose visuals strobe: chain lightning re-zaps at the fire rate, and the
-/// DEATH RAY is the brightest bloom source in the game. Photosensitivity mode softens their
-/// glow (§13: "disables Storm Core strobe, softens Death Ray bloom").
+/// DEATH RAY is the brightest bloom source in the game (§13: "disables Storm Core strobe,
+/// softens Death Ray bloom").
 const STROBING_WEAPONS: [WeaponKind; 3] = [WeaponKind::Tesla, WeaponKind::StormCore, WeaponKind::DeathRay];
 
-/// PRESENTATION: retune the strobing weapons' shared materials when photosensitivity mode
-/// changes.
-pub fn apply_weapon_glow(
+/// PRESENTATION: photosensitivity mode turns the strobing weapons' shared materials into a
+/// dim, see-through version of themselves. Base color and alpha, not emissive: the weapon
+/// materials are unlit, and an unlit material draws its base color and nothing else.
+pub fn apply_weapon_photosensitivity(
     save: Res<crate::save::MetaSave>,
     assets: Option<Res<WeaponAssets>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -225,10 +230,10 @@ pub fn apply_weapon_glow(
         return;
     }
     let Some(assets) = assets else { return };
-    let k = if photo { WEAPON_GLOW_PHOTO } else { WEAPON_GLOW };
     for kind in STROBING_WEAPONS {
         if let Some(m) = assets.mats.get(&kind).and_then(|h| materials.get_mut(h)) {
-            m.emissive = kind.def().color.to_linear() * k;
+            let c = kind.def().color;
+            m.base_color = if photo { c.with_alpha(PHOTO_WEAPON_ALPHA) } else { c };
         }
     }
     *applied = Some(photo);
@@ -357,7 +362,7 @@ pub fn weapon_fire(
                     Transform::from_translation(origin + aim * r * 0.5)
                         .with_rotation(sphere::frame_quat(up, aim))
                         .with_scale(Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)),
-                    Fader { life: 0.14, max: 0.14 },
+                    Fader { life: 0.14, max: 0.14, swell: None },
                     StageScoped,
                 ));
                 sfx.write(SfxMsg(Sfx::Hit));
@@ -476,11 +481,18 @@ pub fn weapon_fire(
                     from = pos;
                     max_d = link_range;
                 }
-                // Photosensitivity: one astronaut's zaps light up under 3/s, and linger
-                // as a soft fade instead of a 0.12 s strobe. Damage is unaffected.
+                // Photosensitivity: no strobe. A zap swells in and out over PHOTO_ZAP_SECS
+                // in the dimmed material, and the whole screen shows at most one zap per
+                // PHOTO_MIN_FLASH_INTERVAL — one budget however many astronauts (the host
+                // draws everyone's) carry chain weapons. Damage is unaffected.
                 let photo = save.accessibility.photosensitive;
-                let zap_life = if photo { 0.3 } else { 0.12 };
-                let show_zaps = !photo || flash_gate.allow(pe.to_bits(), time.elapsed_secs());
+                let fader = if photo {
+                    Fader { life: PHOTO_ZAP_SECS, max: PHOTO_ZAP_SECS, swell: Some(0.12) }
+                } else {
+                    Fader { life: 0.12, max: 0.12, swell: None }
+                };
+                let zap_w = if photo { 0.0 } else { 0.12 };
+                let show_zaps = !photo || flash_gate.allow(time.elapsed_secs());
                 let mut prev = origin;
                 for (e, pos) in &chain {
                     let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
@@ -496,8 +508,9 @@ pub fn weapon_fire(
                             MeshMaterial3d(assets.mats[&wi.kind].clone()),
                             Transform::from_translation(mid)
                                 .with_rotation(Quat::from_rotation_arc(Vec3::Z, dirv))
-                                .with_scale(Vec3::new(0.12, 0.12, len)),
-                            Fader { life: zap_life, max: zap_life },
+                                // a soft zap starts as a hairline and swells in
+                                .with_scale(Vec3::new(zap_w, zap_w, len)),
+                            fader,
                             StageScoped,
                         ));
                     }
@@ -898,6 +911,10 @@ pub fn fader_update(
         f.life -= dt;
         if f.life <= 0.0 {
             commands.entity(e).despawn();
+        } else if let Some(w) = f.swell {
+            let k = (std::f32::consts::PI * f.life / f.max).sin() * w;
+            tf.scale.x = k;
+            tf.scale.y = k;
         } else {
             let t = (f.life / f.max).max(0.0);
             tf.scale *= 0.9 + t * 0.1;

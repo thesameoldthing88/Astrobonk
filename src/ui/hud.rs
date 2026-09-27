@@ -6,7 +6,7 @@ use crate::content::weapons::WeaponKind;
 use crate::enemies::{Boss, Enemy};
 use crate::interact::InteractPrompt;
 use crate::messages::BannerMsg;
-use crate::config::{HURT_TINT_MAX, HURT_TINT_MAX_REDUCED};
+use crate::config::{HURT_TINT_PEAK, HURT_TINT_PEAK_REDUCED, HURT_TINT_SECS};
 use crate::run::{PlayerState, RunState, xp_needed};
 use bevy::prelude::*;
 
@@ -201,10 +201,11 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((AssistText, txt("", FONT_SMALL, Color::srgb(0.55, 0.9, 1.0)), TextLayout::new_with_justify(Justify::Right)));
                 });
 
-            // banner center
+            // banner center, clear of the boss bar (80 px + a name line + the bar). In px, not
+            // a share of the screen height, so it keeps its distance at every UI scale
             root.spawn((Node {
                 position_type: PositionType::Absolute,
-                top: Val::Percent(22.0),
+                top: Val::Px(124.0),
                 width: Val::Percent(100.0),
                 justify_content: JustifyContent::Center,
                 ..default()
@@ -336,8 +337,10 @@ pub fn update_hud(
         Query<&mut Node, With<XpFill>>,
         Query<&mut Node, With<HpFill>>,
     )>,
-    mut vignette: Query<&mut BackgroundColor, With<Vignette>>,
-    save: Res<crate::save::MetaSave>,
+    mut vignette: Query<(&mut BackgroundColor, Ref<Vignette>)>,
+    (save, time): (Res<crate::save::MetaSave>, Res<Time>),
+    // (HP + shield last frame, seconds of hurt tint left)
+    mut hurt: Local<(f32, f32)>,
 ) {
     let Ok(ps) = q_ps.single() else { return };
     if let Ok(mut t) = sets.p0().single_mut() {
@@ -383,12 +386,56 @@ pub fn update_hud(
     if let Ok(mut n) = fills.p1().single_mut() {
         n.width = Val::Percent((ps.hp / ps.stats.max_hp * 100.0).clamp(0.0, 100.0));
     }
-    if let Ok(mut bg) = vignette.single_mut() {
-        // The hurt tint rides the 0.4 s hit i-frames; longer ones are a revive's grace,
-        // which is good news and gets no red. Flash reduction keeps it to a faint wash.
-        let max = if save.accessibility.flash_reduction { HURT_TINT_MAX_REDUCED } else { HURT_TINT_MAX };
-        let a = if ps.iframes > 0.41 { 0.0 } else { (ps.iframes * 0.55).clamp(0.0, max) };
-        bg.0 = save.accessibility.palette.danger().with_alpha(a);
+    if let Ok((mut bg, vignette)) = vignette.single_mut() {
+        // The hurt tint marks what a hit TOOK — HP or shield — seen here, on the HUD's own
+        // machine: a joiner gets it from the vitals the host streams, and a revive's grace
+        // (HP going up) never tints. A fresh HUD (new run, other hero) starts from its own
+        // numbers, not the last run's. Flash reduction keeps it to a faint wash.
+        let pool = ps.hp.max(0.0) + ps.shield.max(0.0);
+        if vignette.is_added() {
+            *hurt = (pool, 0.0);
+        } else if pool < hurt.0 - 0.01 {
+            hurt.1 = HURT_TINT_SECS;
+        }
+        hurt.0 = pool;
+        hurt.1 = (hurt.1 - time.delta_secs()).max(0.0);
+        let peak = if save.accessibility.flash_reduction { HURT_TINT_PEAK_REDUCED } else { HURT_TINT_PEAK };
+        bg.0 = save.accessibility.palette.danger().with_alpha(peak * hurt.1 / HURT_TINT_SECS);
+    }
+}
+
+/// The HUD's mid-screen lines (the Mission Control tutorial, the interact prompt) sit where
+/// a choice panel or the pause menu draws its cards — at a large UI scale right across them.
+/// While one is open those lines step aside; they are back the moment play resumes.
+pub fn hide_mid_hud_under_panels(
+    phase: Res<crate::run::RunPhase>,
+    mut q: Query<&mut Visibility, Or<(With<crate::tutorial::TutorialText>, With<PromptText>)>>,
+) {
+    use crate::run::RunPhase;
+    let want = if matches!(*phase, RunPhase::LevelUp | RunPhase::Modal | RunPhase::Paused) {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+    for mut v in &mut q {
+        if *v != want {
+            *v = want;
+        }
+    }
+}
+
+/// Keep the in-run panels' top band clear of the boss bar while one is showing, so a
+/// level-up or the pause menu never prints over a boss's name.
+pub fn keep_panels_clear_of_hud(
+    boss_bar: Query<&Visibility, With<BossBarWrap>>,
+    mut q: Query<&mut Node, With<super::RunOverlay>>,
+) {
+    let boss = boss_bar.iter().any(|v| *v != Visibility::Hidden);
+    let top = Val::Px(if boss { crate::config::HUD_TOP_BAND_BOSS } else { crate::config::HUD_TOP_BAND });
+    for mut n in &mut q {
+        if n.padding.top != top {
+            n.padding.top = top;
+        }
     }
 }
 

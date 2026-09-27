@@ -114,6 +114,7 @@ fn main() {
         .init_resource::<events_world::DustStorm>()
         .init_resource::<ui::settings::SettingsOpen>()
         .init_resource::<ui::settings::SettingsTab>()
+        .init_resource::<ui::MenuFit>()
         .init_resource::<fx::FlashGate>()
         .init_resource::<fx::ScreenFlash>()
         .init_resource::<ui::menus::Selected>()
@@ -179,6 +180,12 @@ fn main() {
             dev_levelup_now
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| dev_flag("--levelupnow")),
+        )
+        .add_systems(
+            Update,
+            dev_give_weapons
+                .run_if(in_state(AppState::InRun))
+                .run_if(|| dev_flag("--give")),
         )
         .add_systems(
             Update,
@@ -257,7 +264,7 @@ fn main() {
                 // viewer's palette / flash settings on the shared hazard materials.
                 enemies::decorate_hazards,
                 enemies::apply_danger_palette,
-                combat::apply_weapon_glow,
+                combat::apply_weapon_photosensitivity,
             )
                 .run_if(in_state(AppState::InRun)),
         )
@@ -357,6 +364,8 @@ fn main() {
                 ui::hud::update_dust_overlay,
                 ui::hud::update_edge_markers,
                 ui::hud::update_assist_hud,
+                ui::hud::hide_mid_hud_under_panels,
+                ui::hud::keep_panels_clear_of_hud,
                 tutorial::tutorial_system.run_if(playing),
                 ui::hud::update_banners,
                 ui::panels::sync_choice_panel,
@@ -396,6 +405,17 @@ fn main() {
                 // The host's (or solo player's) assist options are the run's; a client
                 // adopts the host's from RunSnapMsg instead.
                 director::sync_assist_options.run_if(net::is_simulating),
+            ),
+        )
+        // UI layout helpers for every screen (§13 UI scale): shrink-to-fit, wheel-scrolled
+        // lists and their "scroll for more" hints.
+        .add_systems(
+            Update,
+            (
+                ui::fit_panels,
+                ui::fit_menus.before(ui::settings::apply_ui_scale),
+                ui::wheel_scroll,
+                ui::scroll_hints,
             ),
         )
         .run();
@@ -684,6 +704,41 @@ fn dev_levelup_now(
     ps.gold += 60;
     *done = true;
     info!("DEV --levelupnow: {} level-ups queued", ps.pending_levelups);
+}
+
+/// `--dev --give deathray,stormcore`: hand the local astronaut these weapons (names as the
+/// game prints them, lower case, no spaces) a couple of seconds in, so a windowed test can
+/// look at a late-game weapon's visuals — e.g. under photosensitivity mode — without
+/// playing to its evolution.
+fn dev_give_weapons(
+    time: Res<Time>,
+    assets: Res<combat::WeaponAssets>,
+    mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
+    mut waited: Local<f32>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *waited += time.delta_secs();
+    if *waited < 2.0 {
+        return;
+    }
+    let Ok(mut ps) = q.single_mut() else { return };
+    let args: Vec<String> = std::env::args().collect();
+    let list = args.iter().position(|a| a == "--give").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    for want in list.split(',') {
+        let key = |n: &str| n.to_lowercase().replace([' ', '-', '\''], "");
+        let Some(kind) = assets.mats.keys().copied().find(|k| key(k.def().name) == key(want)) else {
+            warn!("DEV --give: no weapon called {want:?}");
+            continue;
+        };
+        if !ps.weapons.iter().any(|w| w.kind == kind) {
+            ps.weapons.push(run::WeaponInstance { kind, level: 1, cd: 0.0 });
+            info!("DEV --give: {}", kind.def().name);
+        }
+    }
+    *done = true;
 }
 
 /// Close any leftover modal state when leaving a run.

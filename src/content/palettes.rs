@@ -69,6 +69,14 @@ impl Palette {
         }
     }
 
+    /// The verdict beam once it fires.
+    pub fn beam_fire(&self) -> Color {
+        match self {
+            Palette::Standard => Color::srgb(1.0, 0.3, 0.15),
+            _ => self.danger(),
+        }
+    }
+
     pub fn rarity(&self, r: Rarity) -> Color {
         let [common, rare, epic, legendary] = match self {
             Palette::Standard => [

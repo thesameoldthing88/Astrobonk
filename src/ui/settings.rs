@@ -249,6 +249,7 @@ pub fn settings_panel(
     steps: Query<(&Interaction, &SettingsStep), Changed<Interaction>>,
     tabs: Query<(&Interaction, &SettingsTabBtn), Changed<Interaction>>,
     closes: Query<&Interaction, (Changed<Interaction>, With<SettingsClose>)>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
     mut rebuild: Local<bool>,
 ) {
     if !open.0 {
@@ -303,19 +304,30 @@ pub fn settings_panel(
     }
 
     let current = *tab;
+    let ui_fit = effective_ui_scale(save.accessibility.ui_scale, windows.iter().next());
     commands
-        .spawn((SettingsRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)), GlobalZIndex(50)))
+        .spawn((
+            SettingsRoot,
+            overlay_root(),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
+            GlobalZIndex(50),
+            // Swallow every click that misses the card's own buttons: the main menu and the
+            // pause menu underneath must never see them (a stray click on blank card space
+            // used to hit LAUNCH or QUIT).
+            bevy::ui::FocusPolicy::Block,
+        ))
         .with_children(|overlay| {
             // a solid card: whatever screen is underneath (menu or a live run) must not
             // show through the text
             overlay
                 .spawn((
-                    // One fixed size for every tab, so the tab strip never jumps under
-                    // the pointer when the page changes. Sized to still fit a 720p screen
-                    // at the 150% UI scale.
+                    // One fixed size for every tab (the tallest page, GENERAL's five rows),
+                    // so the tab strip never jumps under the pointer when the page changes.
+                    // Where the UI scale makes it taller than the window, it is fitted
+                    // (`FitToScreen::Panel`).
                     Node {
                         width: Val::Px(720.0),
-                        min_height: Val::Px(460.0),
+                        height: Val::Px(496.0),
                         flex_direction: FlexDirection::Column,
                         align_items: AlignItems::Center,
                         row_gap: Val::Px(10.0),
@@ -326,13 +338,14 @@ pub fn settings_panel(
                     },
                     BackgroundColor(PANEL_BG.with_alpha(1.0)),
                     BorderColor::all(Color::srgb(0.35, 0.45, 0.7)),
+                    FitToScreen::Panel,
                 ))
-                .with_children(|root| settings_card(root, current, &save, *role));
+                .with_children(|root| settings_card(root, current, &save, *role, ui_fit));
         });
 }
 
 /// The panel's contents for one tab.
-fn settings_card(root: &mut ChildSpawnerCommands, current: SettingsTab, save: &MetaSave, role: crate::net::NetRole) {
+fn settings_card(root: &mut ChildSpawnerCommands, current: SettingsTab, save: &MetaSave, role: crate::net::NetRole, ui_fit: f32) {
     root.spawn(txt("SETTINGS", FONT_BIG, Color::srgb(0.7, 0.85, 1.0)));
     // tab strip ([TAB] cycles)
     root.spawn((Node { column_gap: Val::Px(8.0), ..default() },)).with_children(|row| {
@@ -391,6 +404,13 @@ fn settings_card(root: &mut ChildSpawnerCommands, current: SettingsTab, save: &M
             });
     }
     match current {
+        SettingsTab::Display if ui_fit < save.accessibility.ui_scale - 0.004 => {
+            root.spawn(txt(
+                format!("This window holds the UI at up to {:.0}%; the rest applies on a bigger one.", ui_fit * 100.0),
+                FONT_SMALL,
+                Color::srgb(1.0, 0.75, 0.4),
+            ));
+        }
         SettingsTab::Vision => palette_preview(root, save.accessibility.palette),
         SettingsTab::Assist => {
             let (note, color) = if role == crate::net::NetRole::Client {
@@ -440,12 +460,54 @@ fn palette_preview(root: &mut ChildSpawnerCommands, palette: Palette) {
         });
 }
 
-/// Keep Bevy's `UiScale` on the setting (§13: UI scale 75–150%). Every Val::Px in the game
-/// scales with it; the two world-projected overlays (damage numbers, edge markers) divide it
-/// back out of their screen positions.
-pub fn apply_ui_scale(save: Res<MetaSave>, mut ui_scale: ResMut<UiScale>) {
-    let want = save.accessibility.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+/// The UI scale this window can actually give: the setting, unless the window is too small
+/// to hold the UI_FIT_CANVAS at it (then the largest scale that does).
+pub fn effective_ui_scale(setting: f32, window: Option<&Window>) -> f32 {
+    let want = setting.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+    let Some(w) = window else { return want };
+    let fit = (w.width() / UI_FIT_CANVAS.0).min(w.height() / UI_FIT_CANVAS.1);
+    if fit.is_finite() && fit > 0.0 { want.min(fit) } else { want }
+}
+
+/// Keep Bevy's `UiScale` on the setting (§13: UI scale 75–150%), as far as the window allows
+/// (and, on a menu screen, as far as that screen fits — `MenuFit`).
+/// Every Val::Px in the game scales with it; the two world-projected overlays (damage
+/// numbers, edge markers) divide it back out of their screen positions.
+pub fn apply_ui_scale(
+    save: Res<MetaSave>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    menu_fit: Res<MenuFit>,
+    mut ui_scale: ResMut<UiScale>,
+) {
+    let want = effective_ui_scale(save.accessibility.ui_scale, windows.iter().next()) * menu_fit.0;
     if (ui_scale.0 - want).abs() > 1e-4 {
         ui_scale.0 = want;
     }
+}
+
+/// Headless self-check for the window fit: 1280x720 and the Steam Deck's 1280x800 both hold
+/// the full 150%, a smaller window caps the scale at what holds the UI_FIT_CANVAS, and the
+/// setting itself is never exceeded.
+pub fn ui_scale_self_check() -> Result<(), String> {
+    let window = |w: f32, h: f32| {
+        let mut win = Window::default();
+        win.resolution.set(w, h);
+        win
+    };
+    for (w, h) in [(1280.0, 720.0), (1280.0, 800.0), (1920.0, 1080.0)] {
+        let got = effective_ui_scale(UI_SCALE_MAX, Some(&window(w, h)));
+        if (got - UI_SCALE_MAX).abs() > 1e-3 {
+            return Err(format!("{w}x{h} should hold the UI at {UI_SCALE_MAX}, got {got}"));
+        }
+    }
+    let small = effective_ui_scale(UI_SCALE_MAX, Some(&window(1024.0, 576.0)));
+    if (small - 1.2).abs() > 1e-3 {
+        return Err(format!("1024x576 should cap 150% at 120%, got {small}"));
+    }
+    if (effective_ui_scale(0.9, Some(&window(1920.0, 1080.0))) - 0.9).abs() > 1e-4
+        || (effective_ui_scale(1.25, None) - 1.25).abs() > 1e-4
+    {
+        return Err("the window fit raised or ignored the setting".into());
+    }
+    Ok(())
 }
