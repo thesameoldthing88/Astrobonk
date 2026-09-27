@@ -586,10 +586,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: XP pipeline dead ({xp_grants} gems collected, no XP, no levels)");
         ok = false;
     }
-    // The collection link and the level curve, judged where the bot lives long enough for
-    // them to be certain: outside fast-boss it walks the planet for the whole run, so fifty
-    // kills with not one gem collected, or not one level gained, is a broken link.
-    if !fast_boss && run.kills > 50 && xp_grants == 0 {
+    // The collection link and the level curve, judged where they are certain: outside
+    // fast-boss the bot walks the horde it kills, and the magnet reaches most drops. The
+    // collection threshold is LOW on purpose: with no XP the bot never levels and dies
+    // early, so a dead pickup path shows up as a short run with a handful of kills.
+    if !fast_boss && run.kills >= 10 && xp_grants == 0 {
         println!("FAIL: XP pipeline dead ({gems_left} gems on the ground, none ever collected)");
         ok = false;
     }
