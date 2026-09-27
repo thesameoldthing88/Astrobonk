@@ -101,6 +101,36 @@ pub enum RunResult {
     Abandoned,
 }
 
+/// What banking needs from the local astronaut's sheet, kept on `RunState` so it outlives
+/// the astronaut (see `RunState::final_sheet`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FinalSheet {
+    pub level: u32,
+    pub gold: u64,
+    pub cursed_rocks: u32,
+    pub silver_gain: f32,
+    pub static_silver: f32,
+}
+
+impl Default for FinalSheet {
+    /// A fresh level-1 sheet: what a run that never spawned an astronaut banks.
+    fn default() -> Self {
+        Self { level: 1, gold: 0, cursed_rocks: 0, silver_gain: 1.0, static_silver: 1.0 }
+    }
+}
+
+impl FinalSheet {
+    pub fn of(ps: &PlayerState) -> Self {
+        Self {
+            level: ps.level,
+            gold: ps.gold,
+            cursed_rocks: ps.item_count(ItemKind::CursedMoonRock),
+            silver_gain: ps.stats.silver_gain,
+            static_silver: ps.stats.static_silver,
+        }
+    }
+}
+
 /// Run-GLOBAL state: the clock, the world chain, boss flags, shared counters.
 /// Everything here is shared by every player in the run (co-op ready).
 #[derive(Resource, Clone, Debug)]
@@ -134,6 +164,14 @@ pub struct RunState {
     /// Seconds spent in The Static across ALL stages (`static_timer` restarts per stage) —
     /// the §10 formula's `Static_overtime_seconds`.
     pub static_secs_total: f32,
+    /// The longest single stretch of The Static survived this run, on ANY stage — what the
+    /// SurviveStatic2Min quest banks (`static_timer` restarts per stage, so banking it
+    /// alone only ever counted the final stage; L27).
+    pub static_secs_peak: f32,
+    /// The local astronaut's end-of-run numbers, copied every frame of the run by
+    /// `director::snapshot_local_sheet`. Results bank from here: the astronaut is
+    /// StageScoped, so by OnEnter(Results) it has already been despawned (H1).
+    pub final_sheet: FinalSheet,
     /// Of `silver_run`, the Silver The Static's ghosts dropped (`pickups::StaticSilver`) —
     /// what Tome of Static multiplies at banking. HOST state: only the host banks.
     pub static_silver_found: u64,
@@ -151,12 +189,16 @@ pub struct RunState {
     /// state like `static_radio`, set each frame by `items::item_upkeep`; drops are the
     /// host's, so it never crosses the wire.
     pub elite_loot: f32,
-    /// Devoured Sun Shard's diegetic lever: how far the day side has shrunk toward total
-    /// night, 0..1. The host advances it; `RunSnapMsg` carries it so both machines light the
-    /// same sky. P07's day/night terminator reads this.
+    /// How far the sun has turned this stage (radians; `daynight::Sun` turns it into the
+    /// sunward direction). The host advances it, `RunSnapMsg` carries it and a client
+    /// dead-reckons between snapshots, so both machines light — and judge night by — one sun.
+    pub sun_phase: f32,
+    /// §3 diegetic difficulty: how far the day side has shrunk toward night-lock, 0..1 —
+    /// eaten by the Devoured Sun Shard and the party's Difficulty (`daynight::advance_sun`).
+    /// Kept across stages: the world stays dying. Streamed like `sun_phase`.
     pub sun_shrink: f32,
-    /// HOST: seconds a Shard has been carried since the sun last shrank.
-    pub sun_shard_secs: f32,
+    /// HOST: seconds since the sun was last eaten.
+    pub sun_eat_secs: f32,
     /// The §13 "difficulty as options" in force right now — the HOST's, kept current from
     /// its settings by `director::sync_assist_options` and streamed to joiners.
     pub assist: AssistOptions,
@@ -193,6 +235,10 @@ pub struct PlayerState {
     pub refreshes: u32,
     /// Paid refreshes bought so far — drives the rising Gold price.
     pub paid_refreshes: u32,
+    /// Lady Fortuna's passive (GDD §5 "free level-up reroll each level"): the level-up hand
+    /// in front of her still has its free reroll. Dealt by `open_level_hand`, spent before
+    /// her run's free refreshes (L30: it used to be unlimited, so those never mattered).
+    pub level_reroll: bool,
     pub banned_items: HashSet<ItemKind>,
     /// Weapons (and evolutions) banished out of this run's card pool.
     pub banned_weapons: HashSet<WeaponKind>,
@@ -216,8 +262,11 @@ pub struct PlayerState {
     pub encircle_dirs: u8,
     /// Foes within TOME_CROWD_RADIUS (capped) — Tome of Encirclement.
     pub crowd: u32,
-    /// Standing on the night side — Tome of Nightfall.
+    /// Standing on the night side (`daynight::Sun::is_night`) — Tome of Nightfall.
     pub night: bool,
+    /// Seconds left of Mars's thorn-flora slow (`gimmicks::thorn_contact`). Set by
+    /// `player_physics` on every body a machine moves, so a joiner predicts its own snag.
+    pub thorned: f32,
     /// Seconds of unbroken movement, 0..MOMENTUM_RAMP_SECS — Tome of Momentum.
     pub momentum: f32,
     /// Dead Man's Tether already rewound this run (it is once per run, so it rides the
@@ -283,14 +332,17 @@ impl RunState {
             evolves: 0,
             boss_kills: 0,
             static_secs_total: 0.0,
+            static_secs_peak: 0.0,
+            final_sheet: FinalSheet::default(),
             static_silver_found: 0,
             reward_chest: None,
             result: None,
             difficulty: 0.0,
             static_radio: false,
             elite_loot: 1.0,
+            sun_phase: 0.0,
             sun_shrink: 0.0,
-            sun_shard_secs: 0.0,
+            sun_eat_secs: 0.0,
             assist: save.assist,
             assisted: save.assist.is_assisted(),
             character,
@@ -322,6 +374,7 @@ impl PlayerState {
             banishes: config::BANISH_CHARGES,
             refreshes: config::FREE_REFRESHES,
             paid_refreshes: 0,
+            level_reroll: false,
             banned_items: HashSet::new(),
             banned_weapons: HashSet::new(),
             evo_slots_bonus: 0,
@@ -336,6 +389,7 @@ impl PlayerState {
             encircle_dirs: 0,
             crowd: 0,
             night: false,
+            thorned: 0.0,
             momentum: 0.0,
             tether_used: false,
             ghost_weapon: None,
@@ -548,6 +602,9 @@ impl PlayerState {
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Speed) {
             m *= 1.5;
         }
+        if self.thorned > 0.0 {
+            m *= config::THORN_SLOW;
+        }
         m
     }
 
@@ -668,10 +725,15 @@ impl PlayerState {
 
     // ------------------------------------------------ level-up choice economy (§3)
 
-    /// What the next level-up Refresh costs. Lady Fortuna never pays (her passive); everyone
-    /// else spends the run's free refreshes first, then Gold that rises with each paid use.
+    /// A level-up hand is being dealt: Lady Fortuna gets its free reroll.
+    pub fn open_level_hand(&mut self) {
+        self.level_reroll = self.character == AstronautKind::Fortuna;
+    }
+
+    /// What the next level-up Refresh costs: Lady Fortuna's reroll for this hand first, then
+    /// the run's free refreshes, then Gold that rises with each paid use.
     pub fn refresh_price(&self) -> RefreshPrice {
-        if self.character == AstronautKind::Fortuna || self.refreshes > 0 {
+        if self.level_reroll || self.refreshes > 0 {
             RefreshPrice::Free
         } else {
             let cost = config::REFRESH_BASE_COST as f32
@@ -685,7 +747,9 @@ impl PlayerState {
     pub fn spend_refresh(&mut self) -> bool {
         match self.refresh_price() {
             RefreshPrice::Free => {
-                if self.character != AstronautKind::Fortuna {
+                if self.level_reroll {
+                    self.level_reroll = false;
+                } else {
                     self.refreshes -= 1;
                 }
                 true
@@ -1145,11 +1209,27 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
         RefreshPrice::Gold(next) if next > first => {}
         other => return Err(format!("refresh price did not rise ({first} -> {other:?})")),
     }
+    // Lady Fortuna: one free reroll per level-up hand (GDD §5), on top of — and spent
+    // before — the run's free refreshes; then she pays like anyone.
     let mut fortuna = PlayerState::new(AstronautKind::Fortuna, save);
-    for _ in 0..10 {
-        if !fortuna.spend_refresh() || fortuna.gold != 0 {
-            return Err("Lady Fortuna paid for a refresh".into());
+    let run_frees = fortuna.refreshes;
+    fortuna.open_level_hand();
+    for _ in 0..=run_frees {
+        if fortuna.refresh_price() != RefreshPrice::Free || !fortuna.spend_refresh() || fortuna.gold != 0 {
+            return Err("Lady Fortuna's level reroll or run refreshes were not free".into());
         }
+    }
+    if fortuna.refreshes != 0 || fortuna.refresh_price() == RefreshPrice::Free {
+        return Err("Lady Fortuna's rerolls are unlimited again".into());
+    }
+    fortuna.open_level_hand();
+    if fortuna.refresh_price() != RefreshPrice::Free || !fortuna.spend_refresh() || fortuna.refresh_price() == RefreshPrice::Free {
+        return Err("Lady Fortuna's next level-up did not deal exactly one free reroll".into());
+    }
+    let mut buzz = PlayerState::new(AstronautKind::Buzz, save);
+    buzz.open_level_hand();
+    if buzz.level_reroll {
+        return Err("only Lady Fortuna rerolls a level for free".into());
     }
 
     // Banish: BANISH_CHARGES charges, strikes the card from the pool for good.

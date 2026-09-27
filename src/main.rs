@@ -4,10 +4,12 @@ mod combat;
 mod comet;
 mod config;
 mod content;
+mod daynight;
 mod director;
 mod enemies;
 mod events_world;
 mod fx;
+mod gimmicks;
 mod headless;
 mod interact;
 mod items;
@@ -27,6 +29,7 @@ mod sphere;
 mod stats;
 mod techs;
 mod tomes;
+mod toon;
 mod tutorial;
 mod ui;
 
@@ -58,7 +61,15 @@ pub fn playing(phase: Res<run::RunPhase>) -> bool {
 /// `--dev` is passed with it, so a shipped binary can't be talked into it (CLAUDE.md rule
 /// 10). P28 routes the older harness flags (`--bossnow`, `--stagenow`, …) through here too.
 pub fn dev_flag(name: &str) -> bool {
-    std::env::args().any(|a| a == "--dev") && std::env::args().any(|a| a == name)
+    dev_mode() && std::env::args().any(|a| a == name)
+}
+
+/// `--dev` was passed: the dev KEYS (B summons the stage boss, T replays the tutorial) and
+/// the `dev_flag` harness flags are live. Read once — it is a run condition, checked every
+/// frame.
+pub fn dev_mode() -> bool {
+    static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEV.get_or_init(|| std::env::args().any(|a| a == "--dev"))
 }
 
 fn main() {
@@ -90,12 +101,19 @@ fn main() {
             }),
             ..default()
         }))
-        // dim enough that the night side is dark and the flashlight earns its keep
+        // dim enough that the night side is dark and the flashlight earns its keep (each
+        // world re-grades it from its `ToonLook`, `toon::apply_world_look`)
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.65, 0.7, 0.9),
             brightness: 80.0,
             ..default()
         })
+        // The Crawl's through-the-crust markers (`gimmicks::XRay`)
+        .add_plugins(MaterialPlugin::<gimmicks::XRayMaterial>::default())
+        // space, not Bevy's default mid-gray, behind the menus too (each world then sets its
+        // own sky)
+        .insert_resource(ClearColor(content::planets::PlanetKind::Moon.def().sky))
+        .add_plugins(toon::ToonPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(remote::RemoteVisualsPlugin)
         .add_plugins(netenemy::EnemyStreamPlugin)
@@ -131,6 +149,9 @@ fn main() {
         .init_resource::<techs::GrindLines>()
         .init_resource::<techs::TechTelemetry>()
         .init_resource::<player::FlashlightSwitch>()
+        .init_resource::<gimmicks::WorldFlora>()
+        .init_resource::<gimmicks::Crawl>()
+        .init_resource::<gimmicks::GimmickTelemetry>()
         .init_resource::<arsenal::ArsenalTelemetry>()
         .init_resource::<arsenal::RecentKills>()
         .init_resource::<arsenal::Fanfare>()
@@ -153,6 +174,7 @@ fn main() {
                 pickups::setup_pickup_assets,
                 items::setup_item_assets,
                 techs::setup_tech_assets,
+                gimmicks::setup_gimmick_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -362,7 +384,8 @@ fn main() {
                 // adopts them from RunSnapMsg instead of running a second, drifting copy.
                 director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
-                enemies::debug_spawn_boss.run_if(net::is_simulating),
+                // M14: a dev key, not a shipped one (B is also the level-up Banish key)
+                enemies::debug_spawn_boss.run_if(net::is_simulating).run_if(dev_mode),
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
@@ -396,10 +419,47 @@ fn main() {
                 items::singularity_update,
                 items::push_net_item_vis.run_if(net::is_simulating),
                 items::item_visuals,
-                items::apply_sun_shrink,
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ------------- §4 day/night + §8 world gimmicks: the host turns and eats the sun,
+        // places The Crawl and primes/bites with the spore caps; a client turns its copy of
+        // the sun and masses its streamed Crawl between snapshots; every machine ages the
+        // spore cycles (the host's and the hazard lane's alike).
+        .add_systems(
+            Update,
+            (
+                daynight::advance_sun.run_if(net::is_simulating),
+                daynight::drift_sun.run_if(net::is_client),
+                gimmicks::crawl_sim.run_if(net::is_simulating).before(enemies::director_spawn),
+                gimmicks::crawl_drift.run_if(net::is_client),
+                gimmicks::spore_clock,
+                gimmicks::spore_sim.run_if(net::is_simulating).after(enemies::rebuild_hash),
+            )
+                .chain()
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // ...and what they look like, on every machine, from the run's sun and the streamed
+        // state (behind a card panel too: the world is still lit)
+        .add_systems(
+            Update,
+            (
+                daynight::apply_sky,
+                daynight::sky_notices,
+                daynight::farside_gems,
+                daynight::night_static.after(enemies::enemy_flash),
+                gimmicks::spore_visuals.after(gimmicks::spore_clock),
+                gimmicks::crawl_visuals,
+            )
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            dev_sky
+                .run_if(in_state(AppState::InRun))
+                .run_if(net::is_simulating)
+                .run_if(|| std::env::args().any(|a| a == "--dev")),
         )
         // Item one-shots are presented even behind a card panel: a joiner picking a level-up
         // is still being hunted on the host, and a death-save that fires meanwhile must not
@@ -408,7 +468,7 @@ fn main() {
         .add_systems(
             Update,
             items::item_fx_presentation
-                .after(items::apply_sun_shrink)
+                .after(items::item_visuals)
                 .run_if(in_state(AppState::InRun)),
         )
         .add_systems(
@@ -416,6 +476,15 @@ fn main() {
             dev_grant_items
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| dev_flag("--items")),
+        )
+        // `--dev --warp noon|dusk|night`: the toon look's windowed checks (P36) — every run
+        // lands on the night side, so the lit side needs a walk the bot takes minutes over.
+        .add_systems(
+            Update,
+            dev_warp
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--warp")),
         )
         // ------------- §4 movement techs: the moves themselves are player_input/physics on
         // every body a machine moves; what they do to the WORLD (a blink, the Slam's
@@ -490,7 +559,8 @@ fn main() {
                 pickups::kill_drops.run_if(net::is_simulating),
                 combat::fader_update,
                 enemies::enemy_flash,
-                player::player_physics,
+                // after this frame's jump/slide presses are applied, never before (L3)
+                player::player_physics.after(player::player_input),
                 player::refit_astronaut_rigs,
                 player::animate_player,
                 // Regen, i-frames, shield recharge and powerup decay are all host-owned
@@ -506,6 +576,8 @@ fn main() {
                 // check over its own sheet and fires while the host plays on.
                 director::downed_watch.run_if(net::is_simulating),
                 director::death_watch.run_if(net::is_simulating),
+                // what Results banks, kept on RunState: the astronaut is gone by then (H1)
+                director::snapshot_local_sheet,
             )
                 .run_if(in_state(AppState::InRun)),
         )
@@ -592,10 +664,17 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Hdr,
-        Bloom::NATURAL,
+        Bloom {
+            intensity: config::BLOOM_INTENSITY,
+            prefilter: bevy::post_process::bloom::BloomPrefilter {
+                threshold: config::BLOOM_THRESHOLD,
+                threshold_softness: config::BLOOM_THRESHOLD_SOFTNESS,
+            },
+            ..Bloom::NATURAL
+        },
         bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
-        // the evolution fanfare drains the world's colour through this (`arsenal`)
-        bevy::render::view::ColorGrading::default(),
+        // the toon look: prepasses for the ink, cel shadows, the per-world grade
+        toon::camera_bundle(),
         Transform::from_xyz(0.0, 140.0, 220.0).looking_at(Vec3::ZERO, Vec3::Y),
         player::PlayerRig,
     ));
@@ -746,7 +825,12 @@ fn enter_run(
     mut sync: ResMut<net::RunSync>,
     mine: Res<net::MyPlayerId>,
     mut storm: ResMut<events_world::DustStorm>,
+    mut banners: MessageWriter<messages::BannerMsg>,
 ) {
+    // M20: the host's address, where it will be read — its own HUD, as the run opens
+    if *role == net::NetRole::Host {
+        banners.write(messages::BannerMsg(format!("HOSTING: TEAMMATES JOIN AT {}", net::local_ip())));
+    }
     *comet_res = comet::Comet::default();
     *storm = events_world::DustStorm::default();
     // first-run onboarding, only for a brand-new player on a normal run
@@ -765,7 +849,6 @@ fn enter_run(
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
         &mut commands,
@@ -776,8 +859,10 @@ fn enter_run(
         &run::PlayerState::new(run_state.character, &save),
         &save,
         &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
@@ -862,6 +947,33 @@ fn dev_fast_boss(
     *done = true;
 }
 
+/// `--dev` sky controls for windowed tests (host/solo), applied once a few seconds in:
+/// `--sun <radians>` turns the sun to that phase (π puts the crash site in deep night),
+/// `--sunshrink <0..1>` eats that much of the day side, and `--staticsoon` winds the clock
+/// to just before The Crawl starts massing (Dark Moon) ahead of The Static.
+fn dev_sky(time: Res<Time>, mut run: ResMut<run::RunState>, mut done: Local<bool>) {
+    if *done || time.elapsed_secs() < 3.0 {
+        return;
+    }
+    *done = true;
+    let args: Vec<String> = std::env::args().collect();
+    let num = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).and_then(|s| s.parse::<f32>().ok());
+    if let Some(phase) = num("--sun") {
+        run.sun_phase = phase.rem_euclid(std::f32::consts::TAU);
+        info!("DEV --sun: phase {:.2}", run.sun_phase);
+    }
+    if let Some(shrink) = num("--sunshrink") {
+        run.sun_shrink = shrink.clamp(0.0, 1.0);
+        info!("DEV --sunshrink: {:.2}", run.sun_shrink);
+    }
+    if args.iter().any(|a| a == "--staticsoon") && !run.static_active {
+        run.timer = run.timer.min(config::CRAWL_MASS_SECS + 6.0);
+        run.boss_spawned = true;
+        run.minibosses_spawned = [true; 2];
+        info!("DEV --staticsoon: clock wound to {:.0}s (bosses skipped)", run.timer);
+    }
+}
+
 /// `--dev --levelupnow`: queue three level-ups and 60 Gold on the local astronaut a few
 /// seconds in, so the level-up panel's Refresh (free, then paid) / Banish / Skip row can be
 /// driven and screenshot in a windowed test without farming gems first.
@@ -907,6 +1019,47 @@ fn dev_grant_items(
     let granted = items::grant_items(&mut ps, &items::items_from_args(), &save, run.greed_stacks);
     info!("DEV --items: granted {granted:?}");
     *done = true;
+}
+
+/// `--dev --warp noon|dusk|night`: a second in, set the local astronaut down where the sun
+/// stands high, just on the lit side of the terminator, or deep in the night, facing away
+/// from the sun (lit faces toward the camera; at dusk, the terminator ahead). Host/solo only
+/// — a joiner's body is the host's to move.
+fn dev_warp(
+    time: Res<Time>,
+    run_state: Res<run::RunState>,
+    mut q: Query<(&mut player::Player, &mut techs::MoveTech), With<player::LocalPlayer>>,
+    mut waited: Local<f32>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *waited += time.delta_secs();
+    if *waited < 1.0 {
+        return;
+    }
+    let Ok((mut p, mut tech)) = q.single_mut() else { return };
+    let args: Vec<String> = std::env::args().collect();
+    let want = args.iter().position(|a| a == "--warp").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    // how high the sun stands over the spot (sun · up)
+    let sun_up = match want.as_str() {
+        "noon" => 0.85,
+        "dusk" => 0.12,
+        _ => -0.8,
+    };
+    // the run's CURRENT sun (P07 turns it), so the warp lands where the light is now
+    let sun = daynight::Sun::of(&run_state).toward;
+    let across = sphere::tangent_frame(sun).0;
+    let dir = (sun * sun_up + across * (1.0 - sun_up * sun_up).sqrt()).normalize();
+    tech.cancel_moves();
+    p.dir = dir;
+    p.vel_t = Vec3::ZERO;
+    p.vel_r = 0.0;
+    p.height = 0.0;
+    p.facing = (dir * sun.dot(dir) - sun).normalize_or_zero();
+    *done = true;
+    info!("DEV --warp {want}: sun·up {sun_up:.2}");
 }
 
 /// `--dev --give deathray,stormcore`: hand the local astronaut these weapons (names as the

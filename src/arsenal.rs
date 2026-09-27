@@ -1728,10 +1728,12 @@ pub fn animate_fanfare(
         }
         None => 1.0,
     };
+    // relative to the toon grade's own section saturations (the world's look stays intact)
+    let (shadows, midtones) = (crate::toon::TOON_SHADOW_SATURATION * sat, crate::toon::TOON_MIDTONE_SATURATION * sat);
     for mut g in &mut grading {
-        if (g.midtones.saturation - sat).abs() > 1e-4 || (g.shadows.saturation - sat).abs() > 1e-4 {
-            g.shadows.saturation = sat;
-            g.midtones.saturation = sat;
+        if (g.midtones.saturation - midtones).abs() > 1e-4 || (g.shadows.saturation - shadows).abs() > 1e-4 {
+            g.shadows.saturation = shadows;
+            g.midtones.saturation = midtones;
         }
     }
 }

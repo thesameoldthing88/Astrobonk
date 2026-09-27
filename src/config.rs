@@ -96,6 +96,12 @@ pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
 /// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
 /// lookup's ~4 m reach), so none stands on one.
 pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
+/// Metres an interactable (pot, chest, shrine…) keeps clear of a solid prop's rim (L7).
+pub const INTERACT_PROP_CLEARANCE: f32 = 1.0;
+/// Great-circle metres around the drop point (`Vec3::Y`, where every stage starts) kept free
+/// of props, so the first view of a planet is never from inside a boulder (the chase camera
+/// sits 7.5 m back and avoids terrain, not props).
+pub const START_CLEAR_ARC: f32 = 12.0;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;
@@ -223,6 +229,24 @@ pub const SPAWN_EXHALE_SECS: f32 = 15.0;
 /// The Static's own base rate (then scaled like everything else) — it never stops growing.
 pub const STATIC_RATE_BASE: f32 = 4.2;
 pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
+/// Seconds of the §3 spawn-mix arc a chained world starts ahead per step of depth, on top
+/// of joining the arc where its shorter countdown begins (`scaling::mix_secs`).
+pub const MIX_DEPTH_HEAD_START_SECS: f32 = 60.0;
+/// The HUD's horizon test (`hud::update_edge_markers`) treats the planet as a ball this
+/// many metres under its mean surface (or under the target's own ground, if lower): what
+/// the camera-to-target line passes through that ball for is over the horizon.
+pub const EDGE_MARKER_OCCLUDER_INSET: f32 = 0.5;
+/// The overflow valve (`enemies::director_spawn`, GDD §9). A crowd enemy this many arc
+/// metres from every astronaut is over any horizon — the spawn band is 42–58 m, and on the
+/// Dark Moon, the smallest world, nothing is more than 330 m away — so dissolving it into The Static costs
+/// the fight nothing, and its slot spawns fresh where the players are.
+pub const STATIC_RECYCLE_ARC: f32 = 100.0;
+/// Spawns the cap had no room for, banked for The Static at most this many per stage.
+pub const STATIC_BACKLOG_MAX: f32 = 300.0;
+/// Extra ghosts per second the backlog adds once The Static rises (room permitting).
+pub const STATIC_BACKLOG_DRAIN: f32 = 4.0;
+/// Backlog size at which the host is told The Static is gathering (once per stage).
+pub const STATIC_GATHERING_TELL: f32 = 40.0;
 /// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
 pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
 
@@ -404,10 +428,80 @@ pub const SIGNAL_FLARE_LURE: f32 = 0.5;
 pub const SIGNAL_FLARE_SPAWN_ARC_MIN: f32 = 30.0;
 pub const SIGNAL_FLARE_SPAWN_ARC_MAX: f32 = 42.0;
 
-/// Devoured Sun Shard: every SUN_SHARD_PERIOD s the day side shrinks one SUN_SHARD_STEP
-/// toward total night (RunState::sun_shrink, 0..1).
-pub const SUN_SHARD_PERIOD: f32 = 60.0;
+// ── Day/night (GDD §4) and diegetic difficulty (§3) ───────────────────────────
+/// Full turns of the sun over one stage's clock: the terminator sweeps the whole surface
+/// once per stage (§4 "the terminator sweeps the surface over the 10:00 run"). At ~1.4 m/s
+/// on the equator a runner can chase the day or stay in the night — it is a biome you pick.
+pub const SUN_TURNS_PER_STAGE: f32 = 1.0;
+/// Where the sun stands at the crash site when a stage begins: this far (radians) short of
+/// noon, so the first night reaches the crash site about a third of the way in.
+pub const SUN_START_BEFORE_NOON: f32 = 0.5;
+/// Half-width of the twilight band in `dot(dir, sunward)` — where `Sun::daylight` ramps.
+pub const TWILIGHT_BAND: f32 = 0.05;
+/// §4 night risk: the horde moves this much faster on the night side...
+pub const NIGHT_ENEMY_SPEED: f32 = 0.15;
+/// ...and a wave aimed at an astronaut standing in the night lands this much closer (it
+/// crests the horizon INSIDE your vision).
+pub const NIGHT_SPAWN_ARC_MULT: f32 = 0.8;
+/// §4 night risk: "The Static is near-invisible — you hear it before you see it". A ghost on
+/// the night side fades to this opacity (by day it is 0.55).
+pub const GHOST_NIGHT_ALPHA: f32 = 0.12;
+/// §4 night reward: gold from kills on the night side.
+pub const NIGHT_GOLD_MULT: f32 = 1.25;
+/// Diegetic difficulty (§3): every SUN_EAT_SECS the day side shrinks toward night-lock
+/// (RunState::sun_shrink, 0..1) — by SUN_SHARD_STEP while a Devoured Sun Shard is carried,
+/// plus SUN_CURSED_STEP per unit of the party's Difficulty (Cursed Moon Rock, Cursed Tome,
+/// Greed): the more danger invited, the more of the sun goes out.
+pub const SUN_EAT_SECS: f32 = 60.0;
 pub const SUN_SHARD_STEP: f32 = 0.1;
+pub const SUN_CURSED_STEP: f32 = 0.1;
+/// The key light dims by this share as the sun is eaten (it goes out entirely at 1).
+pub const SUN_DIM_AT_FULL_SHRINK: f32 = 0.5;
+/// How fast (per second) the ambient eases between day and night levels as you cross the
+/// terminator — a dusk, not a light switch.
+pub const AMBIENT_EASE: f32 = 1.2;
+
+// ── World gimmicks (GDD §8) ───────────────────────────────────────────────────
+/// The Moon's Earthlight: a cyan fill from the fixed Earth on the Earthside hemisphere.
+pub const EARTHLIGHT_LUX: f32 = 700.0;
+/// Farside (the hemisphere facing away from the Earth): ambient drops by this share, gems
+/// glow brighter, and the elite roll is this much likelier (scaled by the share of the
+/// party standing on Farside).
+pub const FARSIDE_AMBIENT_DROP: f32 = 0.45;
+pub const FARSIDE_ELITE_BONUS: f32 = 0.2;
+pub const FARSIDE_GEM_GLOW: f32 = 2.6;
+/// Mars's thorn flora: touching a bush (below its height, within this many metres of its
+/// stem per unit of scale) slows you to THORN_SLOW of your speed, lingering THORN_LINGER s.
+pub const THORN_REACH: f32 = 0.85;
+pub const THORN_HEIGHT: f32 = 0.9;
+pub const THORN_SLOW: f32 = 0.55;
+pub const THORN_LINGER: f32 = 0.45;
+/// The Dark Moon's fungus: an astronaut within SPORE_TRIGGER m primes a ripe cap; after a
+/// SPORE_FUSE s telegraph it detonates (SPORE_RADIUS, the burst hurts astronauts AND the
+/// horde) and leaves a spore cloud (SPORE_CLOUD_RADIUS, SPORE_CLOUD_SECS) that eats HP
+/// every SPORE_TICK s. The cap regrows over SPORE_REGROW s.
+pub const SPORE_TRIGGER: f32 = 6.0;
+pub const SPORE_FUSE: f32 = 1.5;
+pub const SPORE_RADIUS: f32 = 5.0;
+pub const SPORE_BURST_DAMAGE: f32 = 12.0;
+pub const SPORE_ENEMY_DAMAGE: f32 = 40.0;
+pub const SPORE_CLOUD_RADIUS: f32 = 4.2;
+pub const SPORE_CLOUD_SECS: f32 = 4.0;
+pub const SPORE_CLOUD_DPS: f32 = 5.0;
+pub const SPORE_TICK: f32 = 0.5;
+pub const SPORE_REGROW: f32 = 20.0;
+/// The Dark Moon's CRAWL: The Static masses under the crust (seen through it) for
+/// CRAWL_MASS_SECS before it erupts at that site; the site then spews ghosts for
+/// CRAWL_ERUPT_SECS, and its successor starts massing CRAWL_MASS_SECS before it closes, so
+/// the next eruption is always on show. CRAWL_SITES + one per extra astronaut stand at once,
+/// CRAWL_ARC_MIN..MAX m from an astronaut (over the horizon); ghosts erupt within
+/// CRAWL_SPREAD m of a site.
+pub const CRAWL_MASS_SECS: f32 = 15.0;
+pub const CRAWL_ERUPT_SECS: f32 = 25.0;
+pub const CRAWL_SITES: usize = 3;
+pub const CRAWL_ARC_MIN: f32 = 38.0;
+pub const CRAWL_ARC_MAX: f32 = 60.0;
+pub const CRAWL_SPREAD: f32 = 5.0;
 
 pub const WEAPON_SLOTS: usize = 4;
 pub const MAX_WEAPON_LEVEL: u32 = 7;
@@ -671,9 +765,54 @@ pub const TELEGRAPH_PULSE_AMP: f32 = 0.07;
 /// line is still tracking. A locked line stops marching — the "dodge now" tell.
 pub const AIM_DASHES: usize = 12;
 pub const AIM_DASH_SPEED: f32 = 9.0;
-/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
-pub const BLOOM_INTENSITY: f32 = 0.15;
+/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15). The toon look
+/// keeps it sparing: flat cel colors read cleaner without a haze over them.
+pub const BLOOM_INTENSITY: f32 = 0.1;
 pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
+/// ...and only the brightest pixels feed it (soft knee), so a lit suit or a pale rock never
+/// glows — suns, stars, glows and hit flashes still do.
+pub const BLOOM_THRESHOLD: f32 = 0.6;
+pub const BLOOM_THRESHOLD_SOFTNESS: f32 = 0.5;
+
+// ── Toon look (locked direction #7, `toon.rs`) ────────────────────────────────
+/// Cel bands on N·L for every lit StandardMaterial: below the first edge a face gets no
+/// direct light (ambient only), between the edges the MID level, above the second FULL.
+/// Each step is smoothed over ±TOON_BAND_SOFT of N·L so a band edge isn't a jagged pixel stair.
+pub const TOON_BAND_EDGES: (f32, f32) = (0.06, 0.38);
+pub const TOON_BAND_MID: f32 = 0.3;
+pub const TOON_BAND_FULL: f32 = 0.72;
+pub const TOON_BAND_SOFT: f32 = 0.035;
+/// A lit rim just inside every silhouette turned toward the sun (drawn by the ink pass, so
+/// only real edges get it, never a grazing stretch of ground): brightens the surface by this
+/// share. Scales with the sun (a shrunken sun, a lower rim); the night side never has one.
+pub const TOON_RIM_STRENGTH: f32 = 0.35;
+/// Specular turns into a hard cel highlight: glossy parts (visors) keep a crisp spot above
+/// this brightness, rough ones (rock, dust, cloth) lose their soft sheen.
+pub const TOON_SPEC_EDGE: (f32, f32) = (0.08, 0.14);
+/// How much of the terrain's own bumpy normal the ground shades with (the rest is the
+/// planet's radial normal), so cel bands follow the world's curve and its big hills instead
+/// of speckling across every small bump.
+pub const TOON_TERRAIN_NORMAL_DETAIL: f32 = 0.55;
+/// The terrain's height colors (crater floor → peak) come in this many flat steps.
+pub const TOON_TERRAIN_BANDS: usize = 4;
+/// The flashlight cone in two cel steps: a dimmer outer ring at this share, the full core.
+/// Edges are in the spot's own 0..1 falloff (1 = inside the inner angle).
+pub const TOON_CONE_RING: f32 = 0.4;
+pub const TOON_CONE_EDGES: (f32, f32) = (0.03, 0.4);
+/// Ink outlines (post-process over the depth + normal prepass): line width in pixels at
+/// 720p (scaled with the window height), and ×this in the §13 high-contrast mode.
+pub const TOON_INK_PX: f32 = 1.0;
+pub const TOON_INK_HIGH_CONTRAST: f32 = 2.0;
+/// A silhouette is inked where the depth's second difference, relative to the pixel's own
+/// depth, exceeds this (planes are linear in reverse-Z depth, so they never trip it)...
+pub const TOON_INK_DEPTH_EDGE: f32 = 0.025;
+/// ...and a crease where neighbouring normals turn by more than this (1 − cos), at this
+/// opacity — a touch lighter than the silhouette, so an outline still reads as the outside.
+pub const TOON_INK_NORMAL_EDGE: f32 = 0.3;
+pub const TOON_INK_CREASE_ALPHA: f32 = 0.85;
+/// Ink fades out between these view distances (m): the planet's far limb is well inside,
+/// the starfield and the sun disc (1400 m+) never get a line.
+pub const TOON_INK_FADE: (f32, f32) = (180.0, 320.0);
 /// Every glow below lives on UNLIT materials, which draw their base color and ignore
 /// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
 /// the camera bloom then has less to spread, too.
@@ -712,3 +851,9 @@ pub const REVIVE_TOKEN_IFRAMES: f32 = 3.0;
 /// the second chance does not open inside the same ring that closed the first.
 pub const REVIVE_NOVA_RADIUS: f32 = 7.0;
 pub const REVIVE_NOVA_KNOCK: f32 = 42.0;
+
+/// Melee swing swoosh (combat::sweep_arc_mesh): the crescent's inner edge as a fraction of the
+/// reach, its alpha, and how far over the ground it floats (clear of the terrain's bumps).
+pub const SWEEP_INNER: f32 = 0.45;
+pub const SWEEP_ALPHA: f32 = 0.42;
+pub const SWEEP_LIFT: f32 = 0.35;

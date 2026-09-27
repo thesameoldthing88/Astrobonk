@@ -21,7 +21,11 @@ pub struct WeaponAssets {
     pub proj_mesh: Handle<Mesh>,
     pub drone_mesh: Handle<Mesh>,
     pub beam_mesh: Handle<Mesh>,
-    pub sweep_mesh: Handle<Mesh>,
+    /// A melee swing's swoosh: a flat crescent per swing width (degrees, rounded), 360
+    /// always present for ring volleys. Unit outer radius, pointing along -Z.
+    pub sweep_arcs: HashMap<u32, Handle<Mesh>>,
+    /// See-through, glowing: a swing is a streak you read at a glance, not a slab.
+    pub sweep_mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
     pub aura_mesh: Handle<Mesh>,
     pub mats: HashMap<WeaponKind, Handle<StandardMaterial>>,
     /// Faint see-through variants for the aura sphere so it doesn't blind the player.
@@ -40,6 +44,33 @@ pub struct WeaponAssets {
     pub fanfare_mat: Handle<StandardMaterial>,
     /// THE ANGELUS's friendly wisps: warm and see-through — a ghost that is on your side.
     pub wisp_mat: Handle<StandardMaterial>,
+}
+
+/// A melee swing's swoosh: a flat crescent (an annular sector from SWEEP_INNER to 1) of
+/// `arc_deg` round -Z, both faces. A crescent reads as the arc the weapon travelled; the old
+/// solid box read as an orange slab lying on the ground.
+fn sweep_arc_mesh(arc_deg: f32) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let n = ((arc_deg / 8.0).ceil() as u32).max(8);
+    let half = arc_deg.to_radians() / 2.0;
+    let mut pos: Vec<[f32; 3]> = Vec::new();
+    for i in 0..=n {
+        let (s, c) = (-half + 2.0 * half * i as f32 / n as f32).sin_cos();
+        pos.push([s * SWEEP_INNER, 0.0, -c * SWEEP_INNER]);
+        pos.push([s, 0.0, -c]);
+    }
+    let mut idx: Vec<u32> = Vec::new();
+    for i in 0..n {
+        let (a, b, c, d) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+        idx.extend([a, c, b, b, c, d]);
+        idx.extend([a, b, c, b, d, c]);
+    }
+    let normals = vec![[0.0, 1.0, 0.0]; pos.len()];
+    Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default())
+        .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, pos)
+        .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+        .with_inserted_indices(Indices::U32(idx))
 }
 
 /// The Whoopee's fan: a flat sector of `arc_deg` round -Z, unit radius, both faces.
@@ -72,6 +103,9 @@ pub fn setup_weapon_assets(
 ) {
     let mut mats = HashMap::new();
     let mut aura_mats = HashMap::new();
+    let mut sweep_mats = HashMap::new();
+    let mut sweep_arcs: HashMap<u32, Handle<Mesh>> = HashMap::new();
+    sweep_arcs.insert(360, meshes.add(sweep_arc_mesh(360.0)));
     for kind in [
         WeaponKind::Wrench,
         WeaponKind::LaserPistol,
@@ -120,6 +154,21 @@ pub fn setup_weapon_assets(
         // A faint, see-through version for the aura bubble that surrounds the player. A hug
         // field is fainter still: it sits right round you, and its zaps already say "biting".
         let alpha = if matches!(kind.def().behavior, Behavior::Hug { .. }) { 0.06 } else { 0.12 };
+        if let Behavior::MeleeArc { arc_deg, .. } = kind.def().behavior {
+            sweep_arcs.entry(arc_deg.round() as u32).or_insert_with(|| meshes.add(sweep_arc_mesh(arc_deg)));
+            sweep_mats.insert(
+                kind,
+                materials.add(StandardMaterial {
+                    base_color: c.with_alpha(SWEEP_ALPHA),
+                    emissive: c.to_linear() * 1.2,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    double_sided: true,
+                    cull_mode: None,
+                    ..default()
+                }),
+            );
+        }
         aura_mats.insert(
             kind,
             materials.add(StandardMaterial {
@@ -142,7 +191,8 @@ pub fn setup_weapon_assets(
         proj_mesh: meshes.add(Mesh::from(Sphere::new(0.22))),
         drone_mesh: meshes.add(Mesh::from(Cuboid::new(0.4, 0.25, 0.55))),
         beam_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0))),
-        sweep_mesh: meshes.add(Mesh::from(Cuboid::new(1.0, 0.12, 1.0))),
+        sweep_arcs,
+        sweep_mats,
         aura_mesh: meshes.add(Mesh::from(Sphere::new(1.0))),
         splat_mesh: meshes.add(Mesh::from(Cylinder::new(1.0, 0.04))),
         ring_mesh: meshes.add(Mesh::from(Torus::new(0.9, 1.0))),
@@ -388,17 +438,16 @@ fn fire_volley(
                     });
                 }
             }
-            // sweep visual
+            // sweep visual: a crescent over exactly the arc and reach that just hit
+            let arc_mesh = assets.sweep_arcs.get(&(arc_deg.round() as u32)).unwrap_or(&assets.sweep_arcs[&360]);
             commands.spawn((
-                Mesh3d(assets.sweep_mesh.clone()),
-                MeshMaterial3d(assets.mats[&v.kind].clone()),
-                Transform::from_translation(if v.ring { origin } else { origin + aim * r * 0.5 })
+                Mesh3d(arc_mesh.clone()),
+                MeshMaterial3d(assets.sweep_mats.get(&v.kind).unwrap_or(&assets.mats[&v.kind]).clone()),
+                Transform::from_translation(origin + up * SWEEP_LIFT)
                     .with_rotation(sphere::frame_quat(up, aim))
-                    .with_scale(if v.ring {
-                        Vec3::new(r * 2.0, 0.1, r * 2.0)
-                    } else {
-                        Vec3::new(r * (arc_deg / 90.0).min(2.2), 0.1, r)
-                    }),
+                    .with_scale(Vec3::new(r, 1.0, r)),
+                // a see-through streak must not print a solid shadow on the ground
+                bevy::light::NotShadowCaster,
                 Fader { life: 0.14, max: 0.14, swell: None },
                 StageScoped,
             ));
