@@ -662,7 +662,7 @@ pub const CASCADE_BAND: f32 = 5.0;
 pub const CASCADE_DAMAGE_MULT: f32 = 8.0;
 pub const CASCADE_BOSS_MULT: f32 = 0.35;
 /// How long the belt crackles on screen, and how far above the ground it rides.
-pub const CASCADE_VIS_SECS: f32 = 1.4;
+pub const CASCADE_VIS_SECS: f32 = 14.0;
 pub const CASCADE_VIS_LIFT: f32 = 1.4;
 /// Named duo combos (§11): a teammate's setup hit (chill / herd / rivet) counts for this
 /// long; the finisher's payoff: Deep Freeze Protocol shatters (a burst of the kill's max HP ×
