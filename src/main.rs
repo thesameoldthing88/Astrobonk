@@ -332,6 +332,7 @@ fn main() {
         )
         // one-shots are presented behind a card panel too (a joiner's launch must land)
         .add_systems(Update, bestiary::bestiary_fx_presentation.run_if(in_state(AppState::InRun)))
+        .add_systems(Update, bestiary::temp_debug_near_cam.run_if(in_state(AppState::InRun)))
         .add_systems(
             Update,
             bestiary::dev_spawn_enemies
