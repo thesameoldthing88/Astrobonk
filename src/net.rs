@@ -1835,8 +1835,10 @@ pub fn start_host(commands: &mut Commands, channels: &RepliconChannels, port: u1
     commands.insert_resource(transport);
     commands.insert_resource(HostPort(port));
     commands.insert_resource(NetRole::Host);
-    info!("hosting on port {port}");
-    crate::playlog::line(format!("NET hosting on port {port}"));
+    // the address too: it is what the other player types, and what a log reader needs
+    let ip = local_ip();
+    info!("hosting on {ip} port {port}");
+    crate::playlog::line(format!("NET hosting on {ip} port {port}"));
     Ok(())
 }
 

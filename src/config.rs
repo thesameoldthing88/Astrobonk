@@ -96,6 +96,12 @@ pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
 /// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
 /// lookup's ~4 m reach), so none stands on one.
 pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
+/// Metres an interactable (pot, chest, shrine…) keeps clear of a solid prop's rim (L7).
+pub const INTERACT_PROP_CLEARANCE: f32 = 1.0;
+/// Great-circle metres around the drop point (`Vec3::Y`, where every stage starts) kept free
+/// of props, so the first view of a planet is never from inside a boulder (the chase camera
+/// sits 7.5 m back and avoids terrain, not props).
+pub const START_CLEAR_ARC: f32 = 12.0;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;
@@ -223,6 +229,24 @@ pub const SPAWN_EXHALE_SECS: f32 = 15.0;
 /// The Static's own base rate (then scaled like everything else) — it never stops growing.
 pub const STATIC_RATE_BASE: f32 = 4.2;
 pub const STATIC_RATE_GROWTH: f32 = 0.065; // per second of overtime
+/// Seconds of the §3 spawn-mix arc a chained world starts ahead per step of depth, on top
+/// of joining the arc where its shorter countdown begins (`scaling::mix_secs`).
+pub const MIX_DEPTH_HEAD_START_SECS: f32 = 60.0;
+/// The HUD's horizon test (`hud::update_edge_markers`) treats the planet as a ball this
+/// many metres under its mean surface (or under the target's own ground, if lower): what
+/// the camera-to-target line passes through that ball for is over the horizon.
+pub const EDGE_MARKER_OCCLUDER_INSET: f32 = 0.5;
+/// The overflow valve (`enemies::director_spawn`, GDD §9). A crowd enemy this many arc
+/// metres from every astronaut is over any horizon — the spawn band is 42–58 m, and on the
+/// Dark Moon, the smallest world, nothing is more than 330 m away — so dissolving it into The Static costs
+/// the fight nothing, and its slot spawns fresh where the players are.
+pub const STATIC_RECYCLE_ARC: f32 = 100.0;
+/// Spawns the cap had no room for, banked for The Static at most this many per stage.
+pub const STATIC_BACKLOG_MAX: f32 = 300.0;
+/// Extra ghosts per second the backlog adds once The Static rises (room permitting).
+pub const STATIC_BACKLOG_DRAIN: f32 = 4.0;
+/// Backlog size at which the host is told The Static is gathering (once per stage).
+pub const STATIC_GATHERING_TELL: f32 = 40.0;
 /// Party spawn scaling (GDD §11): 100 / 175 / 240 / 300 %.
 pub const PARTY_SPAWN_SCALE: [f32; 4] = [1.0, 1.75, 2.4, 3.0];
 
@@ -607,9 +631,54 @@ pub const TELEGRAPH_PULSE_AMP: f32 = 0.07;
 /// line is still tracking. A locked line stops marching — the "dodge now" tell.
 pub const AIM_DASHES: usize = 12;
 pub const AIM_DASH_SPEED: f32 = 9.0;
-/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15).
-pub const BLOOM_INTENSITY: f32 = 0.15;
+/// Camera bloom at rest and under flash reduction (Bloom::NATURAL is 0.15). The toon look
+/// keeps it sparing: flat cel colors read cleaner without a haze over them.
+pub const BLOOM_INTENSITY: f32 = 0.1;
 pub const BLOOM_INTENSITY_REDUCED: f32 = 0.04;
+/// ...and only the brightest pixels feed it (soft knee), so a lit suit or a pale rock never
+/// glows — suns, stars, glows and hit flashes still do.
+pub const BLOOM_THRESHOLD: f32 = 0.6;
+pub const BLOOM_THRESHOLD_SOFTNESS: f32 = 0.5;
+
+// ── Toon look (locked direction #7, `toon.rs`) ────────────────────────────────
+/// Cel bands on N·L for every lit StandardMaterial: below the first edge a face gets no
+/// direct light (ambient only), between the edges the MID level, above the second FULL.
+/// Each step is smoothed over ±TOON_BAND_SOFT of N·L so a band edge isn't a jagged pixel stair.
+pub const TOON_BAND_EDGES: (f32, f32) = (0.06, 0.38);
+pub const TOON_BAND_MID: f32 = 0.3;
+pub const TOON_BAND_FULL: f32 = 0.72;
+pub const TOON_BAND_SOFT: f32 = 0.035;
+/// A lit rim just inside every silhouette turned toward the sun (drawn by the ink pass, so
+/// only real edges get it, never a grazing stretch of ground): brightens the surface by this
+/// share. Scales with the sun (a shrunken sun, a lower rim); the night side never has one.
+pub const TOON_RIM_STRENGTH: f32 = 0.35;
+/// Specular turns into a hard cel highlight: glossy parts (visors) keep a crisp spot above
+/// this brightness, rough ones (rock, dust, cloth) lose their soft sheen.
+pub const TOON_SPEC_EDGE: (f32, f32) = (0.08, 0.14);
+/// How much of the terrain's own bumpy normal the ground shades with (the rest is the
+/// planet's radial normal), so cel bands follow the world's curve and its big hills instead
+/// of speckling across every small bump.
+pub const TOON_TERRAIN_NORMAL_DETAIL: f32 = 0.55;
+/// The terrain's height colors (crater floor → peak) come in this many flat steps.
+pub const TOON_TERRAIN_BANDS: usize = 4;
+/// The flashlight cone in two cel steps: a dimmer outer ring at this share, the full core.
+/// Edges are in the spot's own 0..1 falloff (1 = inside the inner angle).
+pub const TOON_CONE_RING: f32 = 0.4;
+pub const TOON_CONE_EDGES: (f32, f32) = (0.03, 0.4);
+/// Ink outlines (post-process over the depth + normal prepass): line width in pixels at
+/// 720p (scaled with the window height), and ×this in the §13 high-contrast mode.
+pub const TOON_INK_PX: f32 = 1.0;
+pub const TOON_INK_HIGH_CONTRAST: f32 = 2.0;
+/// A silhouette is inked where the depth's second difference, relative to the pixel's own
+/// depth, exceeds this (planes are linear in reverse-Z depth, so they never trip it)...
+pub const TOON_INK_DEPTH_EDGE: f32 = 0.025;
+/// ...and a crease where neighbouring normals turn by more than this (1 − cos), at this
+/// opacity — a touch lighter than the silhouette, so an outline still reads as the outside.
+pub const TOON_INK_NORMAL_EDGE: f32 = 0.3;
+pub const TOON_INK_CREASE_ALPHA: f32 = 0.85;
+/// Ink fades out between these view distances (m): the planet's far limb is well inside,
+/// the starfield and the sun disc (1400 m+) never get a line.
+pub const TOON_INK_FADE: (f32, f32) = (180.0, 320.0);
 /// Every glow below lives on UNLIT materials, which draw their base color and ignore
 /// emissive (bevy_pbr's unlit branch), so a flash is softened by dimming its base color —
 /// the camera bloom then has less to spread, too.

@@ -78,13 +78,13 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P26 Codex, mastery & skins, Unlock Web, daily lives | ☐ |
 | P27 Gamepad parity, remapping, rumble, aim assist | ☐ |
 | P28 Performance, robustness, dev gating | ☐ |
-| P30 Known issues sweep — solo, save, world, combat | ☐ |
+| P30 Known issues sweep — solo, save, world, combat | ✅ (landed by the lead after the weekly agent limit hit, before an independent review ran). Closed H1-H3, M12-M14, M16-M20, M22, L1, L3-L9, L14-L16, L24-L30 (see KNOWN_ISSUES). Gaps: overflow/cap numbers not human-playtested; the wrench sweep visual is an opaque flash (P12/P24) |
 | P31 Known issues sweep — co-op | ☐ |
 | P32 One hero, twelve suits | ☐ |
 | P33 The Journey: planets as levels, crash site, Hades-style persistence | ☐ |
 | P34 Suit upgrades you can see | ☐ |
 | P35 Story, the turtle, and the cartoon-spooky tone | ☐ |
-| P36 Toon art style | ☐ |
+| P36 Toon art style | ✅ (landed by the lead after the weekly agent limit, no independent review). Cel lighting via a patch of bevy_pbr's lighting module + one ink/rim post pass; per-world ToonLook. Also fixed on landing: upright charge-shrine rings, props in the drop zone. Gaps: flash-reduction/photosensitivity interplay with bloom only eyeballed; relies on bevy_pbr 0.18.1's lighting anchors (the patch refuses whole and logs if they move) |
 | P29 Final audit + docs | ☐ |
 
 ---

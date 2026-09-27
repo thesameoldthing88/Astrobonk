@@ -260,31 +260,105 @@ pub struct EnemyAssets {
 #[derive(Component)]
 pub struct BaseMat(pub Handle<StandardMaterial>);
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct SpatialHash {
     pub map: HashMap<IVec3, Vec<(Entity, Vec3)>>,
+    /// The shell the members live in: the least and greatest distance from the planet's
+    /// centre over every member at the last rebuild. The horde is a skin a few metres thick
+    /// on a sphere, so most cells of a query's cube hold nothing and need no probe.
+    pub shell: (f32, f32),
+}
+
+impl Default for SpatialHash {
+    fn default() -> Self {
+        Self { map: HashMap::new(), shell: (f32::INFINITY, f32::NEG_INFINITY) }
+    }
+}
+
+/// Distance from `p` to the cell span `[k·cell, (k+1)·cell)` along one axis (0 inside it).
+fn axis_gap(p: f32, k: i32) -> f32 {
+    let lo = k as f32 * ENEMY_SEPARATION_CELL;
+    (lo - p).max(p - (lo + ENEMY_SEPARATION_CELL)).max(0.0)
 }
 
 impl SpatialHash {
     pub fn key(pos: Vec3) -> IVec3 {
         (pos / ENEMY_SEPARATION_CELL).floor().as_ivec3()
     }
-    /// All enemies within `radius` of `pos` (approximate, cell-based).
+
+    /// Every member that could lie within `radius` of `pos` (cell-based: a superset, never
+    /// missing one). Probes only the cells that both touch the query ball and cross the
+    /// members' shell (M18: the old full-cube scan was 3,375 probes for a homing seeker's
+    /// 14 m and 9,261 for the comet's 22 m; `spatial_hash_self_check` reports the new ones).
     pub fn near<'a>(&'a self, pos: Vec3, radius: f32) -> impl Iterator<Item = (Entity, Vec3)> + 'a {
-        let r = (radius / ENEMY_SEPARATION_CELL).ceil() as i32;
-        let c = Self::key(pos);
-        (-r..=r).flat_map(move |x| {
-            (-r..=r).flat_map(move |y| {
-                (-r..=r).flat_map(move |z| {
-                    self.map
-                        .get(&(c + IVec3::new(x, y, z)))
-                        .into_iter()
-                        .flatten()
-                        .copied()
-                })
-            })
-        })
+        self.cells(pos, radius).flat_map(move |k| self.map.get(&k).into_iter().flatten().copied())
     }
+
+    /// The cells a `near` query probes.
+    fn cells(&self, pos: Vec3, radius: f32) -> impl Iterator<Item = IVec3> {
+        let cell = ENEMY_SEPARATION_CELL;
+        let r = (radius / cell).ceil() as i32;
+        let c = Self::key(pos);
+        let (lo, hi) = self.shell;
+        (-r..=r)
+            .flat_map(move |x| (-r..=r).map(move |y| (c.x + x, c.y + y)))
+            .flat_map(move |(kx, ky)| {
+                // the z cells of this column the ball reaches (none if it misses the column)
+                let (gx, gy) = (axis_gap(pos.x, kx), axis_gap(pos.y, ky));
+                let rest = radius * radius - gx * gx - gy * gy;
+                let (z0, z1) = if rest < 0.0 {
+                    (1, 0)
+                } else {
+                    let s = rest.sqrt();
+                    (((pos.z - s) / cell).floor() as i32, ((pos.z + s) / cell).floor() as i32)
+                };
+                (z0..=z1).map(move |kz| IVec3::new(kx, ky, kz))
+            })
+            .filter(move |k| {
+                // the cell's nearest and farthest points from the planet's centre
+                let min = k.as_vec3() * cell;
+                let max = min + Vec3::splat(cell);
+                let near = Vec3::ZERO.clamp(min, max).length();
+                let far = min.abs().max(max.abs()).length();
+                far >= lo && near <= hi
+            })
+    }
+}
+
+/// Headless self-check (M18): `SpatialHash::near` finds exactly what a brute-force scan
+/// finds within the radius, on a crowd scattered over a planet's skin, for the radii the
+/// game queries — and says how much of the old cube scan it skips.
+pub fn spatial_hash_self_check() -> Result<String, String> {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5A7);
+    let radius_planet = 140.0;
+    let mut hash = SpatialHash::default();
+    let mut all: Vec<(Entity, Vec3)> = Vec::new();
+    for i in 0..1200u32 {
+        let dir = random_dir(&mut rng);
+        let pos = dir * (radius_planet + rng.gen_range(-3.0..4.5));
+        all.push((Entity::from_raw_u32(i + 1).unwrap(), pos));
+    }
+    // cluster a third of them around one spot, like a horde on the player
+    let hot = Vec3::Y * radius_planet;
+    for (_, p) in all.iter_mut().take(400) {
+        let jitter = Vec3::new(rng.gen_range(-18.0..18.0), 0.0, rng.gen_range(-18.0..18.0));
+        *p = (hot + jitter).normalize() * (radius_planet + rng.gen_range(-1.0..3.0));
+    }
+    hash.fill(all.iter().copied());
+    let mut report = Vec::new();
+    for (q, radius) in [(hot, 14.0), (hot, 22.0), (hot + Vec3::X * 7.0, 2.2), (hot, 0.8), (Vec3::X * 141.0, 22.0)] {
+        let mut got: Vec<Entity> = hash.near(q, radius).filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| e).collect();
+        let mut want: Vec<Entity> = all.iter().filter(|(_, p)| p.distance(q) <= radius).map(|(e, _)| *e).collect();
+        got.sort();
+        want.sort();
+        if got != want {
+            return Err(format!("near({radius} m) found {} of the {} within reach", got.len(), want.len()));
+        }
+        let cube = (2 * (radius / ENEMY_SEPARATION_CELL).ceil() as usize + 1).pow(3);
+        report.push(format!("{radius}m {}/{cube}", hash.cells(q, radius).count()));
+    }
+    Ok(report.join(", "))
 }
 
 #[derive(Resource)]
@@ -301,6 +375,14 @@ pub struct Director {
     /// Bosses alive last tick; a drop means one just fell and the horde exhales.
     pub bosses_alive: usize,
     pub tick: f32,
+    /// The overflow valve (GDD §9 "overflow merges into The Static"): spawns the live cap
+    /// had no room for, banked this stage instead of discarded. They come back as extra
+    /// ghosts once The Static rises (`STATIC_BACKLOG_DRAIN` a second, when there is room).
+    pub static_backlog: f32,
+    /// Far stragglers the valve has handed to The Static this stage (see `director_spawn`).
+    pub static_recycled: u32,
+    /// The "THE STATIC IS GATHERING" line has been shown this stage.
+    pub gathering_told: bool,
 }
 
 impl Default for Director {
@@ -313,6 +395,9 @@ impl Default for Director {
             exhale: 0.0,
             bosses_alive: 0,
             tick: 0.0,
+            static_backlog: 0.0,
+            static_recycled: 0,
+            gathering_told: false,
         }
     }
 }
@@ -475,7 +560,7 @@ fn aim_dash_mesh(pad: f32) -> Mesh {
         let z = -(i as f32 * period + dash * 0.5);
         m.add_box(Vec3::new(1.0 + pad, 1.0 + pad, dash + pad * 0.02), crate::meshkit::at(Vec3::new(0.0, 0.0, z)), Color::WHITE);
     }
-    m.build_ccw()
+    m.build()
 }
 
 /// The Burrower's crack decal: seven jagged three-segment cracks radiating from a small
@@ -511,7 +596,7 @@ fn crack_mesh(width: f32) -> Mesh {
         }
     }
     m.add_cylinder(0.12 + width, 0.03 + width * 0.2, 7, crate::meshkit::at(Vec3::ZERO), Color::WHITE);
-    m.build_ccw()
+    m.build()
 }
 
 /// Danger material colors in a palette: ring, ring fill, shot, beam charge, beam fire. The
@@ -666,13 +751,24 @@ pub fn setup_enemy_assets(
 }
 
 pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform), With<Enemy>>) {
-    for v in hash.map.values_mut() {
-        v.clear();
+    hash.fill(q.iter().map(|(e, tf)| (e, tf.translation)));
+}
+
+impl SpatialHash {
+    /// Replace the contents (keeping the cells' allocations) and re-measure the shell.
+    pub fn fill(&mut self, members: impl Iterator<Item = (Entity, Vec3)>) {
+        for v in self.map.values_mut() {
+            v.clear();
+        }
+        let mut shell = (f32::INFINITY, f32::NEG_INFINITY);
+        for (e, pos) in members {
+            let d = pos.length();
+            shell = (shell.0.min(d), shell.1.max(d));
+            self.map.entry(Self::key(pos)).or_default().push((e, pos));
+        }
+        self.map.retain(|_, v| !v.is_empty());
+        self.shell = shell;
     }
-    for (e, tf) in &q {
-        hash.map.entry(SpatialHash::key(tf.translation)).or_default().push((e, tf.translation));
-    }
-    hash.map.retain(|_, v| !v.is_empty());
 }
 
 /// One crowd enemy. Public so the headless probes can stage an exact scene (a comet tail).
@@ -740,7 +836,17 @@ pub fn spawn_enemy(
 ///
 /// Budget per second = `Rate_base` (the §3 arc beats) × the breathing modifier (hold while a
 /// miniboss is up, exhale after a boss falls) × `Scaling::spawn` (run time, depth, Δ, party).
-#[allow(clippy::too_many_arguments)]
+///
+/// The live cap counts the CROWD only — pots are scenery and bosses arrive on the clock, so
+/// neither takes a horde slot (L16). A budget the cap has no room for is not thrown away
+/// (M16, GDD §9 "overflow merges into The Static"):
+/// 1. crowd enemies stranded far from every astronaut — beyond `STATIC_RECYCLE_ARC`, over
+///    any horizon, adding nothing but a filled slot — dissolve into The Static, farthest
+///    first, and the same budget spawns fresh over the players' horizon: the pressure stays
+///    where the fighting is instead of piling up behind a kite;
+/// 2. whatever still does not fit is banked in `Director::static_backlog` and pours out as
+///    extra ghosts once The Static rises — the ones the planet could not hold are waiting.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn director_spawn(
     mut commands: Commands,
     time: Res<Time>,
@@ -750,9 +856,10 @@ pub fn director_spawn(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(&Player, &crate::run::PlayerState)>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_crowd: Query<(Entity, &Enemy, Has<Buried>), (Without<crate::interact::Pot>, Without<Boss>)>,
     q_boss: Query<&Boss>,
     (crawl, mut gimmicks): (Res<crate::gimmicks::Crawl>, ResMut<crate::gimmicks::GimmickTelemetry>),
+    mut banners: MessageWriter<BannerMsg>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -775,7 +882,7 @@ pub fn director_spawn(
     let party = q_player.iter().count();
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
-    let alive = q_enemies.iter().count();
+    let alive = q_crowd.iter().count();
     // Party scaling (GDD §11) lives in the Scaling too: more players means more horde, but
     // sub-linearly — a full budget per player doubles density and blows the cap, while no
     // bump at all gives each player half a horde.
@@ -797,6 +904,12 @@ pub fn director_spawn(
         * sc.spawn;
     director.spawn_bank += rate * dt;
     director.tick += dt;
+    // The backlog rejoins through The Static's own door.
+    if run.static_active && director.static_backlog > 0.0 {
+        let drain = (STATIC_BACKLOG_DRAIN * dt).min(director.static_backlog);
+        director.static_backlog -= drain;
+        director.spawn_bank += drain;
+    }
 
     // Elite rolls (see config::ELITE_ROLL_SECS). The Static has no elites.
     if !run.static_active {
@@ -829,7 +942,40 @@ pub fn director_spawn(
     director.spawn_bank -= budget as f32;
 
     let cap = sc.live_cap;
-    let room = cap.saturating_sub(alive);
+    let mut room = cap.saturating_sub(alive);
+    if budget > room {
+        // 1. The far stragglers go first (never an elite — its loot is promised — nor a
+        // Burrower mid-ambush). Arc to the NEAREST astronaut, so a co-op squad split
+        // across the planet keeps both hordes.
+        let want = budget - room;
+        let mut far: Vec<(f32, Entity)> = q_crowd
+            .iter()
+            .filter(|(_, e, buried)| !e.elite && !*buried)
+            .filter_map(|(ent, e, _)| {
+                let arc = anchors
+                    .iter()
+                    .map(|(a, _)| sphere::arc_dist(e.dir, *a, planet.radius))
+                    .fold(f32::INFINITY, f32::min);
+                (arc > STATIC_RECYCLE_ARC).then_some((arc, ent))
+            })
+            .collect();
+        if far.len() > want {
+            far.select_nth_unstable_by(want - 1, |a, b| b.0.total_cmp(&a.0));
+            far.truncate(want);
+        }
+        for (_, ent) in &far {
+            commands.entity(*ent).despawn();
+        }
+        director.static_recycled += far.len() as u32;
+        room += far.len();
+        // 2. The rest waits in The Static.
+        let overflow = budget.saturating_sub(room);
+        director.static_backlog = (director.static_backlog + overflow as f32).min(STATIC_BACKLOG_MAX);
+        if !run.static_active && !director.gathering_told && director.static_backlog >= STATIC_GATHERING_TELL {
+            director.gathering_told = true;
+            banners.write(BannerMsg("THE STATIC IS GATHERING. IT KEEPS WHAT THE PLANET CAN'T HOLD.".into()));
+        }
+    }
     let n = budget.min(room);
     for i in 0..n {
         let (anchor, flare) = anchors[i % anchors.len()];
@@ -862,7 +1008,7 @@ pub fn director_spawn(
             continue;
         }
 
-        let mix = EnemyKind::mix(run.elapsed);
+        let mix = EnemyKind::mix(scaling::mix_secs(run.timer, run.stage));
         let kind = mix[rng.gen_range(0..mix.len())];
         let elite = std::mem::take(&mut director.elite_pending);
         if elite {
@@ -1033,7 +1179,7 @@ pub fn boss_phase_system(
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
             let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
-            let mix = EnemyKind::mix(run.elapsed.max(300.0));
+            let mix = EnemyKind::mix(scaling::mix_secs(run.timer, run.stage).max(300.0));
             let kind = mix[rng.gen_range(0..mix.len())];
             let elite = want == 2 && rng.gen_bool(0.25);
             spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, &mut rng);
@@ -1167,10 +1313,9 @@ pub fn spawn_anubot_beam_vis(commands: &mut Commands, assets: &EnemyAssets, boss
     ));
 }
 
-/// DEV: press B during play to summon the current planet's stage boss immediately
-/// (so the Craterpillar is testable without surviving 8+ minutes). Host/solo only — a
-/// client summoning a boss would spawn one its host never simulates. P28 moves it behind
-/// `--dev`.
+/// DEV (`--dev` only): press B during play to summon the current planet's stage boss
+/// immediately (so the Craterpillar is testable without surviving 8+ minutes). Host/solo
+/// only — a client summoning a boss would spawn one its host never simulates.
 pub fn debug_spawn_boss(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,

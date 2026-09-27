@@ -294,9 +294,12 @@ pub fn apply_sky(
     let k = (AMBIENT_EASE * time.delta_secs()).min(1.0);
     ease.day += (day - ease.day) * k;
     ease.far += (far - ease.far) * k;
-    let bright = (light.ambient_night + (light.ambient_day - light.ambient_night) * ease.day)
+    // The night end is the world's toon night fill (P36's `ToonLook`, tuned so the flashlight
+    // cone is THE read at night); the day end is this world's daylight ambient.
+    let look = planet.kind.look();
+    let bright = (look.night_brightness + (light.ambient_day - look.night_brightness) * ease.day)
         * (1.0 - FARSIDE_AMBIENT_DROP * ease.far);
-    let (n, d) = (light.ambient_night_color.to_linear(), light.ambient_day_color.to_linear());
+    let (n, d) = (look.night.to_linear(), light.ambient_day_color.to_linear());
     let color = Color::LinearRgba(n.mix(&d, ease.day));
     if (ambient.brightness - bright).abs() > 0.05 {
         ambient.brightness = bright;
