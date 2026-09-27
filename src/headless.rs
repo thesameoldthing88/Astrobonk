@@ -2122,6 +2122,23 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             .unwrap_or((0, 1.0, 1.0));
         crate::director::silver_payout(&run, false, golden, rocks, gain, static_silver)
     };
+    // L7: nothing placed by the stage layout may stand inside a solid prop (the boss-drop
+    // teleporter and the miniboss cache land where a corpse fell, so they are exempt).
+    let buried_in_props = {
+        let props: Vec<(Vec3, f32)> = world.resource::<crate::planet::PropColliders>().0.iter().map(|c| (c.dir, c.radius)).collect();
+        let radius = world.resource::<CurrentPlanet>().radius;
+        let placed: Vec<Vec3> = world
+            .query::<(&Transform, Option<&crate::interact::Interactable>, Has<crate::interact::Pot>)>()
+            .iter(world)
+            .filter(|(_, i, pot)| {
+                *pot || i.is_some_and(|i| {
+                    !matches!(i.kind, crate::interact::InteractKind::Teleporter | crate::interact::InteractKind::RewardChest)
+                })
+            })
+            .map(|(tf, ..)| tf.translation.normalize_or_zero())
+            .collect();
+        placed.iter().filter(|d| props.iter().any(|(c, r)| sphere::arc_dist(**d, *c, radius) < *r)).count()
+    };
     // H1: Results bank from `RunState::final_sheet` AFTER OnExit(InRun) has despawned the
     // stage, astronaut included. Tear the stage down the same way and make sure what would
     // be banked is still the live sheet, not a level-1 fallback.
@@ -2171,6 +2188,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         } else {
             println!("OVERFLOW OK {line}");
         }
+    }
+    if buried_in_props > 0 {
+        println!("FAIL: {buried_in_props} pots/interactables were placed inside solid props (L7)");
+        ok = false;
     }
     if stale_bank {
         println!("FAIL: Results would bank level {} / gold {}, the run ended at level {p_level} / gold {p_gold} (H1)", banked.level, banked.gold);
@@ -2608,14 +2629,14 @@ fn headless_enter(
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
     // work is testable without launching two windows by hand.
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, &props, Vec3::Y);
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
 }
