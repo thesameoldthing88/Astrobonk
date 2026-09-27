@@ -166,6 +166,7 @@ pub fn levelup_trigger(
         return;
     }
     let mut rng = rand::thread_rng();
+    ps.open_level_hand();
     let opts = run::roll_upgrades(&ps, &save, &mut rng);
     *panel = ChoicePanel {
         title: format!("LEVEL {}", ps.level),

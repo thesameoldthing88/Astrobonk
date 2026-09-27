@@ -599,7 +599,7 @@ pub fn weapon_fire(
     q_pots: Query<(), With<Pot>>,
     q_drones: Query<(Entity, &Drone)>,
     q_auras: Query<(Entity, &AuraVis)>,
-    mut hits: MessageWriter<HitMsg>,
+    (mut hits, mut slows): (MessageWriter<HitMsg>, MessageWriter<crate::messages::SlowMsg>),
     mut sfx: MessageWriter<SfxMsg>,
     role: Res<crate::net::NetRole>,
 ) {
@@ -672,7 +672,9 @@ pub fn weapon_fire(
                                 crit,
                                 knock: Vec3::ZERO,
                             });
-                            let _ = slow; // applied in apply_hits via kind check
+                            if slow > 0.0 {
+                                slows.write(crate::messages::SlowMsg { target: e, slow });
+                            }
                         }
                     }
                 }
@@ -1142,7 +1144,11 @@ pub fn aura_follow(
         let Ok((run, ptf)) = q_player.get(a.owner) else { continue };
         if let Behavior::Aura { radius, .. } = a.weapon.def().behavior {
             tf.translation = ptf.translation;
-            tf.scale = Vec3::splat(radius * run.aura_scale() * (1.0 + (t * 3.0).sin() * 0.04));
+            // Drawn at the radius it damages at: `weapon_fire` grows it with the weapon's
+            // level and the Size stat too (L15: at level 7 the field hit 36% wider than drawn).
+            let lvl_size = run.weapons.iter().find(|w| w.kind == a.weapon).map_or(1.0, |w| w.kind.level_scaling(w.level).2);
+            let size = lvl_size * run.stats.size;
+            tf.scale = Vec3::splat(radius * run.aura_scale() * size * (1.0 + (t * 3.0).sin() * 0.04));
         }
     }
 }
@@ -1184,20 +1190,18 @@ pub fn apply_hits(
     mut kills: MessageWriter<KillMsg>,
     mut numbers: MessageWriter<NumberMsg>,
     mut sfx: MessageWriter<SfxMsg>,
+    mut slows: MessageReader<crate::messages::SlowMsg>,
 ) {
     let mut rng = rand::thread_rng();
 
+    // A cryo field's pulse chills to ITS weapon's slow (CryoVent 45%, Absolute Zero 75%).
+    for s in slows.read() {
+        if let Ok((mut e, ..)) = enemies.get_mut(s.target) {
+            e.slow = e.slow.max(s.slow);
+        }
+    }
+
     for msg in reader.read() {
-        // Resolve cryo against THIS hit's shooter, not an arbitrary player.
-        let has_cryo = msg
-            .source
-            .and_then(|s| q_ps.get(s).ok())
-            .map(|ps| {
-                ps.weapons
-                    .iter()
-                    .any(|w| matches!(w.kind, WeaponKind::CryoVent | WeaponKind::AbsoluteZero))
-            })
-            .unwrap_or(false);
         // Pots first: they piggyback on the enemy hash but die as pots.
         if let Ok((mut pot, tf)) = pots.get_mut(msg.target) {
             if pot.broken {
@@ -1226,9 +1230,6 @@ pub fn apply_hits(
             e.flash = 1.0;
             let knock_scale = if boss.is_some() { 0.05 } else { 1.0 };
             e.knock += msg.knock * knock_scale;
-            if has_cryo {
-                e.slow = (e.slow + 0.25).min(0.65);
-            }
             numbers.write(NumberMsg {
                 pos: tf.translation,
                 amount: msg.amount,

@@ -231,6 +231,10 @@ pub struct PlayerState {
     pub refreshes: u32,
     /// Paid refreshes bought so far — drives the rising Gold price.
     pub paid_refreshes: u32,
+    /// Lady Fortuna's passive (GDD §5 "free level-up reroll each level"): the level-up hand
+    /// in front of her still has its free reroll. Dealt by `open_level_hand`, spent before
+    /// her run's free refreshes (L30: it used to be unlimited, so those never mattered).
+    pub level_reroll: bool,
     pub banned_items: HashSet<ItemKind>,
     /// Weapons (and evolutions) banished out of this run's card pool.
     pub banned_weapons: HashSet<WeaponKind>,
@@ -362,6 +366,7 @@ impl PlayerState {
             banishes: config::BANISH_CHARGES,
             refreshes: config::FREE_REFRESHES,
             paid_refreshes: 0,
+            level_reroll: false,
             banned_items: HashSet::new(),
             banned_weapons: HashSet::new(),
             evo_slots_bonus: 0,
@@ -708,10 +713,15 @@ impl PlayerState {
 
     // ------------------------------------------------ level-up choice economy (§3)
 
-    /// What the next level-up Refresh costs. Lady Fortuna never pays (her passive); everyone
-    /// else spends the run's free refreshes first, then Gold that rises with each paid use.
+    /// A level-up hand is being dealt: Lady Fortuna gets its free reroll.
+    pub fn open_level_hand(&mut self) {
+        self.level_reroll = self.character == AstronautKind::Fortuna;
+    }
+
+    /// What the next level-up Refresh costs: Lady Fortuna's reroll for this hand first, then
+    /// the run's free refreshes, then Gold that rises with each paid use.
     pub fn refresh_price(&self) -> RefreshPrice {
-        if self.character == AstronautKind::Fortuna || self.refreshes > 0 {
+        if self.level_reroll || self.refreshes > 0 {
             RefreshPrice::Free
         } else {
             let cost = config::REFRESH_BASE_COST as f32
@@ -725,7 +735,9 @@ impl PlayerState {
     pub fn spend_refresh(&mut self) -> bool {
         match self.refresh_price() {
             RefreshPrice::Free => {
-                if self.character != AstronautKind::Fortuna {
+                if self.level_reroll {
+                    self.level_reroll = false;
+                } else {
                     self.refreshes -= 1;
                 }
                 true
@@ -1185,11 +1197,27 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
         RefreshPrice::Gold(next) if next > first => {}
         other => return Err(format!("refresh price did not rise ({first} -> {other:?})")),
     }
+    // Lady Fortuna: one free reroll per level-up hand (GDD §5), on top of — and spent
+    // before — the run's free refreshes; then she pays like anyone.
     let mut fortuna = PlayerState::new(AstronautKind::Fortuna, save);
-    for _ in 0..10 {
-        if !fortuna.spend_refresh() || fortuna.gold != 0 {
-            return Err("Lady Fortuna paid for a refresh".into());
+    let run_frees = fortuna.refreshes;
+    fortuna.open_level_hand();
+    for _ in 0..=run_frees {
+        if fortuna.refresh_price() != RefreshPrice::Free || !fortuna.spend_refresh() || fortuna.gold != 0 {
+            return Err("Lady Fortuna's level reroll or run refreshes were not free".into());
         }
+    }
+    if fortuna.refreshes != 0 || fortuna.refresh_price() == RefreshPrice::Free {
+        return Err("Lady Fortuna's rerolls are unlimited again".into());
+    }
+    fortuna.open_level_hand();
+    if fortuna.refresh_price() != RefreshPrice::Free || !fortuna.spend_refresh() || fortuna.refresh_price() == RefreshPrice::Free {
+        return Err("Lady Fortuna's next level-up did not deal exactly one free reroll".into());
+    }
+    let mut buzz = PlayerState::new(AstronautKind::Buzz, save);
+    buzz.open_level_hand();
+    if buzz.level_reroll {
+        return Err("only Lady Fortuna rerolls a level for free".into());
     }
 
     // Banish: BANISH_CHARGES charges, strikes the card from the pool for good.

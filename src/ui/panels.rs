@@ -130,9 +130,7 @@ pub fn sync_choice_panel(
                     // charges left, and exactly what a Skip pays.
                     let dim = Color::srgb(0.45, 0.47, 0.55);
                     let (rlabel, rcolor) = match run.refresh_price() {
-                        RefreshPrice::Free if run.character == crate::content::characters::AstronautKind::Fortuna => {
-                            ("[R]EFRESH (FREE)".to_string(), Color::WHITE)
-                        }
+                        RefreshPrice::Free if run.level_reroll => ("[R]EFRESH (FREE THIS LEVEL)".to_string(), Color::WHITE),
                         RefreshPrice::Free => (format!("[R]EFRESH ({} FREE)", run.refreshes), Color::WHITE),
                         RefreshPrice::Gold(c) => (
                             format!("[R]EFRESH ({c}g)"),
@@ -226,7 +224,7 @@ pub fn choice_input(
 
     if panel.is_levelup {
         if do_refresh {
-            // Free refreshes first (Fortuna: always), then rising Gold (§3).
+            // Fortuna's reroll for this level, then free refreshes, then rising Gold (§3).
             if run.spend_refresh() {
                 let mut rng = rand::thread_rng();
                 panel.options = roll_upgrades(&run, &save, &mut rng);
@@ -299,6 +297,7 @@ fn finish_choice(run: &mut PlayerState, panel: &mut ChoicePanel, phase: &mut Run
         run.pending_levelups = run.pending_levelups.saturating_sub(1);
         if run.pending_levelups > 0 {
             let mut rng = rand::thread_rng();
+            run.open_level_hand();
             panel.options = roll_upgrades(run, save, &mut rng);
             panel.title = format!("LEVEL {}", run.level);
             return;
@@ -453,6 +452,9 @@ pub fn shop_panel(
         let gold = run.gold;
         let cats: Vec<String> =
             offers.iter().map(|(item, _, _, _)| crate::run::catalyst_line(*item, &run)).collect();
+        // L24: an offer the buyer has capped since the stock was rolled says so, instead of a
+        // BUY that silently refuses
+        let maxed: Vec<bool> = offers.iter().map(|(item, ..)| run.item_count(*item) >= item.def().max_stacks).collect();
         commands
             .spawn((ShopRoot, run_overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
             .with_children(|overlay| {
@@ -487,9 +489,11 @@ pub fn shop_panel(
                                     }
                                     if *sold {
                                         c.spawn(txt("SOLD", FONT_MED, Color::srgb(0.6, 0.4, 0.4)));
+                                    } else if maxed[i] {
+                                        c.spawn(txt("MAXED", FONT_MED, Color::srgb(0.55, 0.55, 0.6)));
                                     }
                                 });
-                                if !*sold {
+                                if !*sold && !maxed[i] {
                                     card.insert(Button).insert(ShopBuy(i)).with_children(|c| {
                                         c.spawn(txt(format!("[{}] BUY {price}g", i + 1), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
                                     });
@@ -621,7 +625,6 @@ pub fn pause_panel(
                 let sc = crate::run::scaling::Scaling::for_run(&run, 1);
                 let delta = crate::run::scaling::difficulty_points(&run);
                 let refresh = match ps.refresh_price() {
-                    RefreshPrice::Free if ps.character == crate::content::characters::AstronautKind::Fortuna => "free".to_string(),
                     RefreshPrice::Free => format!("{} free", ps.refreshes),
                     RefreshPrice::Gold(c) => format!("{c}g"),
                 };

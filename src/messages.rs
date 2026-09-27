@@ -16,6 +16,16 @@ pub struct HitMsg {
     pub knock: Vec3,
 }
 
+/// A cryo field's chill on one enemy it just pulsed (`WeaponDef` `Aura { slow }`): the
+/// enemy's slow is raised to at least `slow`, then thaws on its own (`enemy_move`). Carried
+/// apart from `HitMsg` so the slow belongs to the aura that produced it — every hit of a
+/// cryo owner used to chill by a flat 0.25, whatever weapon landed it (L14).
+#[derive(Message)]
+pub struct SlowMsg {
+    pub target: Entity,
+    pub slow: f32,
+}
+
 /// Player took a hit (pre-mitigation).
 #[derive(Message)]
 pub struct PlayerHitMsg {

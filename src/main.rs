@@ -141,6 +141,7 @@ fn main() {
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
+        .add_message::<messages::SlowMsg>()
         .add_message::<messages::PlayerHitMsg>()
         .add_message::<messages::KillMsg>()
         .add_message::<messages::NumberMsg>()
