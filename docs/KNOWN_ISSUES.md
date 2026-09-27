@@ -678,7 +678,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### M12. meshkit boxes, cylinders and cones have inverted winding
 
-- **Severity:** Medium · **Area:** solo (visual) · **Evidence:** CODE + COMPUTED. The on-screen effect has not been looked at (U2). · **Status:** Open
+- **Severity:** Medium · **Area:** solo (visual) · **Evidence:** CODE + COMPUTED; confirmed on screen by P36 (the Buzz suit and enemy parts drew inside-out and near-black on the lit side). · **Status:** Fixed (af8b795, P36): every helper now winds CCW, `build_ccw` is plain `build`, and `meshkit::tests::every_shape_winds_outward` guards it.
 - **Where:**
   - `src/meshkit.rs:44-51`: the `add_box` face table; the ±X and ±Y faces are affected.
   - `src/meshkit.rs:77-116`: `add_cylinder`; all triangles are affected.
@@ -955,7 +955,7 @@ Every Low item has Status **Open**. Evidence is CODE unless stated otherwise.
 
 #### L6. Per-planet sky colour and `meteor_showers` are unused (gray backdrop)
 
-- **Severity:** Low · **Area:** solo, UI · **Status:** Open
+- **Severity:** Low · **Area:** solo, UI · **Status:** Sky fixed (af8b795, P36): `toon::apply_world_look` sets `ClearColor(planet.sky)` whenever `CurrentPlanet` changes, host and client (the Moon's sky before any run). `meteor_showers` is still unread — that is world-event content (P09), still open.
 - **Where:**
   - `src/content/planets.rs:35`: `sky`.
   - `src/content/planets.rs:44`: `meteor_showers`.
@@ -1570,7 +1570,7 @@ These are open questions. They are not confirmed defects. Do not file them as bu
 | ID | What is uncertain | Related | How to settle it |
 |---|---|---|---|
 | U1 | The runtime magnitude of the code-derived co-op bugs: how far the joiner drifts (H5); whether H7 really panics (it should, under Bevy 0.18's default handler); how often H8 happens in the real flow; the size of M1's ring displacement; which targets lose their markers in M22. Nothing in co-op was run live in the 2026-09-26 session. | H5-H8, M1, M22 | Run two instances with `--netlog` and follow each item's Repro. |
-| U2 | Whether M12's inverted winding is visible on screen. The winding itself is confirmed by computing the cross products. | M12 | Look at the rig in a windowed build, with and without `cull_mode: None`. |
+| U2 | Settled by P36: M12's inverted winding was visible on screen (inside-out, near-black suits and enemy parts). | M12 | — |
 | U3 | In the `stream_pickups` race, whether the ghost gem or the panic happens in practice. It depends on command-buffer apply order. | L34 | Force a pickup to spawn inside the collect radius and watch for both outcomes. |
 | U4 | Whether the headless summary query in the `--fast-boss --coop2` flake always returns the peer or varies by run. Whether adding `With<LocalPlayer>` fixes the flake is untested. | L57 | Apply the filter, then run the smoke 20 times. |
 | U5 | Whether air-hopping to 2.1x without sliding is intended tuning. | L1, D3 | The owner decides. |
