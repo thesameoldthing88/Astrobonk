@@ -44,9 +44,12 @@ use std::time::{Duration, SystemTime};
 // Bumped for wave 2: P03 (items in the build sync, NetItemVis, item hazard events, jump_held,
 // sun/radio in RunSnapMsg) and P04 (§13 assists in RunSnapMsg, revives in PlayerVitals, burrow
 // cracks on the hazard lane) each took 0xA570B0_5 on their own branch; the merged wire is _6.
-// Bumped for wave 3 / P05: the tome lines in `Stats` (PlayerBuildMsg), NetItemVis.lamp and
-// PickupEvent::Horizon / HorizonSettle.
-pub const PROTOCOL_ID: u64 = 0xA570B0_7;
+// Bumped for wave 3: P05 (the tome lines in `Stats` (PlayerBuildMsg), NetItemVis.lamp and
+// PickupEvent::Horizon / HorizonSettle) and P06 (edge press counts + slide_held/light in
+// PlayerInputMsg, grinding/light in NetTransform, the blink charge and antipode read in
+// NetItemVis, Slam/Blink hazard events) each took 0xA570B0_7 on their own branch; the merged
+// wire is _8.
+pub const PROTOCOL_ID: u64 = 0xA570B0_8;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -80,8 +83,13 @@ pub struct NetTransform {
     pub facing: Vec3,
     /// Mid-slide. Rides the pose rather than being derived on the client: a slide is a
     /// speed burst the finite-differenced speed can't tell apart from a bhop, and the rig
-    /// has to TUCK for the whole slide, not just while it happens to be fast.
+    /// has to TUCK for the whole slide, not just while it happens to be fast. Also set
+    /// through a Slam's dive and a grind, which wear the same tuck.
     pub sliding: bool,
+    /// Riding a Grind-Line: every machine throws rail sparks under it.
+    pub grinding: bool,
+    /// The weapon-mounted flashlight is on (F, §13) — teammates see each other's beams.
+    pub light: bool,
 }
 
 /// Which hero an astronaut is, as an explicit wire code (`hero_code`). Replicated so every
@@ -123,6 +131,12 @@ pub struct NetItemVis {
     /// Flashlight strength (Tome of Nightfall) as `lamp_code`, so every machine lights each
     /// astronaut's beam as its owner does. 0 = never written (drawn at the base 1.0).
     pub lamp: u8,
+    /// Antipode Blink's recharge, whole seconds left (0 = charged) — host-ticked, for the
+    /// owner's HUD dial.
+    pub blink_cd: u8,
+    /// Enemies at this astronaut's antipode (capped at 255), the §4 HUD tell. Only counted
+    /// for a blink carrier: the far side is a crowd the joiner's stream never covers.
+    pub antipode: u8,
 }
 
 /// Flashlight multiplier on the wire: tenths, so the tome's +10% per rank is exact.
@@ -150,6 +164,12 @@ pub const ITEMVIS_TETHER_SPENT: u8 = 8;
 /// Guns jammed by The Overheat. The host counts the volleys; a joiner's cosmetic fire
 /// stops on this, so its screen jams when the real guns do.
 pub const ITEMVIS_JAMMED: u8 = 16;
+/// The Static is among the crowd at the antipode — the blink would land in it.
+pub const ITEMVIS_ANTIPODE_STATIC: u8 = 32;
+/// A boss stands at the antipode.
+pub const ITEMVIS_ANTIPODE_BOSS: u8 = 64;
+/// Boomerang Insurance is armed (it pays once per dip below its line).
+pub const ITEMVIS_INSURED: u8 = 128;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
 #[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
@@ -449,6 +469,14 @@ pub enum HazardEvent {
     /// A Burrower went under: its crack decal spreads over `dir` for `dur` seconds, then it
     /// erupts (the eruption's own pop arrives as a Telegraph). §13's cracking-decal tell.
     Crack { dir: [f32; 3], dur: f32 },
+    // ---- appended (P06): movement techs, see `techs::TechFx` ----
+    /// `owner` landed a Slam at `dir`; `power` is the banked speed in the slammer's own run
+    /// speeds (`techs::slam_power`; the ring's size and the burst follow from it on every
+    /// machine, `techs::slam_reach`).
+    Slam { owner: u8, dir: [f32; 3], power: f32 },
+    /// `owner` blinked from `from` to its antipode `to`, turned about `axis` (the joiner
+    /// turns its own predicted momentum the same way). `insured`: Boomerang Insurance paid.
+    Blink { owner: u8, from: [f32; 3], to: [f32; 3], axis: [f32; 3], insured: bool },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -527,11 +555,88 @@ pub struct PlayerInputMsg {
     pub wish: Vec3,
     /// Camera forward, so the host can resolve aim/facing the same way the client sees it.
     pub forward: Vec3,
-    pub jump: bool,
-    pub slide: bool,
-    pub interact: bool,
+    /// The edge presses (jump, slide, interact, blink), as running counts — see
+    /// `EdgePresses` for why not one-packet bools.
+    pub presses: EdgePresses,
     /// Jump is HELD (not just pressed) — Anti-Grav Boots hover while it is.
     pub jump_held: bool,
+    /// Slide is HELD — the Slam commits on a hold in the air.
+    pub slide_held: bool,
+    /// The flashlight is on (a state, re-sent every packet, so a dropped one can't strand it).
+    pub light: bool,
+}
+
+/// A joiner's edge presses as wrapping per-edge counts, bumped once per press and re-sent in
+/// EVERY input packet. The channel is unreliable: as one-packet bools, a single dropped
+/// packet lost the press outright — a jump, the Slam-arming slide (the client then dove
+/// alone while the host's copy flew on), a 14 s Antipode Blink. A count survives any loss
+/// short of every packet until the next press, and the host fires an edge when the count
+/// moves FORWARD (a late, reordered packet carries an older count and fires nothing).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdgePresses {
+    pub jump: u8,
+    pub slide: u8,
+    pub interact: u8,
+    pub blink: u8,
+}
+
+impl EdgePresses {
+    /// CLIENT: count this frame's presses.
+    fn count(&mut self, i: &InputIntent) {
+        for (n, pressed) in [(&mut self.jump, i.jump), (&mut self.slide, i.slide), (&mut self.interact, i.interact), (&mut self.blink, i.blink)] {
+            if pressed {
+                *n = n.wrapping_add(1);
+            }
+        }
+    }
+
+    /// HOST: which edges `now` pressed since `seen` (jump, slide, interact, blink), moving
+    /// `seen` up to it. A count up to half the ring ahead is new; one behind is stale.
+    fn take_new(seen: &mut Self, now: Self) -> [bool; 4] {
+        let mut fresh = [false; 4];
+        for (k, (was, is)) in [(&mut seen.jump, now.jump), (&mut seen.slide, now.slide), (&mut seen.interact, now.interact), (&mut seen.blink, now.blink)]
+            .into_iter()
+            .enumerate()
+        {
+            if (1..128).contains(&is.wrapping_sub(*was)) {
+                *was = is;
+                fresh[k] = true;
+            }
+        }
+        fresh
+    }
+}
+
+/// Headless self-check of the edge-press wire rules: a press whose packet is lost still
+/// fires on the next packet that arrives, a late reordered packet fires nothing, the count
+/// wraps, and a packet that repeats the last count (every frame between presses) is silent.
+pub fn edge_presses_self_check() -> Result<(), String> {
+    let press = |blink: bool, jump: bool| InputIntent { blink, jump, ..Default::default() };
+    let mut client = EdgePresses::default();
+    let mut host = client;
+    // frame 1: blink pressed — its packet is lost; frame 2: nothing pressed, delivered
+    client.count(&press(true, false));
+    let lost = client;
+    client.count(&press(false, false));
+    if EdgePresses::take_new(&mut host, client) != [false, false, false, true] {
+        return Err("a blink whose packet was lost never fired".into());
+    }
+    if EdgePresses::take_new(&mut host, client) != [false; 4] {
+        return Err("a repeated count fired a second blink".into());
+    }
+    // a jump, then the lost packet from before it arrives late
+    client.count(&press(false, true));
+    if EdgePresses::take_new(&mut host, client) != [true, false, false, false] || EdgePresses::take_new(&mut host, lost) != [false; 4] {
+        return Err("a jump did not fire, or a late old packet fired again".into());
+    }
+    // the count wraps past 255
+    for _ in 0..300 {
+        client.count(&press(false, true));
+        if EdgePresses::take_new(&mut host, client) != [true, false, false, false] {
+            return Err(format!("the jump count stopped firing at {}", client.jump));
+        }
+    }
+    Ok(())
 }
 
 /// Host-side: which `PlayerId` we handed to each connected client entity.
@@ -705,6 +810,12 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 crate::tomes::log_tomes
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
+                crate::techs::log_tech_fx
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )
@@ -1064,18 +1175,24 @@ fn adopt_my_item_vis(
 /// path is just late, and is left alone. Only the offset from the nearest point of the
 /// path is corrected — carried over to where we are now and closed exponentially — so a
 /// real divergence eases home without dragging a joiner backwards through its own lag.
+#[allow(clippy::too_many_arguments)]
 fn reconcile_own_astronaut(
     time: Res<Time>,
     mine: Res<MyPlayerId>,
     planet: Option<Res<crate::planet::CurrentPlanet>>,
     server_copy: Query<(&PlayerId, &NetTransform), Without<crate::player::Player>>,
-    mut q: Query<&mut crate::player::Player, With<LocalPlayer>>,
+    mut q: Query<(&mut crate::player::Player, &mut crate::techs::MoveTech), With<LocalPlayer>>,
     mut path: Local<std::collections::VecDeque<(f32, Vec3)>>,
+    // where the host's copy of us stood when it last moved, and when that was
+    mut last_copy: Local<Option<(Vec3, f32)>>,
 ) {
-    use crate::config::{NET_RECONCILE_DEADZONE, NET_RECONCILE_RATE, NET_RECONCILE_WINDOW_SECS};
+    use crate::config::{
+        NET_RECONCILE_DEADZONE, NET_RECONCILE_RATE, NET_RECONCILE_WINDOW_SECS, PLAYER_RUN_SPEED, REMOTE_SNAP_ARC,
+        SPEED_HARD_CAP,
+    };
     let dt = time.delta_secs();
     let (Some(my_id), Some(planet)) = (mine.0, planet) else { return };
-    let Ok(mut p) = q.single_mut() else { return };
+    let Ok((mut p, mut tech)) = q.single_mut() else { return };
     if dt <= 0.0 {
         return;
     }
@@ -1085,6 +1202,32 @@ fn reconcile_own_astronaut(
         path.pop_front();
     }
     let Some((_, host)) = server_copy.iter().find(|(pid, _)| pid.0 == my_id) else { return };
+    // The host TELEPORTED its copy of us (an Antipode Blink, Boomerang Insurance, a Tether
+    // rewind): nothing walks that far between two looks. Easing would drag us across the
+    // planet — and a blink lands on the exact antipode, where there is no one great circle
+    // to ease along. Snap, as teammates' rigs do past REMOTE_SNAP_ARC; the camera glides.
+    // (The event that says why — `techs::TechFx::Blink`, the tether's death-save — follows
+    // on the hazard lane and turns our momentum with us.)
+    // A stalled link can deliver a long walk as one update, so the bar is the snap arc
+    // PLUS the farthest a doubled-speed build could have run since the copy last moved.
+    let jumped = match *last_copy {
+        Some((d, _)) if d == host.dir => false,
+        Some((d, t)) => {
+            let reach = REMOTE_SNAP_ARC + PLAYER_RUN_SPEED * SPEED_HARD_CAP * 2.0 * (now - t);
+            crate::sphere::arc_dist(d, host.dir, planet.radius) > reach
+        }
+        None => false,
+    };
+    if last_copy.is_none_or(|(d, _)| d != host.dir) {
+        *last_copy = Some((host.dir, now));
+    }
+    if jumped {
+        p.dir = host.dir;
+        // off any rail our prediction rode, or the next ride_rail pulls us back onto it
+        tech.cancel_moves();
+        path.clear();
+        return;
+    }
     let Some(nearest) = path
         .iter()
         .map(|(_, d)| *d)
@@ -1270,7 +1413,8 @@ fn receive_player_id(mut msgs: MessageReader<AssignPlayerId>, mut mine: ResMut<M
 /// CLIENT -> HOST. We send intent every frame rather than on-change: it's a handful of
 /// bytes on an unreliable channel, and a dropped "I'm still holding W" packet would
 /// otherwise read as a stutter-stop on the host.
-fn send_local_input(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn send_local_input(
     q: Query<&InputIntent, With<LocalPlayer>>,
     phase: Res<crate::run::RunPhase>,
     mut out: MessageWriter<PlayerInputMsg>,
@@ -1278,23 +1422,25 @@ fn send_local_input(
     dbg: Res<NetDebug>,
     mut next: Local<f32>,
     mut sent: Local<u32>,
+    mut presses: Local<EdgePresses>,
 ) {
     let Ok(intent) = q.single() else { return };
     // While a panel is up, `gather_local_input` stops running but this does not — so we
     // would re-send the last intent forever, and the host ASSIGNS wish. A joiner who was
     // holding W when their level-up opened kept sprinting on the host. Send a neutral
-    // intent instead of the stale one; this also stops the interact bit latching.
+    // intent instead of the stale one; no press is counted behind a panel.
     if *phase != crate::run::RunPhase::Playing {
         out.write(PlayerInputMsg {
             wish: Vec3::ZERO,
             forward: intent.forward,
-            jump: false,
-            slide: false,
-            interact: false,
+            presses: *presses,
             jump_held: false,
+            slide_held: false,
+            light: intent.light,
         });
         return;
     }
+    presses.count(intent);
     *sent += 1;
     if dbg.log && time.elapsed_secs() >= *next {
         *next = time.elapsed_secs() + 1.0;
@@ -1304,16 +1450,16 @@ fn send_local_input(
     out.write(PlayerInputMsg {
         wish: intent.wish,
         forward: intent.forward,
-        jump: intent.jump,
-        slide: intent.slide,
-        interact: intent.interact,
+        presses: *presses,
         jump_held: intent.jump_held,
+        slide_held: intent.slide_held,
+        light: intent.light,
     });
 }
 
 /// Dev harness: override the local intent with a slow circle-strafe. Runs after the
 /// keyboard gather, so it stands in for a human holding W and easing the stick over.
-fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
+pub(crate) fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
     let Ok((p, mut intent)) = q.single_mut() else { return };
     let (t, b) = crate::sphere::tangent_frame(p.dir);
     let a = time.elapsed_secs() * 0.35;
@@ -1543,7 +1689,10 @@ fn apply_remote_input(
     dbg: Res<NetDebug>,
     mut next: Local<f32>,
     mut got: Local<u32>,
+    mut seen: Local<HashMap<Entity, EdgePresses>>,
 ) {
+    // per CONNECTION, so a new joiner in a freed slot starts from its own counts
+    seen.retain(|client, _| slots.player_id(*client).is_some());
     if dbg.log && time.elapsed_secs() >= *next {
         *next = time.elapsed_secs() + 1.0;
         info!("NET rx: {} input msgs this second", *got);
@@ -1559,17 +1708,24 @@ fn apply_remote_input(
             warn!("NET rx: no slot for client {client}");
             continue;
         };
+        // the connection's first packet sets the baseline: presses start counting from it
+        let last = seen.entry(client).or_insert(message.presses);
+        let [jump, slide, interact, blink] = EdgePresses::take_new(last, message.presses);
         for (pid, mut intent) in &mut astronauts {
             if pid.0 == id {
                 intent.wish = message.wish;
                 intent.forward = message.forward;
                 // Edge-triggered actions are OR-ed in rather than assigned: several input
-                // packets can arrive in one host frame, and a jump in any of them counts.
-                intent.jump |= message.jump;
-                intent.slide |= message.slide;
-                intent.interact |= message.interact;
-                // a HELD state, not an edge: the latest packet is the truth
+                // packets can arrive in one host frame, and a jump in any of them counts
+                // (`techs::consume_edge_intents` spends them after the frame acts).
+                intent.jump |= jump;
+                intent.slide |= slide;
+                intent.interact |= interact;
+                intent.blink |= blink;
+                // HELD states, not edges: the latest packet is the truth
                 intent.jump_held = message.jump_held;
+                intent.slide_held = message.slide_held;
+                intent.light = message.light;
             }
         }
     }
@@ -1755,13 +1911,15 @@ pub fn apply_cli_net(mut commands: Commands, channels: Res<RepliconChannels>) {
 /// (Solo runs this too and it's a couple of writes — harmless, and it means the host
 /// path is always exercised, so co-op can't silently rot.)
 fn push_net_transform(
-    mut q: Query<(&crate::player::Player, &mut NetTransform)>,
+    mut q: Query<(&crate::player::Player, &crate::techs::MoveTech, &InputIntent, &mut NetTransform)>,
 ) {
-    for (p, mut nt) in &mut q {
+    for (p, tech, intent, mut nt) in &mut q {
         nt.dir = p.dir;
         nt.height = p.height;
         nt.facing = p.facing;
-        nt.sliding = p.slide_timer > 0.0;
+        nt.sliding = p.slide_timer > 0.0 || tech.slam.is_some();
+        nt.grinding = tech.grind.is_some();
+        nt.light = intent.light;
     }
 }
 
@@ -2165,6 +2323,26 @@ fn reset_after_session(
 //    beam rides NetItemVis.lamp. Repro: headless --tomes all [--coop2]; windowed coop.sh …
 //    --dev --tomes all and compare the two sides' TOMES[...] lines (a joiner's host copy
 //    shows the joiner's lines; `flights_seen` counts horizon calls that arrived).
+// 2h. MOVEMENT TECHS (P06, see techs.rs) — a joiner PREDICTS its own slides, slope-boost,
+//    Slam dives and Grind-Line rides from its own input (the rails are traced from the
+//    terrain, so both machines hold the same `GrindLines`), and the host runs the same
+//    physics on its copy from the same PlayerInputMsg (slide_held and the light ride it
+//    now). What the techs DO to the world is the host's: the Slam's shockwave, the plow,
+//    every blink (keyed or Boomerang Insurance), the antipode read. A blink moves the host's
+//    copy of a joiner across the planet: `reconcile_own_astronaut` snaps instead of easing
+//    when the copy jumps further than anyone can run, and the TechFx::Blink event (hazard
+//    lane) turns the joiner's momentum the way the host turned it; the camera glides over
+//    the top (`player::glide_axis`). Teammates see grinds/tucks/flashlights on NetTransform,
+//    blink charge and antipode read on NetItemVis, Slam rings and blink columns as events.
+//    Also fixed here: a joiner's edge intents were OR-ed in and never cleared, so one jump
+//    press bounced its host-side body forever (`techs::consume_edge_intents`). And the edges
+//    themselves ride PlayerInputMsg as wrapping press COUNTS re-sent in every packet
+//    (`EdgePresses`), not one-packet bools: on the unreliable channel one lost packet lost
+//    the press — a blink, or the air slide that arms a Slam, which the client then dove
+//    alone while its host copy flew on. The host fires an edge when a count moves forward.
+//    Repro: headless `--techs [--coop2] [--planet …]`; windowed
+//        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
+//    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

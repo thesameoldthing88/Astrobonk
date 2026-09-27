@@ -1,5 +1,52 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — Wave 3: P05 Tomes 8 → 23 + loadout + P06 Movement techs + Antipode Blink
+- **P05:** all 15 GDD §7 tomes as stat lines folded by `recompute_stats` (so a joiner's own tomes
+  reach the host in `PlayerBuildMsg`), each wired to its effect site (`tomes.rs` has the table);
+  10 ranks at 100·1.6^rank Silver, a 4-slot loadout (`TOME_SLOTS_MAX` 8 via quests), `MetaSave.version`
+  + `migrate()` (old 20-level tomes → ceil(L/2) ranks, slots rebuilt from quests, unowned tomes
+  dropped from the loadout); the TOME LIBRARY screen (`AppState::Tomes`, scrolling card grid);
+  HUD CROWD/NIGHT/MOMENTUM and a pause TOMES line; Horizon calls on the pickup lane (+ HorizonSettle),
+  Nightfall's beam on `NetItemVis.lamp`; Static Silver paid once at banking; Elite excludes bosses.
+- **P06:** new `techs.rs` — the Slam (air slide held → dive → host shockwave that needs a ramp:
+  `player::steer` lets a wish steer above run speed but never add to it), Grind-Lines traced from
+  the terrain's ridge crests (one merged rail mesh, interactables kept 2.5 m clear), the Antipode
+  Blink item (Q, exact antipode, momentum turned about the camera axis, HUD dial) with Boomerang
+  Insurance routed through it, F flashlight, 60% air control, Shift slide, slope-boost and slide
+  plow; joiner edge presses ride `PlayerInputMsg` as wrapping counts (`EdgePresses`).
+- **Integration:** conflicts in 5 files (`net.rs`, `items.rs`, `player.rs`, `main.rs`, `headless.rs`).
+  Both branches took `PROTOCOL_ID` 0xA570B0_7, so the merged wire is `_8`; `NetItemVis` carries
+  P05's `lamp` then P06's `blink_cd`/`antipode`; netcode notes are 2g TOMES, 2h MOVEMENT TECHS.
+  Cross-package fixes: both packages wrote the flashlight's intensity (P05 every frame for
+  Nightfall, P06 on the F toggle), so Nightfall would have relit a beam switched off — now
+  `sync_flashlights` only keeps the switch and `tomes::apply_flashlights` (ordered after it) is the
+  one writer (`FlashlightBeam.on` × Flashlight stat), and the duplicate `FLASHLIGHT_INTENSITY` is
+  gone. Found in review: a Dead Man's Tether rewind (or a joiner's snap to its host copy) while
+  riding a rail was pulled straight back onto the rail by the next `ride_rail`, and a Slam dive
+  in the air survived the teleport — `MoveTech::cancel_moves` now runs on every teleport
+  (`blink_body`, `combat::move_astronaut`, `net::reconcile_own_astronaut`). Probe hardening:
+  Ricochet's fast-boss check was flaky (every shot spent its pierce before coming down), so the
+  probe now brings a shot the real firing path rolled a skip for to the end of its life; the
+  `--techs` darkmoon co-op Slam stage could bank a dud when the flight brushed a prop; the XP
+  pipeline checks skip `--staticnow` (no kill drops XP while The Static is up); the tome probe
+  lays its over-the-horizon gems only for Tome of the Horizon; `--techs` with `--tomes` is refused
+  (the two probes stage conflicting scenes on the same ticks).
+- **Verified:** build clean (22 warnings, all pre-existing). Smoke 6/6 PASS. Every P05/P06 flag
+  passes: `--tomes all` (solo, `--coop2`, fast-boss mars), rank-1 banishment/ascension/duplication,
+  rank-3 horizon/ricochet, fast-boss elite/static, `--staticnow` (solo, fast-boss, co-op), rank-5
+  co-op duplication/banishment; `--techs` on moon/mars/darkmoon-coop2/coop2/fast-boss-coop2
+  (darkmoon repeated ×4), `--items new` (solo + co-op), `--deathsave` and `--deathsave --coop2
+  --assist`. Windowed: solo 56 s clean; `--dev --tomes all --items antipodeblink,boomeranginsurance`
+  with real keys — F turned the light off, Q blinked (blink_cd 11), ESC's pause panel fits the
+  stats, the TOMES line and the new controls line; main menu and TOME LIBRARY render. Real co-op
+  70 s: identical layout/interactable sums on both sides, client streams proxies with
+  `local_sim=0`, `seq_gaps=0`, no panics.
+- **Known gaps:** Nightfall reads a fixed sun until P07 (which must replace `planet::is_night`);
+  Microwave Gold price/Salvage discount wait for P16; Duplication/Salvage are host-only until P14;
+  Golden Tome max ×1.5 (GDD formula) vs the old ×2.0 is a design call; Antipode Blink mastery
+  ladder P21/P26; antipode dial until P24's threat ring; no gamepad (P27); jump hang ~0.73 s vs
+  GDD ~1.2 s; no tome/tech numbers playtested; `CLAUDE.md` module map lacks `techs`/`tomes`.
+
 ## 2026-09-27 — Wave 2: P03 Items 22 → 38 + P04 Accessibility & display settings
 - **P03:** the 15 GDD §7 items (Orbital Yo-Yo, Comet Tail, The Overheat, Downhill Momentum,
   Second Astronaut, Encirclement Bonus, Icarus/Anti-Grav Boots, Little Black Hole, Dead Man's

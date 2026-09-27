@@ -81,6 +81,11 @@ pub enum Sfx {
     Slide,
     Bhop,
     Comet,
+    // ---- §4 movement techs ----
+    Slam,
+    Grind,
+    Blink,
+    Flashlight,
 }
 
 #[derive(Message)]

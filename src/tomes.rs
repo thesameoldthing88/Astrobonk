@@ -59,13 +59,14 @@ pub fn incoming_mult(stats: &Stats, by_elite: bool, by_static: bool) -> f32 {
 /// PRESENTATION (every machine): each astronaut's flashlight at its owner's Tome of
 /// Nightfall strength — from the sheet where this machine has one (its own astronaut; every
 /// astronaut on the host), else from the replicated `NetItemVis::lamp` (a teammate drawn on
-/// a client). Touches a light only when its number moves.
+/// a client) — or dark while its owner's F switch is off (`FlashlightBeam::on`, kept by
+/// `player::sync_flashlights`, which runs first). Touches a light only when its number moves.
 pub fn apply_flashlights(
     sheets: Query<&PlayerState>,
     vis: Query<&crate::net::NetItemVis>,
-    mut lights: Query<(&ChildOf, &mut SpotLight)>,
+    mut lights: Query<(&ChildOf, &mut SpotLight, &crate::player::FlashlightBeam)>,
 ) {
-    for (child_of, mut light) in &mut lights {
+    for (child_of, mut light, beam) in &mut lights {
         let owner = child_of.parent();
         let k = match (sheets.get(owner), vis.get(owner)) {
             (Ok(ps), _) => ps.stats.flashlight,
@@ -73,7 +74,7 @@ pub fn apply_flashlights(
             _ => continue, // not an astronaut's lamp
         }
         .max(0.1);
-        let intensity = FLASHLIGHT_INTENSITY * k;
+        let intensity = if beam.on { FLASHLIGHT_INTENSITY * k } else { 0.0 };
         let range = FLASHLIGHT_RANGE * (1.0 + (k - 1.0) * 0.5);
         if (light.intensity - intensity).abs() > 1.0 || (light.range - range).abs() > 0.01 {
             light.intensity = intensity;

@@ -677,6 +677,13 @@ pub fn pause_panel(
                                 Color::srgb(0.8, 0.85, 0.95),
                             ));
                             root.spawn(txt(rules, FONT_SMALL, Color::srgb(1.0, 0.7, 0.55)));
+                            // the §13 control map, §4 techs included — the pause menu is
+                            // where a player looks for "how do I…" mid-run
+                            root.spawn(txt(
+                                "WASD move  SPACE jump  SHIFT/CTRL slide (hold mid-air: SLAM)\nride a glowing ridge spine: slide onto it   Q antipode blink   F flashlight   E use",
+                                FONT_SMALL,
+                                Color::srgb(0.6, 0.9, 1.0),
+                            ));
                             // One row of buttons (wrapping when a large UI scale runs out of
                             // width) keeps the menu short enough to sit between the HUD bands.
                             root.spawn((Node {

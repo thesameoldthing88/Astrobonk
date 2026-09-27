@@ -49,8 +49,10 @@ pub enum ItemKind {
     WidowsRing,
     SignalFlare,
     DevouredSunShard,
-    // ---- the §15 antipode escape, as an item (its blink is P06's) ----
+    // ---- the §15 antipode escape, as an item (it blinks through `techs`) ----
     BoomerangInsurance,
+    // ---- §4's signature verb, as the §7 item that grants it ----
+    AntipodeBlink,
 }
 
 pub struct ItemDef {
@@ -73,7 +75,7 @@ pub struct ItemDef {
 }
 
 impl ItemKind {
-    pub const ALL: [ItemKind; 38] = [
+    pub const ALL: [ItemKind; 39] = [
         ItemKind::SpaceBorgar,
         ItemKind::MoonCheese,
         ItemKind::DuctTape,
@@ -112,11 +114,12 @@ impl ItemKind {
         ItemKind::SignalFlare,
         ItemKind::DevouredSunShard,
         ItemKind::BoomerangInsurance,
+        ItemKind::AntipodeBlink,
     ];
 
-    /// The fifteen §7 "new items" this build adds and deals (Boomerang Insurance waits on
-    /// P06's blink) — the `--items new` harness set.
-    pub const NEW: [ItemKind; 15] = [
+    /// The §7 "new items" this build adds and deals, plus the §15 Boomerang Insurance —
+    /// the `--items new` harness set.
+    pub const NEW: [ItemKind; 17] = [
         ItemKind::OrbitalYoYo,
         ItemKind::CometTail,
         ItemKind::TheOverheat,
@@ -132,6 +135,8 @@ impl ItemKind {
         ItemKind::WidowsRing,
         ItemKind::SignalFlare,
         ItemKind::DevouredSunShard,
+        ItemKind::BoomerangInsurance,
+        ItemKind::AntipodeBlink,
     ];
 
     /// Every item a run can be dealt.
@@ -202,12 +207,10 @@ impl ItemKind {
             SignalFlare => d("Signal Flare", "FLR", "HERE I AM. COME AND GET ME", Cursed, &[(S::GoldGain, 0.40), (S::XpGain, 0.40)], 1),
             DevouredSunShard => d("Devoured Sun Shard", "SUN", "A piece of what it ate", Cursed, &[(S::Damage, 1.0)], 1),
 
-            BoomerangInsurance => ItemDef {
-                // P06 fills `items::antipode_escape`; until then the item would do nothing,
-                // so it stays out of every pool.
-                pooled: false,
-                ..d("Boomerang Insurance", "BMR", "The policy pays out at the far pole", Epic, &[], 1)
-            },
+            BoomerangInsurance => d("Boomerang Insurance", "BMR", "The policy pays out at the far pole", Epic, &[], 1),
+            // Marked: each copy (or grade) shortens the recharge, which bottoms out at
+            // BLINK_MIN_COOLDOWN by the third — past that a card would be dead.
+            AntipodeBlink => d("Antipode Blink", "APB", "Only a sphere has a far side", Rare, &[], 3),
         }
     }
 
@@ -280,8 +283,12 @@ impl ItemKind {
                 "Every {SUN_SHARD_PERIOD:.0}s the day side shrinks toward total night"
             ),
             BoomerangInsurance => format!(
-                "Below {:.0}% HP, blink to the antipode",
+                "Below {:.0}% HP, auto-blink to the antipode. Once per dip; shares the blink's recharge",
                 BOOMERANG_INSURANCE_HP * 100.0
+            ),
+            AntipodeBlink => format!(
+                "Q: blink to the planet's exact opposite point. Recharge {:.0}s. Read the far side first",
+                crate::techs::blink_cooldown_for(m)
             ),
             _ => return None,
         })
@@ -329,6 +336,7 @@ impl ItemKind {
             SignalFlare => 35,
             DevouredSunShard => 36,
             BoomerangInsurance => 37,
+            AntipodeBlink => 38,
         }
     }
     pub fn from_code(c: u8) -> Option<ItemKind> {

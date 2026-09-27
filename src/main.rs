@@ -24,6 +24,7 @@ mod run;
 mod save;
 mod sphere;
 mod stats;
+mod techs;
 mod tomes;
 mod tutorial;
 mod ui;
@@ -126,7 +127,11 @@ fn main() {
         .init_resource::<ui::hud::BannerQueue>()
         .init_resource::<audio::SfxThrottle>()
         .init_resource::<items::ItemTelemetry>()
+        .init_resource::<techs::GrindLines>()
+        .init_resource::<techs::TechTelemetry>()
+        .init_resource::<player::FlashlightSwitch>()
         .add_message::<items::ItemFxMsg>()
+        .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
         .add_message::<messages::PlayerHitMsg>()
         .add_message::<messages::KillMsg>()
@@ -142,6 +147,7 @@ fn main() {
                 combat::setup_weapon_assets,
                 pickups::setup_pickup_assets,
                 items::setup_item_assets,
+                techs::setup_tech_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -367,6 +373,60 @@ fn main() {
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| dev_flag("--items")),
         )
+        // ------------- §4 movement techs: the moves themselves are player_input/physics on
+        // every body a machine moves; what they do to the WORLD (a blink, the Slam's
+        // shockwave, the slide's plow, the antipode read) is the host's, for every
+        // astronaut; every machine draws them (NetTransform, NetItemVis, the hazard lane).
+        .add_systems(
+            Update,
+            (techs::antipode_blink.run_if(net::is_simulating), techs::blink_denied_feedback)
+                .chain()
+                .after(player::player_input)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // After the last reader of the edge intents: every edge lives one frame. Behind a
+        // panel too — a joiner's press that lands while the host's run is held is dropped,
+        // as its own client drops presses behind its own panels, not fired late on resume.
+        .add_systems(
+            Update,
+            techs::consume_edge_intents
+                .after(player::player_input)
+                .after(techs::antipode_blink)
+                .after(techs::blink_denied_feedback)
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            (
+                techs::antipode_scan.run_if(net::is_simulating),
+                techs::slam_shockwave.run_if(net::is_simulating).after(player::player_physics),
+                techs::slide_plow.run_if(net::is_simulating),
+                techs::grind_sparks,
+                techs::grind_hint,
+                techs::animate_tech_fx,
+                player::sync_flashlights,
+            )
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        // Presented behind a card panel too, like the item one-shots: a joiner's blink the
+        // host resolves meanwhile must still turn its predicted body.
+        .add_systems(
+            Update,
+            techs::tech_fx_presentation
+                .after(techs::slam_shockwave)
+                .after(techs::antipode_blink)
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            techs::dev_tech_bot
+                .after(player::gather_local_input)
+                .after(net::bot_input)
+                .before(net::send_local_input)
+                .before(player::player_input)
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--techbot")),
+        )
         .add_systems(
             Update,
             pickups::gem_merge.run_if(net::is_simulating).run_if(
@@ -417,6 +477,7 @@ fn main() {
                 ui::hud::update_dust_overlay,
                 ui::hud::update_edge_markers,
                 ui::hud::update_assist_hud,
+                ui::hud::update_antipode_dial,
                 ui::hud::hide_mid_hud_under_panels,
                 ui::hud::keep_panels_clear_of_hud,
                 tutorial::tutorial_system.run_if(playing),
@@ -429,8 +490,15 @@ fn main() {
             )
                 .run_if(in_state(AppState::InRun)),
         )
-        // Tome of Nightfall's beam on every astronaut drawn (presentation: not in headless)
-        .add_systems(Update, tomes::apply_flashlights.run_if(in_state(AppState::InRun)))
+        // Tome of Nightfall's beam on every astronaut drawn, dark while its F switch is off
+        // (presentation: not in headless). After the switch is read, so a toggle lands the
+        // same frame.
+        .add_systems(
+            Update,
+            tomes::apply_flashlights
+                .after(player::sync_flashlights)
+                .run_if(in_state(AppState::InRun)),
+        )
         .add_systems(
             Update,
             (ui::numbers::claim_numbers, ui::numbers::update_numbers).chain(),
@@ -650,7 +718,7 @@ fn enter_run(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
-    let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
@@ -661,8 +729,10 @@ fn enter_run(
         &run_state,
         &run::PlayerState::new(run_state.character, &save),
         &save,
+        &rails,
         Vec3::Y,
     );
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
     *phase = run::RunPhase::Playing;

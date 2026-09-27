@@ -15,6 +15,7 @@ use bevy::app::ScheduleRunnerPlugin;
 use bevy::prelude::*;
 use bevy::state::app::StatesPlugin;
 use bevy::time::TimeUpdateStrategy;
+use std::collections::HashMap;
 use std::time::Duration;
 
 /// `--choices`: what the bot's scripted level-up economy has exercised so far.
@@ -141,6 +142,7 @@ fn bot_drive(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut script: Local<ChoiceScript>,
     mut heading_angle: Local<f32>,
+    tech_probe: Res<TechProbe>,
 ) {
     let dt = time.delta_secs();
     // E is "tapped" fresh each frame the bot wants it, so interact_system sees just_pressed.
@@ -182,7 +184,7 @@ fn bot_drive(
         *phase = RunPhase::Playing;
         return;
     }
-    if matches!(*phase, RunPhase::Dead) {
+    if matches!(*phase, RunPhase::Dead) || tech_probe.holding {
         return;
     }
 
@@ -561,7 +563,13 @@ fn tome_probe_setup(
             }
         }
         crate::items::grant_items(&mut ps, &[ItemKind::OrbitalYoYo, ItemKind::VampireVisor], &save, global.greed_stacks);
-        // gems well past the horizon, in three directions
+        // gems well past the horizon, in three directions — only for the Tome of the
+        // Horizon to call home: nothing else collects them, and a run that drops no XP of
+        // its own (`--staticnow`: The Static's ghosts only) would read them as a dead XP
+        // pipeline
+        if !probe.tomes.contains(&crate::content::tomes::TomeKind::Horizon) {
+            continue;
+        }
         let (t, b) = sphere::tangent_frame(p.dir);
         for (i, arc) in [HORIZON_ARC * 1.6, HORIZON_ARC * 2.5, HORIZON_ARC * 1.2].iter().enumerate() {
             let a = i as f32 * 2.1 + pid.0 as f32;
@@ -591,13 +599,24 @@ fn tome_probe_drive(
     mut crowd: Query<(Entity, &mut Enemy), Without<crate::enemies::Boss>>,
     mut hits: MessageWriter<crate::messages::HitMsg>,
     mut q: Query<(&crate::player::PlayerId, &mut Player, &mut crate::items::ItemProcs, &PlayerState, Has<crate::player::LocalPlayer>)>,
-    (interactables, mut keys): (
+    (interactables, mut keys, mut shots): (
         Query<(&crate::interact::Interactable, &Transform)>,
         ResMut<ButtonInput<KeyCode>>,
+        Query<&mut crate::combat::Projectile>,
     ),
 ) {
     probe.ticks += 1;
     let t = probe.ticks;
+    // Tome of Ricochet skips a shot that COMES DOWN — one whose life runs out. In a dense
+    // late-game crowd (--fast-boss) every shot can spend its pierce on a body first, so the
+    // natural count can be zero on a lucky-for-the-bot run: every 3 s, bring one shot the
+    // real firing path rolled a skip for (`bounces > 0`) to the end of its life, and let
+    // `projectile_move` do the rest.
+    if probe.tomes.contains(&crate::content::tomes::TomeKind::Ricochet) && t % 90 == 45 {
+        if let Some(mut shot) = shots.iter_mut().find(|s| s.bounces > 0 && s.hop <= 0.0 && s.life > 0.1) {
+            shot.life = 0.001;
+        }
+    }
     // Tome of Encirclement counts foes within TOME_CROWD_RADIUS, and a bot carrying every
     // tome clears its surroundings before many close in: every 5 s, walk a handful of the
     // horde in to ring the local astronaut at arm's length.
@@ -1007,6 +1026,438 @@ fn assist_probe_check(
     }
 }
 
+/// `--techs`: the §4 movement techs, staged on EVERY astronaut (with `--coop2` that includes
+/// the peer, so the host is seen resolving a joiner's techs) and asserted, in order:
+///   * Antipode Blink — the key lands on the exact antipode, spends the charge, and a second
+///     press while it recharges does nothing;
+///   * the Slam — a redlined hop held into a dive lands a full-power shockwave that hits
+///     the ring of Shamblers staged around it;
+///   * the slide's plow — a slide through a staged line of Shamblers shoves them aside;
+///   * Grind-Lines — a slide onto a spine catches it, rides it at the rail's speed with the
+///     footing locked to the crest, and a jump leaves it with the rail's momentum;
+///   * the antipode read — a crowd staged at the far pole shows in the scan and in the
+///     replicated `NetItemVis` the HUD dial reads;
+///   * slope-boost — a slide down the steepest slope on the world speeds up, one up it slows;
+///   * no ramp, no bomb — a plain running hop held forward (air control steering it as
+///     `player_input` would) comes down at run speed, and a Slam from it is a dud;
+///   * Boomerang Insurance — a hit that drops a charged, armed astronaut under its line
+///     blinks it to the antipode through the same mechanic.
+/// The probe keeps everyone standing between its stages, so a short run can't end it early.
+#[derive(Resource, Default)]
+struct TechProbe {
+    on: bool,
+    ticks: u64,
+    /// The probe is steering the astronauts itself: `bot_drive` keeps its hands off.
+    holding: bool,
+    /// dir before the blink, by PlayerId
+    before: HashMap<u8, Vec3>,
+    /// (plowed count, slope speed) snapshots between stage ticks
+    plowed_at: u32,
+    slope_v0: f32,
+    /// Boomerang Insurance: PlayerIds whose staged dip is in flight (with their blink count
+    /// when it was staged), and those it caught
+    insuring: Vec<u8>,
+    insure_base: HashMap<u8, u32>,
+    insured: Vec<u8>,
+    /// The no-ramp hop: fastest speed seen in the air, and the speed its Slam banked, by
+    /// PlayerId
+    hop_top: HashMap<u8, f32>,
+    hop_bank: HashMap<u8, f32>,
+    /// Slam blinks/slams seen as TechFx, by owner
+    fx_slams: Vec<u8>,
+    fx_blinks: Vec<u8>,
+    ok: Vec<String>,
+    fail: Vec<String>,
+}
+
+const TECH_GRANT: u64 = 40;
+const TECH_BLINK: u64 = 60;
+const TECH_SLAM: u64 = 90;
+const TECH_SLAM_CHECK: u64 = 135;
+const TECH_PLOW: u64 = 150;
+const TECH_PLOW_CHECK: u64 = 170;
+const TECH_GRIND: u64 = 185;
+const TECH_GRIND_JUMP: u64 = 215;
+const TECH_GRIND_CHECK: u64 = 218;
+const TECH_ANTIPODE: u64 = 240;
+const TECH_ANTIPODE_CHECK: u64 = 262;
+const TECH_SLOPE_DOWN: u64 = 280;
+const TECH_SLOPE_UP: u64 = 300;
+const TECH_HOP: u64 = 320;
+/// Into the hop, the air slide that arms the Slam (the hop is ~22 ticks of hang).
+const TECH_HOP_ARM: u64 = TECH_HOP + 6;
+const TECH_HOP_CHECK: u64 = TECH_HOP + 40;
+/// Past the blink's recharge (BLINK_COOLDOWN from TECH_BLINK, at 33 ms a tick).
+const TECH_INSURE: u64 = TECH_BLINK + (BLINK_COOLDOWN / 0.033) as u64 + 30;
+const TECH_DONE: u64 = TECH_INSURE + 120;
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn tech_probe(
+    mut commands: Commands,
+    mut probe: ResMut<TechProbe>,
+    lines: Res<crate::techs::GrindLines>,
+    planet: Res<CurrentPlanet>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    save: Res<MetaSave>,
+    global: Res<RunState>,
+    telemetry: Res<crate::techs::TechTelemetry>,
+    mut q: Query<(
+        Entity,
+        &crate::player::PlayerId,
+        &mut Player,
+        &mut PlayerState,
+        &mut crate::techs::MoveTech,
+        &mut crate::items::ItemProcs,
+        &mut crate::player::InputIntent,
+        &crate::net::NetItemVis,
+    )>,
+    enemies: Query<&Enemy>,
+    placed: Query<&Transform, Or<(With<crate::interact::Interactable>, With<crate::interact::ChargeShrine>)>>,
+    mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
+) {
+    use crate::content::enemies::EnemyKind;
+    use crate::content::items::ItemKind;
+    probe.ticks += 1;
+    let t = probe.ticks;
+    let mut rng = rand::thread_rng();
+    let r = planet.radius;
+    let stage = |commands: &mut Commands, kind: EnemyKind, dir: Vec3, rng: &mut rand::rngs::ThreadRng| {
+        crate::enemies::spawn_enemy(commands, &assets, &planet, kind, dir, false, 1.0, 1.0, rng);
+    };
+    let run_speed = PLAYER_RUN_SPEED;
+    if t == TECH_GRANT {
+        // no chest, shrine or vendor was placed standing on a rail
+        let on_rail = placed
+            .iter()
+            .filter(|tf| lines.closest(tf.translation.normalize()).is_some_and(|(arc, ..)| arc <= GRIND_INTERACT_CLEARANCE))
+            .count();
+        if on_rail > 0 {
+            probe.fail.push(format!("{on_rail} of {} interactables stand on a Grind-Line", placed.iter().count()));
+        } else {
+            probe.ok.push(format!("all {} interactables stand clear of the rails", placed.iter().count()));
+        }
+    }
+    for (_, pid, mut p, mut ps, mut tech, procs, mut intent, vis) in &mut q {
+        let who = format!("player {}", pid.0);
+        // keep everyone standing through the stages (not while the Insurance dip is staged)
+        if !probe.insuring.contains(&pid.0) && (ps.dead || ps.hp < ps.stats.max_hp * 0.4) {
+            ps.dead = false;
+            ps.hp = ps.stats.max_hp;
+        }
+        match t {
+            TECH_GRANT => {
+                crate::items::grant_items(&mut ps, &[ItemKind::AntipodeBlink, ItemKind::BoomerangInsurance], &save, global.greed_stacks);
+            }
+            TECH_BLINK => {
+                probe.before.insert(pid.0, p.dir);
+                intent.blink = true;
+            }
+            x if x == TECH_BLINK + 1 => {
+                let before = probe.before[&pid.0];
+                let off = sphere::arc_dist(p.dir, -before, r);
+                if tech.blinks != 1 || off > 1.0 || procs.blink_cd <= 0.0 {
+                    probe.fail.push(format!("{who}: the blink key landed {off:.2} m off the antipode (blinks {}, charge {:.1})", tech.blinks, procs.blink_cd));
+                }
+                intent.blink = true; // pressed again while it recharges
+            }
+            x if x == TECH_BLINK + 3 => {
+                if tech.blinks != 1 {
+                    probe.fail.push(format!("{who}: a blink fired while recharging"));
+                } else {
+                    probe.ok.push(format!("{who}: blink -> antipode, recharge {:.1}s, second press refused", procs.blink_cd));
+                }
+            }
+            TECH_SLAM => {
+                probe.holding = true;
+                tech.grind = None;
+                p.height = 6.0;
+                p.vel_r = 0.0;
+                p.grounded = false;
+                let fwd = p.facing;
+                p.vel_t = fwd * run_speed * SPEED_HARD_CAP;
+                tech.slam_armed = true;
+                tech.slam_hold = 0.0;
+                intent.slide_held = true;
+                // the ring it will land in, a couple of metres round the drop point
+                let (tx, bx) = sphere::tangent_frame(p.dir);
+                for k in 0..8 {
+                    let a = k as f32 / 8.0 * std::f32::consts::TAU;
+                    let d = sphere::offset_dir(p.dir, (tx * a.cos() + bx * a.sin()).normalize(), 2.2, r);
+                    stage(&mut commands, EnemyKind::Shambler, d, &mut rng);
+                }
+            }
+            x if x > TECH_SLAM && x < TECH_SLAM_CHECK => {
+                intent.slide_held = tech.slam_armed || tech.slam.is_some();
+                // Until the dive commits, the speed staged at TECH_SLAM is what it banks: a
+                // tall prop the flight brushes (darkmoon's are dense) would strip it and turn
+                // the bomb this stage is about into a dud.
+                if tech.slam_armed {
+                    p.vel_t = p.facing * run_speed * SPEED_HARD_CAP;
+                }
+            }
+            TECH_SLAM_CHECK => {
+                intent.slide_held = false;
+                if tech.slams < 1 || tech.slam_hits < 1 {
+                    probe.fail.push(format!("{who}: the Slam never landed a hit (slams {}, hits {})", tech.slams, tech.slam_hits));
+                } else {
+                    probe.ok.push(format!("{who}: slam landed, {} hits", tech.slam_hits));
+                }
+            }
+            TECH_PLOW => {
+                probe.plowed_at = telemetry.plowed;
+                tech.grind = None;
+                p.height = 0.0;
+                p.vel_r = 0.0;
+                p.grounded = true;
+                let fwd = p.facing;
+                p.vel_t = fwd * run_speed * SLIDE_BOOST;
+                p.slide_timer = SLIDE_TIME;
+                for k in 0..6 {
+                    let d = sphere::offset_dir(p.dir, fwd, 1.5 + k as f32 * 1.1, r);
+                    stage(&mut commands, EnemyKind::Shambler, d, &mut rng);
+                }
+            }
+            x if x > TECH_PLOW && x < TECH_PLOW_CHECK => {
+                // keep the slide going, as the slope or a held line would
+                p.slide_timer = p.slide_timer.max(0.1);
+            }
+            TECH_PLOW_CHECK if pid.0 == 0 => {
+                let shoved = telemetry.plowed - probe.plowed_at;
+                if shoved < 3 {
+                    probe.fail.push(format!("the slides through a staged line shoved {shoved} Shamblers aside"));
+                } else {
+                    probe.ok.push(format!("slide plow shoved {shoved} Shamblers aside"));
+                }
+            }
+            TECH_GRIND => {
+                let Some(longest) = (0..lines.spines.len()).max_by(|a, b| lines.spines[*a].length().total_cmp(&lines.spines[*b].length())) else {
+                    probe.fail.push(format!("{who}: this world has no Grind-Lines"));
+                    continue;
+                };
+                let (d, run) = lines.sample(longest, 1.0 + pid.0 as f32 * 2.0);
+                p.dir = d;
+                p.height = 0.0;
+                p.vel_r = 0.0;
+                p.grounded = true;
+                p.facing = run;
+                p.vel_t = run * run_speed * SLIDE_BOOST;
+                p.slide_timer = SLIDE_TIME;
+                // off whatever rail the earlier stages' slides found on their own
+                tech.grind = None;
+                tech.grind_cd = 0.0;
+            }
+            x if x > TECH_GRIND && x < TECH_GRIND_JUMP => {
+                if x == TECH_GRIND + 2 && tech.grind.is_none() {
+                    probe.fail.push(format!("{who}: a slide onto a spine did not catch it"));
+                }
+                if let Some(g) = tech.grind {
+                    let off = lines.closest(p.dir).map_or(f32::MAX, |c| c.0);
+                    if off > 0.05 || p.height != GRIND_RAIL_LIFT {
+                        probe.fail.push(format!("{who}: grinding {off:.3} m off the rail at height {:.2}", p.height));
+                    }
+                    let target = run_speed * ps.move_speed_mult() * GRIND_SPEED_MULT;
+                    if x == TECH_GRIND_JUMP - 1 && (g.speed - target).abs() > 1.0 {
+                        probe.fail.push(format!("{who}: rail speed {:.1} m/s, expected ~{target:.1}", g.speed));
+                    }
+                }
+            }
+            TECH_GRIND_JUMP => {
+                if tech.grind.is_some() {
+                    // what player_input does with a jump press
+                    p.vel_r = PLAYER_JUMP_VEL;
+                    p.grounded = false;
+                }
+            }
+            TECH_GRIND_CHECK => {
+                if tech.grinds < 1 || tech.grind_m < 8.0 {
+                    probe.fail.push(format!("{who}: rode only {:.1} m of rail ({} catches)", tech.grind_m, tech.grinds));
+                } else if tech.grind.is_some() || p.vel_t.length() < run_speed * 1.3 {
+                    probe.fail.push(format!("{who}: jumping off the rail kept it ({}), speed {:.1}", tech.grind.is_some(), p.vel_t.length()));
+                } else {
+                    probe.ok.push(format!("{who}: grind caught, rode {:.1} m, jumped off at {:.1} m/s", tech.grind_m, p.vel_t.length()));
+                }
+                probe.holding = false;
+            }
+            TECH_ANTIPODE => {
+                // stand still, so the far pole stays where the crowd is staged
+                probe.holding = true;
+                p.vel_t = Vec3::ZERO;
+                if pid.0 != 0 {
+                    continue;
+                }
+                for k in 0..14 {
+                    let (tx, bx) = sphere::tangent_frame(-p.dir);
+                    let a = k as f32 * 0.9;
+                    let d = sphere::offset_dir(-p.dir, (tx * a.cos() + bx * a.sin()).normalize(), 1.0 + k as f32 * 0.6, r);
+                    stage(&mut commands, EnemyKind::Shambler, d, &mut rng);
+                }
+            }
+            TECH_ANTIPODE_CHECK => {
+                let near = (ANTIPODE_SCAN_ARC / r).cos();
+                let truth = enemies.iter().filter(|e| e.speed > 0.0 && e.dir.dot(-p.dir) >= near).count() as i32;
+                let got = procs.antipode as i32;
+                if (got - truth).abs() > 3.max(truth / 5) || vis.antipode as i32 != got.min(255) {
+                    probe.fail.push(format!("{who}: antipode read {got} (hud {}) but {truth} stand there", vis.antipode));
+                } else if pid.0 == 0 && got < 10 {
+                    probe.fail.push(format!("{who}: the staged far-side crowd read as {got}"));
+                } else {
+                    probe.ok.push(format!("{who}: antipode read {got} ({:?}), hud {}", crate::techs::AntipodeBand::of(got as u32), vis.antipode));
+                }
+                probe.holding = false;
+            }
+            TECH_SLOPE_DOWN | TECH_SLOPE_UP if pid.0 == 0 => {
+                // the steepest ground on the world, slid down (then up) it from run speed
+                let steep = sphere::fib_sphere(6000)
+                    .map(|d| (d, planet.terrain.slope(d, r)))
+                    .max_by(|a, b| a.1.length().total_cmp(&b.1.length()));
+                let Some((d, up)) = steep else { continue };
+                let fall = -up.normalize();
+                probe.holding = true;
+                p.dir = d;
+                p.height = 0.0;
+                p.vel_r = 0.0;
+                p.grounded = true;
+                tech.grind = None;
+                tech.grind_cd = 10.0; // no rail may catch this slide
+                p.vel_t = if t == TECH_SLOPE_DOWN { fall } else { -fall } * run_speed;
+                p.slide_timer = SLIDE_TIME;
+                probe.slope_v0 = run_speed;
+            }
+            x if pid.0 == 0 && (x == TECH_SLOPE_DOWN + 6 || x == TECH_SLOPE_UP + 6) => {
+                let v = p.vel_t.length();
+                let down = x == TECH_SLOPE_DOWN + 6;
+                let grade = planet.terrain.slope(p.dir, r).length();
+                let v0 = probe.slope_v0;
+                let way = if down { "down" } else { "up" };
+                if (down && v < v0 + 0.3) || (!down && v > v0 - 0.3) {
+                    probe.fail.push(format!("{who}: a slide {way} a {grade:.2} grade went {v0:.2} -> {v:.2} m/s"));
+                } else {
+                    probe.ok.push(format!("{who}: slide {way} a {grade:.2} grade: {v0:.2} -> {v:.2} m/s"));
+                }
+                tech.grind_cd = 0.0;
+                probe.holding = false;
+            }
+            TECH_HOP => {
+                // a plain running hop off whatever ground this is, W held
+                probe.holding = true;
+                tech.grind = None;
+                tech.grind_cd = 10.0; // the held slide must not catch a rail instead
+                p.height = 0.0;
+                p.grounded = true;
+                p.slide_timer = 0.0;
+                p.land_timer = 10.0;
+                p.vel_t = p.facing * run_speed * ps.move_speed_mult();
+                p.vel_r = PLAYER_JUMP_VEL * ps.stats.jump_height.sqrt();
+                p.grounded = false;
+                intent.wish = p.facing;
+                probe.hop_top.insert(pid.0, 0.0);
+                probe.hop_bank.remove(&pid.0);
+            }
+            x if x > TECH_HOP && x < TECH_HOP_CHECK => {
+                // what player_input does with W held (in the air: `steer`, 60% authority)
+                if !p.grounded && tech.slam.is_none() {
+                    let drive = run_speed * ps.move_speed_mult();
+                    p.vel_t = crate::player::steer(p.vel_t, intent.wish, false, drive, 0.033);
+                    let top = probe.hop_top.entry(pid.0).or_default();
+                    *top = top.max(p.vel_t.length());
+                }
+                // ...and with slide pressed in the air, then held
+                if x == TECH_HOP_ARM && !p.grounded {
+                    tech.slam_armed = true;
+                    tech.slam_hold = 0.0;
+                }
+                intent.slide_held = x >= TECH_HOP_ARM && (tech.slam_armed || tech.slam.is_some());
+                if let Some(bank) = tech.slam {
+                    probe.hop_bank.insert(pid.0, bank);
+                }
+            }
+            TECH_HOP_CHECK => {
+                intent.slide_held = false;
+                intent.wish = Vec3::ZERO;
+                tech.grind_cd = 0.0;
+                probe.holding = false;
+                let run = run_speed * ps.move_speed_mult();
+                let top = probe.hop_top.get(&pid.0).copied().unwrap_or(0.0);
+                match probe.hop_bank.get(&pid.0).copied() {
+                    None => probe.fail.push(format!("{who}: the no-ramp hop's Slam never committed")),
+                    Some(bank) => {
+                        let reach = crate::techs::slam_reach(crate::techs::slam_power(bank, ps.move_speed_mult()));
+                        if top > run * 1.05 || reach.t > 0.0 {
+                            probe.fail.push(format!(
+                                "{who}: a plain hop reached {top:.2} m/s (run {run:.2}) and slammed at {bank:.2} m/s for {:.0}% of the bomb",
+                                reach.t * 100.0
+                            ));
+                        } else {
+                            probe.ok.push(format!("{who}: no ramp, no bomb — a hop held forward topped {top:.2} m/s, its Slam a dud"));
+                        }
+                    }
+                }
+            }
+            x if x >= TECH_INSURE && x < TECH_DONE => {
+                if probe.insured.contains(&pid.0) {
+                    continue;
+                }
+                if !probe.insuring.contains(&pid.0) {
+                    if procs.blink_cd > 0.0 || !procs.insurance_armed {
+                        continue; // wait for a charged, armed policy
+                    }
+                    probe.insuring.push(pid.0);
+                    probe.insure_base.insert(pid.0, tech.blinks);
+                    probe.before.insert(pid.0, p.dir);
+                }
+                if tech.blinks > probe.insure_base[&pid.0] {
+                    let off = sphere::arc_dist(p.dir, -probe.before[&pid.0], r);
+                    probe.insuring.retain(|i| *i != pid.0);
+                    probe.insured.push(pid.0);
+                    if off > 1.0 {
+                        probe.fail.push(format!("{who}: Boomerang Insurance landed {off:.2} m off the antipode"));
+                    } else {
+                        probe.ok.push(format!("{who}: Boomerang Insurance paid at {:.0}% HP -> antipode", ps.hp / ps.stats.max_hp * 100.0));
+                    }
+                    ps.hp = ps.stats.max_hp;
+                    continue;
+                }
+                // just above the line, then a hit that takes it under (evasion may eat one)
+                probe.before.insert(pid.0, p.dir);
+                ps.iframes = 0.0;
+                ps.shield = 0.0;
+                ps.hp = ps.stats.max_hp * (BOOMERANG_INSURANCE_HP + 0.02);
+            }
+            _ => {}
+        }
+    }
+    // the Insurance hits, addressed after the loop (the query is borrowed inside it)
+    if t >= TECH_INSURE && t < TECH_DONE {
+        for (e, pid, _, ps, _, _, _, _) in &q {
+            if probe.insuring.contains(&pid.0) {
+                let amount = ps.stats.max_hp * 0.1 / (ps.stats.damage_taken.max(0.1) * (1.0 - ps.effective_armor_fraction()).max(0.05));
+                hits.write(crate::messages::PlayerHitMsg { victim: e, amount, from: Vec3::ZERO, attacker: None });
+            }
+        }
+    }
+    if t == TECH_DONE {
+        let n = q.iter().count();
+        if probe.insured.len() < n {
+            let paid = probe.insured.clone();
+            probe.fail.push(format!("Boomerang Insurance paid for {paid:?} of {n} astronauts"));
+        }
+        probe.holding = false;
+    }
+}
+
+/// `--techs`: which astronauts' Slams and blinks came out as TechFx one-shots — the
+/// messages the hazard lane carries to joiners.
+fn tech_probe_fx(mut probe: ResMut<TechProbe>, mut fx: MessageReader<crate::techs::TechFxMsg>) {
+    use crate::techs::TechFx;
+    for m in fx.read() {
+        match m.fx {
+            TechFx::Slam { owner, .. } if !probe.fx_slams.contains(&owner) => probe.fx_slams.push(owner),
+            TechFx::Blink { owner, .. } if !probe.fx_blinks.contains(&owner) => probe.fx_blinks.push(owner),
+            _ => {}
+        }
+    }
+}
+
 /// Gems collected over the run (every collection writes one `GrantOut::Xp`).
 #[derive(Resource, Default)]
 struct XpTally(u64);
@@ -1167,9 +1618,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::save::settings_self_check())
         .and_then(|_| crate::fx::flash_gate_self_check())
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
-        .and_then(|_| crate::tomes::self_check());
+        .and_then(|_| crate::tomes::self_check())
+        .and_then(|_| crate::techs::self_check())
+        .and_then(|_| crate::net::edge_presses_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes, movement techs, input edges)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -1219,6 +1672,13 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         // Both probes stage lethal hits on the local astronaut and would eat each other's
         // saves; with --coop2 the death-save victim is the peer and the two compose.
         println!("SMOKE FAIL: --deathsave with --assist needs --coop2");
+        std::process::exit(2);
+    }
+    if !probe_tomes.is_empty() && args.iter().any(|a| a == "--techs") {
+        // Both probes stage their scenes by moving the astronauts (the tomes' to the night
+        // side and the Microwave, the techs' onto rails, ramps and the antipode) on
+        // overlapping ticks, and would fail each other's checks: run them separately.
+        println!("SMOKE FAIL: --techs and --tomes stage conflicting scenes; run them separately");
         std::process::exit(2);
     }
     let probe = CoopProbe {
@@ -1275,18 +1735,22 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         })
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
+        .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .init_resource::<crate::techs::GrindLines>()
+        .init_resource::<crate::techs::TechTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
         .add_message::<crate::items::ItemFxMsg>()
+        .add_message::<crate::techs::TechFxMsg>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
         .add_message::<crate::messages::NumberMsg>()
         .add_message::<crate::messages::BannerMsg>()
         .add_message::<crate::messages::SfxMsg>()
-        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, headless_enter))
+        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, headless_enter))
         .add_systems(
             Update,
             (
@@ -1354,6 +1818,41 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             )
                 .chain()
                 .run_if(crate::playing),
+        )
+        // §4 movement techs — the host's half as main.rs runs it (headless IS the host);
+        // the moves themselves are player_physics below
+        .add_systems(
+            Update,
+            (
+                crate::techs::antipode_blink,
+                crate::techs::consume_edge_intents,
+            )
+                .chain()
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (
+                crate::techs::antipode_scan,
+                crate::techs::slam_shockwave.after(crate::player::player_physics),
+                crate::techs::slide_plow,
+                crate::techs::animate_tech_fx,
+                tech_probe
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .before(crate::techs::antipode_blink)
+                    .before(crate::combat::apply_player_hits)
+                    .run_if(|p: Res<TechProbe>| p.on),
+                tech_probe_fx.run_if(|p: Res<TechProbe>| p.on),
+            )
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            crate::techs::tech_fx_presentation
+                .after(crate::techs::slam_shockwave)
+                .after(crate::techs::antipode_blink)
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         // as in main.rs: item one-shots are presented behind a card panel too
         .add_systems(
@@ -1520,7 +2019,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         ok = false;
     }
     let xp_grants = world.resource::<XpTally>().0;
-    if run.kills > 50 && xp_grants == 0 && gems_left == 0 {
+    // `--staticnow` winds the run into The Static within seconds, and while it is up no
+    // kill drops XP (`pickups::kill_drops` pays its ghosts' Silver instead): the XP pipeline
+    // is judged on the runs that walk a horde, not on this one.
+    let xp_run = !std::env::args().any(|a| a == "--staticnow");
+    if xp_run && run.kills > 50 && xp_grants == 0 && gems_left == 0 {
         println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
     }
@@ -1532,11 +2035,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // fast-boss the bot walks the horde it kills, and the magnet reaches most drops. The
     // collection threshold is LOW on purpose: with no XP the bot never levels and dies
     // early, so a dead pickup path shows up as a short run with a handful of kills.
-    if !fast_boss && run.kills >= 10 && xp_grants == 0 {
+    if xp_run && !fast_boss && run.kills >= 10 && xp_grants == 0 {
         println!("FAIL: XP pipeline dead ({gems_left} gems on the ground, none ever collected)");
         ok = false;
     }
-    if !fast_boss && run.kills > 50 && best_level < 2 {
+    if xp_run && !fast_boss && run.kills > 50 && best_level < 2 {
         println!("FAIL: XP pipeline dead ({xp_grants} gems collected, still level 1)");
         ok = false;
     }
@@ -1840,6 +2343,38 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             ok = false;
         }
     }
+    // §4 movement techs
+    let tech_probe = world.resource::<TechProbe>();
+    if tech_probe.on {
+        let tel = world.resource::<crate::techs::TechTelemetry>();
+        let lines = world.resource::<crate::techs::GrindLines>();
+        println!(
+            "TECHS rails={} ({:.0} m) slams={} (duds {}) hits={} best_power={:.2} blinks={} insured={} plowed={} scans={} fx[slams {:?} blinks {:?}]",
+            lines.spines.len(), lines.total_length(), tel.slams, tel.slam_duds, tel.slam_hits, tel.best_slam_power,
+            tel.blinks, tel.insured_blinks, tel.plowed, tel.scans, tech_probe.fx_slams, tech_probe.fx_blinks
+        );
+        for l in &tech_probe.ok {
+            println!("  TECH {l}");
+        }
+        let mut fails = tech_probe.fail.clone();
+        if tech_probe.ticks < TECH_DONE {
+            fails.push(format!("the probe needs {TECH_DONE} ticks, the run gave it {}", tech_probe.ticks));
+        }
+        let n = peers.len() as u8;
+        for id in 0..n {
+            if !tech_probe.fx_slams.contains(&id) || !tech_probe.fx_blinks.contains(&id) {
+                fails.push(format!("player {id}'s Slam/blink never became a TechFx (what a joiner is sent)"));
+            }
+        }
+        if fails.is_empty() {
+            println!("TECHS OK (blink, slam, plow, grind, antipode read, slope-boost, Boomerang Insurance)");
+        } else {
+            for f in fails {
+                println!("FAIL: techs: {f}");
+            }
+            ok = false;
+        }
+    }
     // §13: a run with every assist off must never be flagged; one with them must be.
     if run.assisted != assist {
         println!("FAIL: run.assisted={} with --assist {}", run.assisted, if assist { "on" } else { "off" });
@@ -1898,7 +2433,7 @@ fn headless_enter(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
-    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
@@ -1906,7 +2441,8 @@ fn headless_enter(
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
 }
 

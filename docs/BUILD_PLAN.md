@@ -54,8 +54,8 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P02 Co-op client parity | ✅ wave 1. Gaps: version mismatch surfaces only after netcode's ~15 s timeout; a joiner's Silver (comet or pickups) goes into the host's shared pot and save, and per-player meta rewards have no owning package yet; client pause still freezes its local view |
 | P03 Items 22 → ~40 | ✅ wave 2 (22 → 38). Gaps: Boomerang Insurance kept out of the pools until P06 fills `items::antipode_escape`; Warden Solongo death-save slot is a hook (hero #20 post-1.0); Devoured Sun Shard dims the sun as a stand-in until P07 shrinks the day side from `RunState.sun_shrink`; a joiner doesn't see a teammate's ghost/Anti-Grav volleys (teammate fire isn't streamed); grade/cursed/proc numbers not playtested |
 | P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
-| P05 Tomes 8 → 23 + loadout | 🔨 building (main line, wave 3) |
-| P06 Movement techs + Antipode Blink | 🔨 building (main line, wave 3) |
+| P05 Tomes 8 → 23 + loadout | ✅ wave 3. Gaps: Nightfall reads a fixed sun (`planet::sunward`/`is_night`) until P07 turns it; Duplication's free Microwave use and Salvage's Microwave discount wait for P16's Gold price; Duplication/Salvage do nothing for joiners until P14 (host-only interactables); Golden Tome max is ×1.5 per the GDD formula (old saves were ×2.0 at L20) — design call; per-rank numbers not playtested |
+| P06 Movement techs + Antipode Blink | ✅ wave 3. Gaps: Antipode Blink mastery/quest ladder is P21/P26 (MoveTech counts slams/grinds/blinks for them); antipode tell is a HUD dial until P24's threat ring; no gamepad binds (P27); §4 jump hang ~0.73 s vs GDD ~1.2 s left for a playtest; slam/rail/blink numbers not playtested; `CLAUDE.md` module map lacks `techs` and `tomes` |
 | P07 Day/night cycle, world gimmicks, diegetic difficulty | 🔨 building (track C, then P09 on top) |
 | P08 New enemies batch 1 | 🔀 built + reviewed; staging into main via `stage/B` |
 | P09 Planetary events (2 per world) | 🔨 building (track C, on P07) |
@@ -181,6 +181,10 @@ Bring the run's rules to canon.
   60 s toward night-lock.
 - Co-op: sun phase in `RunSnapMsg` so both machines light identically; hazards host-simulated.
 - Files: `planet.rs`, new `daynight.rs`, `events_world.rs`, `enemies.rs` (spawn/speed hooks), `pickups.rs`.
+- Merge note (wave 3): P05 already added `planet::sunward()` and `planet::is_night(dir, sun_shrink)`
+  against the fixed sun; `player_physics` sets `PlayerState.night` from it for Tome of Nightfall
+  (and the headless tome probe walks to `-sunward()`). The rotating sun must REPLACE these (one
+  sun, one `is_night`), not add a second test.
 
 ### P08 — New enemies batch 1 (GDD §9)
 Rollo (rolls the great circle, accelerates downhill, can't turn sharply), Trencher (burrows a

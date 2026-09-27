@@ -3,7 +3,14 @@
 pub const PLAYER_RUN_SPEED: f32 = 8.5;
 pub const PLAYER_ACCEL: f32 = 55.0;
 pub const PLAYER_FRICTION: f32 = 38.0;
-pub const PLAYER_AIR_CONTROL: f32 = 0.35;
+/// Air control, §4 table: "~60% authority — curve over a crater lip, not cheese a full
+/// 180". The share of ground acceleration a wish gets in the air...
+pub const PLAYER_AIR_CONTROL: f32 = 0.6;
+/// ...and the share of THAT which may push against your own momentum. Curving keeps the
+/// whole 60%; braking gets a third of it, so a run-speed hop can be slowed but never turned
+/// round before it lands. Neither ever ADDS speed past your run (or slide) speed — see
+/// `player::steer`: speed above it is only banked (a slide, a slope, a rail) and kept.
+pub const PLAYER_AIR_BRAKE: f32 = 0.35;
 pub const PLAYER_JUMP_VEL: f32 = 8.0;
 pub const PLAYER_GRAVITY: f32 = 22.0;
 pub const PLAYER_HEIGHT: f32 = 1.7;
@@ -14,6 +21,101 @@ pub const SLIDE_TIME: f32 = 0.85;
 pub const SLIDE_COOLDOWN: f32 = 1.1;
 pub const BHOP_WINDOW: f32 = 0.16; // seconds after landing to keep slide speed
 pub const SPEED_HARD_CAP: f32 = 2.1; // × run speed, bhop chains can't exceed
+
+// ── Movement techs (GDD §4) ──────────────────────────────────────────────────
+/// Slide slope-boost (§4 "accelerates downhill"): a sliding astronaut is pulled along the
+/// ground's fall line at gravity × sin(slope) × this — and slowed the same way uphill, so a
+/// crater is a half-pipe, not a treadmill. Walking ignores slope entirely (ground feel).
+pub const SLIDE_SLOPE_GAIN: f32 = 1.0;
+/// A slide heading down a grade steeper than this (rise per metre) doesn't run out: the
+/// whole wall of a crater is one slide.
+pub const SLIDE_SUSTAIN_SLOPE: f32 = 0.06;
+/// Slide knockback (§4 "knocks back enemies you plow through"): crowd enemies within this
+/// reach of a sliding (or grinding) astronaut are shoved aside at this speed (m/s, decaying
+/// at 7/s like every knock ≈ 2 m). Pure physics — no damage, and the astronaut never slows.
+pub const SLIDE_PLOW_REACH: f32 = 1.2;
+pub const SLIDE_PLOW_KNOCK: f32 = 15.0;
+
+/// Orbital Slingshot's Slam (§4): holding slide this long in the air (after pressing it
+/// there) commits the dive — long enough that a tap meant for a landing slide doesn't
+/// throw a jump away.
+pub const SLAM_HOLD_SECS: f32 = 0.12;
+/// No slam from a hop that has barely left the ground.
+pub const SLAM_MIN_HEIGHT: f32 = 0.6;
+/// The dive: straight down at this speed, keeping this share of the horizontal speed —
+/// the rest is what the shockwave is made of.
+pub const SLAM_DIVE_SPEED: f32 = 30.0;
+pub const SLAM_KEEP: f32 = 0.15;
+/// "Whiff the ramp, whiff the bomb": the banked speed, in units of the slammer's OWN run
+/// speed (base × move-speed stat), maps onto the shockwave from nothing at SLAM_MIN_POWER
+/// to the full bomb at SLAM_FULL_POWER (redline — the bhop hard cap). The floor sits just
+/// over a slide's own boost, so a slide-jump off flat ground is a dud: the bomb is made of
+/// the speed a slope (or a hot rail) added on top of it.
+pub const SLAM_MIN_POWER: f32 = SLIDE_BOOST + 0.05;
+pub const SLAM_FULL_POWER: f32 = SPEED_HARD_CAP;
+/// Speed builds: a redline that is faster in metres per second hits harder — the bomb's
+/// damage scales with the move-speed stat, up to this.
+pub const SLAM_SPEED_SCALE_MAX: f32 = 2.0;
+/// The shockwave at full power: damage (× the slammer's damage multiplier, rolls crits),
+/// radius (grows from MIN at the first useful speed) and outward knock (m/s).
+pub const SLAM_DAMAGE: f32 = 90.0;
+pub const SLAM_RADIUS_MIN: f32 = 3.0;
+pub const SLAM_RADIUS_MAX: f32 = 7.0;
+pub const SLAM_KNOCK: f32 = 26.0;
+/// The slammer's own screen: a kick of shake that grows with the bomb (§13 budget — a
+/// full-power slam sits with the elite/boss slams, a dud barely registers).
+pub const SLAM_SHAKE_MIN: f32 = 0.06;
+pub const SLAM_SHAKE_MAX: f32 = 0.26;
+/// The shockwave's ring grows to its radius over this long.
+pub const SLAM_RING_SECS: f32 = 0.35;
+
+/// Grind-Lines (§4): a rail runs at base run speed × move speed × this ("+50% speed"). A
+/// faster entry keeps its extra and bleeds it off slowly; a slower one is brought up fast.
+pub const GRIND_SPEED_MULT: f32 = 1.5;
+pub const GRIND_ACCEL: f32 = 18.0;
+pub const GRIND_OVERSPEED_DECAY: f32 = 2.5;
+/// Catching a rail: a sliding astronaut within this arc of a spine, no higher than
+/// GRIND_CATCH_HEIGHT off the ground, heading within ~60° of the rail's run.
+pub const GRIND_CATCH_ARC: f32 = 1.1;
+pub const GRIND_CATCH_HEIGHT: f32 = 0.9;
+pub const GRIND_ALIGN_MIN: f32 = 0.5;
+/// After leaving a rail (jumped, ran off its end) it can't catch you again for this long.
+pub const GRIND_RECATCH_SECS: f32 = 0.4;
+/// The rail stands this far above the crest, and a grinder's boots ride on it.
+pub const GRIND_RAIL_LIFT: f32 = 0.22;
+/// Spine extraction (`sphere::Terrain::ridge_spines`): the ridge term a crest must hold to
+/// carry a rail, the shortest rail worth laying, the trace's step, the sharpest turn per
+/// step, and how many seed points cover the sphere.
+pub const GRIND_CREST_MIN: f32 = 0.1;
+pub const GRIND_MIN_LEN: f32 = 15.0;
+pub const GRIND_STEP: f32 = 1.5;
+pub const GRIND_MAX_TURN_DEG: f32 = 35.0;
+pub const GRIND_SEEDS: usize = 12000;
+/// A rail stops this far short of a solid prop rather than running through it.
+pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
+/// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
+/// lookup's ~4 m reach), so none stands on one.
+pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
+/// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
+/// who has not ridden one yet this run is told how.
+pub const GRIND_HINT_ARC: f32 = 4.0;
+
+/// Antipode Blink (§4, §7): recharge at the item's native grade; a bigger grade (or a
+/// second copy) divides it, down to BLINK_MIN_COOLDOWN. Boomerang Insurance's escape rides
+/// the same recharge (one mechanic, §15) — alone, at the base.
+pub const BLINK_COOLDOWN: f32 = 14.0;
+pub const BLINK_MIN_COOLDOWN: f32 = 5.0;
+/// A blink lands with this much grace: as long as the camera's glide to the far side
+/// takes (CAM_TELEPORT_GLIDE_SECS), so nothing hits you before you can see it.
+pub const BLINK_IFRAMES: f32 = 0.5;
+/// The antipode read (§4 "the off-screen threat ring shows antipode density"): enemies
+/// within this arc of the far pole, recounted this often. Bands: under THIN is clear, from
+/// WALL up it's a wall.
+pub const ANTIPODE_SCAN_ARC: f32 = 14.0;
+pub const ANTIPODE_SCAN_SECS: f32 = 0.25;
+pub const ANTIPODE_THIN: u32 = 3;
+pub const ANTIPODE_CROWDED: u32 = 10;
+pub const ANTIPODE_WALL: u32 = 25;
 
 pub const CAM_DISTANCE: f32 = 7.5;
 pub const CAM_HEIGHT: f32 = 3.2;
@@ -172,8 +274,9 @@ pub const HORIZON_FLY_ACCEL: f32 = 40.0;
 pub const HORIZON_FLY_SPEED: f32 = 60.0;
 pub const HORIZON_FLY_LIFT: f32 = 3.0;
 pub const HORIZON_HANDOFF_ARC: f32 = 2.5;
-/// The astronaut's flashlight. Tome of Nightfall multiplies the intensity by its Flashlight
-/// stat and the reach by half as much again (a 2× beam throws 1.5× as far).
+/// The astronaut's weapon-mounted flashlight (§4, §13: toggled with F). Tome of Nightfall
+/// multiplies the intensity by its Flashlight stat and the reach by half as much again (a 2×
+/// beam throws 1.5× as far).
 pub const FLASHLIGHT_INTENSITY: f32 = 6_000_000.0;
 pub const FLASHLIGHT_RANGE: f32 = 55.0;
 

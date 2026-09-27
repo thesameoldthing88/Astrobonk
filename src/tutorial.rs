@@ -22,7 +22,7 @@ const LINES: [&str; 6] = [
     "Your weapon fires itself. Your only job is not getting cornered.",
     "Green gems are XP. Fill the bar, pick a card. Trust your gut.",
     "Shift to slide. Jump as you land to keep the speed — you'll need it.",
-    "Run the horizon; the far side goes dark. Your light rides your gun.",
+    "It gets dark on the far side. Bring a light. F works the one on your gun.",
     "Big one inbound. Kite it, don't trade. It'll drop a chest.",
 ];
 

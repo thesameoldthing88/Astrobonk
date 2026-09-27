@@ -67,14 +67,62 @@ pub fn nearest_astronaut(from_dir: Vec3, list: &[AstronautSnap], radius: f32) ->
 /// keyboard/mouse; a REMOTE player's is filled from their PlayerInputMsg on the host.
 /// Movement then consumes this identically either way, so there is exactly one
 /// authoritative copy of the movement rules.
-#[derive(Component, Clone, Copy, Default, Debug)]
+///
+/// Edges live one frame (`techs::consume_edge_intents` spends them after movement has).
+#[derive(Component, Clone, Copy, Debug)]
 pub struct InputIntent {
-    pub wish: Vec3,      // desired move dir, world-space tangent, normalized
-    pub forward: Vec3,   // camera forward (tangent) — drives facing/aim
-    pub jump: bool,      // edge-triggered (true only on the frame pressed)
-    pub slide: bool,     // edge-triggered
-    pub interact: bool,  // edge-triggered
-    pub jump_held: bool, // level: jump is down this frame (Anti-Grav Boots hover)
+    pub wish: Vec3,       // desired move dir, world-space tangent, normalized
+    pub forward: Vec3,    // camera forward (tangent) — drives facing/aim
+    pub jump: bool,       // edge-triggered (true only on the frame pressed)
+    pub slide: bool,      // edge-triggered
+    pub interact: bool,   // edge-triggered
+    pub jump_held: bool,  // level: jump is down this frame (Anti-Grav Boots hover)
+    pub slide_held: bool, // level: slide is down (a hold in the air commits the Slam)
+    pub blink: bool,      // edge-triggered: Antipode Blink
+    pub light: bool,      // state: the weapon-mounted flashlight is on
+}
+
+impl Default for InputIntent {
+    fn default() -> Self {
+        Self {
+            wish: Vec3::ZERO,
+            forward: Vec3::ZERO,
+            jump: false,
+            slide: false,
+            interact: false,
+            jump_held: false,
+            slide_held: false,
+            blink: false,
+            // the light starts on: the night side is black beyond it (§4)
+            light: true,
+        }
+    }
+}
+
+/// This machine's flashlight switch (F, §13). A resource rather than per-body state so it
+/// survives the new body every stage builds; `gather_local_input` copies it into the local
+/// intent, which carries it to the host and on to everyone's drawing of us.
+#[derive(Resource)]
+pub struct FlashlightSwitch(pub bool);
+
+impl Default for FlashlightSwitch {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// The spotlight of an astronaut's flashlight, and whether it is lit right now.
+#[derive(Component)]
+pub struct FlashlightBeam {
+    pub on: bool,
+}
+
+/// The glowing lens on the flashlight's body — its OWN material (one per rig), so a dark
+/// lens on one astronaut leaves everyone else's lit.
+#[derive(Component)]
+pub struct FlashlightLens {
+    pub mat: Handle<StandardMaterial>,
+    pub on: bool,
 }
 
 #[derive(Component)]
@@ -112,8 +160,9 @@ pub struct CamRig {
     pub last_body: Option<(Entity, Vec3)>,
     /// The point the rig centred on last frame: the body, or partway along a glide.
     pub focus: Vec3,
-    /// A teleport glide in flight: the focus it left from, and seconds into it.
-    pub glide: Option<(Vec3, f32)>,
+    /// A teleport glide in flight: the focus it left from, seconds into it, and the axis
+    /// of the great circle it sweeps along (fixed at the start — see `glide_axis`).
+    pub glide: Option<(Vec3, f32, Vec3)>,
 }
 
 impl Default for CamRig {
@@ -122,17 +171,39 @@ impl Default for CamRig {
     }
 }
 
-/// Where a teleport glide's focus is, `s` (0..1, eased) of the way from `from` to `to`:
-/// along the great circle between them with the radius eased, so the frame sweeps over the
-/// ground instead of cutting through the planet. An exact antipode has no unique great
-/// circle, so that one goes forward over the top, the way the camera was looking.
-fn glide_point(from: Vec3, to: Vec3, s: f32, forward: Vec3) -> Vec3 {
+/// The great circle a teleport glide from `from` to `to` sweeps along, as its axis: the
+/// short way round — unless the two are (near-)antipodal, where "the short way" is any way
+/// and flips with every centimetre the body moves. Then (an Antipode Blink) it goes forward
+/// over the top, the way the camera was looking, which is also the way `techs::blink_body`
+/// turned the astronaut's momentum. Fixed for the whole glide.
+pub(crate) fn glide_axis(from: Vec3, to: Vec3, forward: Vec3) -> Vec3 {
     let (a, b) = (from.normalize_or_zero(), to.normalize_or_zero());
-    let axis = a.cross(b).try_normalize().unwrap_or_else(|| {
-        let f = (forward - a * forward.dot(a)).try_normalize().unwrap_or_else(|| sphere::tangent_frame(a).0);
-        a.cross(f).normalize()
-    });
-    let dir = Quat::from_axis_angle(axis, a.angle_between(b) * s) * a;
+    let c = a.cross(b);
+    // sin 3°: a jump big enough to glide at all is never this close to zero the short way
+    if c.length() > 0.05 {
+        return c.normalize();
+    }
+    let f = (forward - a * forward.dot(a)).try_normalize().unwrap_or_else(|| sphere::tangent_frame(a).0);
+    a.cross(f).normalize()
+}
+
+/// Where a teleport glide's focus is, `s` (0..1, eased) of the way from `from` to `to`:
+/// round the great circle about `axis` (`glide_axis`) with the radius eased, so the frame
+/// sweeps over the ground instead of cutting through the planet. The body can move while
+/// the glide flies, so `to` drifts off that circle a little: the drift is eased in along
+/// the way, and the glide still ends on the body.
+pub(crate) fn glide_point(from: Vec3, to: Vec3, s: f32, axis: Vec3) -> Vec3 {
+    let (a, b) = (from.normalize_or_zero(), to.normalize_or_zero());
+    // how far round the circle `to` lies, 0..2π — so a landing a hair past the antipode is
+    // still reached by going forward, never by flipping back the other way round
+    let bp = (b - axis * b.dot(axis)).try_normalize().unwrap_or(-a);
+    let mut phi = axis.dot(a.cross(bp)).atan2(a.dot(bp));
+    if phi < 0.0 {
+        phi += std::f32::consts::TAU;
+    }
+    let end = Quat::from_axis_angle(axis, phi) * a;
+    let drift = Quat::IDENTITY.slerp(Quat::from_rotation_arc(end, b), s);
+    let dir = (drift * (Quat::from_axis_angle(axis, phi * s) * a)).normalize();
     dir * (from.length() + (to.length() - from.length()) * s)
 }
 
@@ -193,9 +264,10 @@ pub fn spawn_player(
             RigHero(character),
             crate::comet::CometState::default(),
             crate::items::ItemProcs::default(),
+            crate::techs::MoveTech::default(),
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
-                crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false },
+                crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
                 crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false, revives: 0 },
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
@@ -353,14 +425,18 @@ pub fn build_astronaut_rig(
             });
             p.spawn((
                 Mesh3d(meshes.add(Mesh::from(Cuboid::new(0.09, 0.09, 0.2)))),
-                MeshMaterial3d(lens_mat),
+                MeshMaterial3d(lens_mat.clone()),
+                FlashlightLens { mat: lens_mat, on: true },
                 Transform::from_xyz(0.42, 0.24, -0.52),
             ));
-            // the beam itself: a real spotlight aimed where the astronaut faces
+            // the beam itself: a real spotlight aimed where the astronaut faces (the
+            // weapon's aim — §4 "where you aim your build is where you can see")
             p.spawn((
+                FlashlightBeam { on: true },
                 SpotLight {
                     color: Color::srgb(1.0, 0.96, 0.86),
-                    // Tome of Nightfall scales these (`tomes::apply_flashlights`)
+                    // Tome of Nightfall scales these and the F switch darkens them
+                    // (`player::sync_flashlights`)
                     intensity: FLASHLIGHT_INTENSITY,
                     range: FLASHLIGHT_RANGE,
                     radius: 0.05,
@@ -445,6 +521,8 @@ fn backpack_mesh() -> Mesh {
 pub fn gather_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     rig: Res<CamRig>,
+    mut light: ResMut<FlashlightSwitch>,
+    mut sfx: MessageWriter<crate::messages::SfxMsg>,
     mut q: Query<(&Player, &mut InputIntent), With<LocalPlayer>>,
 ) {
     let Ok((p, mut intent)) = q.single_mut() else { return };
@@ -473,8 +551,52 @@ pub fn gather_local_input(
     intent.forward = fwd;
     intent.jump = keys.just_pressed(KeyCode::Space);
     intent.jump_held = keys.pressed(KeyCode::Space);
-    intent.slide = keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC);
+    // §13 control map: Shift/Ctrl (and C, kept for the old muscle memory)
+    const SLIDE_KEYS: [KeyCode; 5] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::KeyC];
+    intent.slide = keys.any_just_pressed(SLIDE_KEYS);
+    intent.slide_held = keys.any_pressed(SLIDE_KEYS);
     intent.interact = keys.just_pressed(KeyCode::KeyE);
+    intent.blink = keys.just_pressed(KeyCode::KeyQ);
+    if keys.just_pressed(KeyCode::KeyF) {
+        light.0 = !light.0;
+        sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Flashlight));
+    }
+    intent.light = light.0;
+}
+
+/// Acceleration a movement wish asks for. On the ground, all of it. In the air (§4 table:
+/// "~60% authority — curve over a crater lip, not cheese a full 180") PLAYER_AIR_CONTROL of
+/// it to curve with, but only PLAYER_AIR_BRAKE of that against your own momentum: a hop can
+/// be bent and slowed, never turned round.
+pub fn wish_accel(vel: Vec3, wish: Vec3, grounded: bool) -> Vec3 {
+    let mut a = wish * PLAYER_ACCEL;
+    if grounded {
+        return a;
+    }
+    a *= PLAYER_AIR_CONTROL;
+    if let Some(v) = vel.try_normalize() {
+        let back = a.dot(v);
+        if back < 0.0 {
+            a -= v * back * (1.0 - PLAYER_AIR_BRAKE);
+        }
+    }
+    a
+}
+
+/// One frame of a movement wish on `vel`. A wish drives you up to `drive` (your run speed,
+/// or a slide's) and steers you above it, but never ADDS to it: §4's bunny-hop "preserves
+/// momentum" and air control "curves", so speed past a run is only ever banked — by a
+/// slide, a slope, a rail — and then kept or spent. Without this, 60% air authority plus
+/// the airborne hard cap redlined every plain hop in a third of a second (and every bhop
+/// landing's window added more), and the Slam was a full bomb off flat ground.
+pub fn steer(vel: Vec3, wish: Vec3, grounded: bool, drive: f32, dt: f32) -> Vec3 {
+    let limit = vel.length().max(drive);
+    let v = vel + wish_accel(vel, wish, grounded) * dt;
+    if v.length() > limit {
+        v.normalize() * limit
+    } else {
+        v
+    }
 }
 
 /// Apply intent -> motion for EVERY astronaut we simulate (all of them on the host;
@@ -485,9 +607,9 @@ pub fn player_input(
     planet: Res<CurrentPlanet>,
     particles: Option<Res<crate::fx::ParticleAssets>>,
     mut sfx: MessageWriter<crate::messages::SfxMsg>,
-    mut q: Query<(&mut Player, &mut PlayerState, &Transform, &InputIntent)>,
+    mut q: Query<(&mut Player, &mut PlayerState, &Transform, &InputIntent, &mut crate::techs::MoveTech)>,
 ) {
-    for (mut p, mut run, ptf, intent) in &mut q {
+    for (mut p, mut run, ptf, intent, mut tech) in &mut q {
     let dt = time.delta_secs();
     let wish = intent.wish;
 
@@ -495,9 +617,8 @@ pub fn player_input(
     let sliding = p.slide_timer > 0.0;
     let max_speed = PLAYER_RUN_SPEED * speed_mult * if sliding { SLIDE_BOOST } else { 1.0 };
 
-    let control = if p.grounded { 1.0 } else { PLAYER_AIR_CONTROL };
     if wish != Vec3::ZERO {
-        p.vel_t += wish * PLAYER_ACCEL * control * dt;
+        p.vel_t = steer(p.vel_t, wish, p.grounded, max_speed, dt);
     } else if p.grounded && !sliding && p.land_timer > BHOP_WINDOW {
         // friction
         let v = p.vel_t;
@@ -550,8 +671,13 @@ pub fn player_input(
         }
     }
 
-    // slide
-    if intent.slide && p.slide_cd <= 0.0 && p.grounded {
+    // slide — or, in the air, the press that arms a Slam (held on, it commits in
+    // `player_physics`). A rail is already a slide.
+    if intent.slide && !p.grounded && tech.grind.is_none() {
+        tech.slam_armed = true;
+        tech.slam_hold = 0.0;
+    }
+    if intent.slide && p.slide_cd <= 0.0 && p.grounded && tech.grind.is_none() {
         p.slide_timer = SLIDE_TIME;
         p.slide_cd = SLIDE_COOLDOWN;
         let boost_dir = if wish != Vec3::ZERO { wish } else { p.facing };
@@ -585,32 +711,84 @@ pub fn player_input(
 
 /// Integrate motion over the sphere, snap to terrain, drive the transform.
 ///
-/// Also where the movement-side items and tomes live, because this runs on every body a
-/// machine moves (the host: all; a client: its own, predicted) and so the owner's feel and
-/// the host's truth come out of the same code: Anti-Grav Boots' hover, Tome of Gravity's
-/// fall, and the `airborne` / `descent_m` / `night` / `momentum` readings Icarus Boots,
-/// Downhill Momentum and the Nightfall and Momentum tomes deal damage from.
+/// Also where the movement-side items, tomes and §4 movement techs live, because this runs
+/// on every body a machine moves (the host: all; a client: its own, predicted) and so the
+/// owner's feel and the host's truth come out of the same code: Anti-Grav Boots' hover, Tome
+/// of Gravity's fall, the `airborne` / `descent_m` / `night` / `momentum` readings Icarus
+/// Boots, Downhill Momentum and the Nightfall and Momentum tomes deal damage from, the
+/// slide's slope-boost, the Slam's dive, and riding a Grind-Line (`techs`).
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     props: Res<crate::planet::PropColliders>,
     global: Res<RunState>,
+    lines: Res<crate::techs::GrindLines>,
     mut telemetry: ResMut<crate::items::ItemTelemetry>,
-    mut q: Query<(&mut Player, &mut PlayerState, &mut crate::items::ItemProcs, &InputIntent, &mut Transform)>,
+    mut sfx: MessageWriter<crate::messages::SfxMsg>,
+    mut q: Query<(
+        &mut Player,
+        &mut PlayerState,
+        &mut crate::items::ItemProcs,
+        &mut crate::techs::MoveTech,
+        &InputIntent,
+        &mut Transform,
+        Has<LocalPlayer>,
+    )>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (mut p, mut run, mut procs, intent, mut tf) in &mut q {
+    for (mut p, mut run, mut procs, mut tech, intent, mut tf, is_local) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
     p.coyote = (p.coyote - dt).max(0.0);
     p.land_timer += dt;
+    tech.grind_cd = (tech.grind_cd - dt).max(0.0);
     run.frenzy_timer = (run.frenzy_timer - dt).max(0.0);
     // above base run speed? (Nova's "no cooldown while sprinting")
     run.fast_move = p.vel_t.length() > PLAYER_RUN_SPEED * run.move_speed_mult() * 1.08;
 
+    // Slam (§4 Orbital Slingshot): a slide pressed in the air arms it (`player_input`);
+    // held on, it commits — the horizontal speed is banked for the shockwave and the
+    // astronaut drops like a stone. Letting go or landing first disarms it.
+    if tech.slam_armed {
+        if !intent.slide_held || p.grounded || run.dead || tech.grind.is_some() {
+            tech.slam_armed = false;
+        } else {
+            tech.slam_hold += dt;
+            if tech.slam_hold >= SLAM_HOLD_SECS && p.height >= SLAM_MIN_HEIGHT {
+                tech.slam_armed = false;
+                tech.slam = Some(p.vel_t.length());
+                p.vel_t *= SLAM_KEEP;
+                p.vel_r = -SLAM_DIVE_SPEED;
+                // the dive spends the airtime: no hovering back out of it
+                procs.hover_left = 0.0;
+            }
+        }
+    }
+
+    // Riding a Grind-Line: footing locked to the rail. A jump (player_input gave us lift)
+    // or a downed astronaut leaves it; so does running off its end, with the rail's speed.
+    let mut riding = false;
+    if let Some(mut g) = tech.grind {
+        if p.vel_r > 0.0 || run.dead || g.spine >= lines.spines.len() {
+            tech.grind = None;
+            tech.grind_cd = GRIND_RECATCH_SECS;
+        } else {
+            let on = crate::techs::ride_rail(&mut p, &mut g, &lines, run.move_speed_mult(), dt);
+            tech.grind_m += g.speed * dt;
+            tech.grind = on.then_some(g);
+            if !on {
+                tech.grind_cd = GRIND_RECATCH_SECS;
+            }
+            procs.hover_left = ANTIGRAV_HOVER_SECS;
+            riding = true;
+        }
+    }
+
+    if !riding {
     // Anti-Grav Boots: holding jump once the rise is spent holds the altitude — gravity
     // simply stops for as long as the airtime's budget lasts.
     procs.hovering = !p.grounded
@@ -658,6 +836,11 @@ pub fn player_physics(
             // landing squash scaled by impact speed [recipe R5]
             p.squash_amt = (p.vel_r.abs() * 0.022).clamp(0.05, 0.28);
             p.squash = 0.0;
+            // a Slam's dive ends in its shockwave (`techs::slam_shockwave`, host)
+            if let Some(bank) = tech.slam.take() {
+                tech.slam_landed = Some(bank);
+                tech.slams += 1;
+            }
         }
         p.height = 0.0;
         p.vel_r = 0.0;
@@ -668,6 +851,52 @@ pub fn player_physics(
     } else if p.height > 0.02 {
         p.grounded = false;
     }
+
+    // Slope-boost (§4 "slide accelerates downhill"): a slide rides the fall line — faster
+    // down a crater wall, slower up the far rim — and keeps going as long as the ground
+    // falls away ahead. Walking never feels the slope; this is the slide's alone.
+    if p.grounded && p.slide_timer > 0.0 {
+        let uphill = planet.terrain.slope(p.dir, planet.radius);
+        let grade = uphill.length();
+        if grade > 1e-4 {
+            let fall = -uphill / grade;
+            let sin = grade / (1.0 + grade * grade).sqrt();
+            p.vel_t += fall * PLAYER_GRAVITY * sin * SLIDE_SLOPE_GAIN * dt;
+            let cap = PLAYER_RUN_SPEED * run.move_speed_mult() * SPEED_HARD_CAP;
+            if p.vel_t.length() > cap {
+                p.vel_t = p.vel_t.normalize() * cap;
+            }
+            let heading_down = p.vel_t.normalize_or_zero().dot(fall);
+            if grade * heading_down > SLIDE_SUSTAIN_SLOPE {
+                p.slide_timer = p.slide_timer.max(0.1);
+            }
+        }
+    }
+
+    // Catch a Grind-Line: slide onto a spine (or come down onto one holding slide).
+    if tech.grind.is_none()
+        && tech.grind_cd <= 0.0
+        && tech.slam.is_none()
+        && !run.dead
+        && (p.slide_timer > 0.0 || intent.slide_held)
+        && p.height <= GRIND_CATCH_HEIGHT
+        && p.vel_r <= 0.0
+    {
+        if let Some(heading) = p.vel_t.try_normalize() {
+            if let Some((spine, s, sign)) = lines.catch(p.dir, heading) {
+                let mut g = crate::techs::Grind { spine, s, sign, speed: p.vel_t.length() };
+                // on the rail from this very frame, so the tuck and the footing agree
+                crate::techs::ride_rail(&mut p, &mut g, &lines, run.move_speed_mult(), 0.0);
+                tech.grind = Some(g);
+                tech.grinds += 1;
+                if is_local {
+                    sfx.write(crate::messages::SfxMsg(crate::messages::Sfx::Grind));
+                }
+            }
+        }
+    }
+    }
+
     run.airborne = !p.grounded;
     if run.airborne {
         telemetry.airborne_secs += dt;
@@ -688,7 +917,16 @@ pub fn player_physics(
     let up = p.dir;
     let pos = planet.surface_point(p.dir) + up * (p.height + PLAYER_HEIGHT * 0.5);
     tf.translation = pos;
-    let lean = if p.slide_timer > 0.0 { 0.9 } else { 0.0 };
+    // lean: a rail's surf stance, a slide's dive forward, a Slam's head-down drop
+    let lean = if tech.grind.is_some() {
+        0.35
+    } else if tech.slam.is_some() {
+        0.6
+    } else if p.slide_timer > 0.0 {
+        0.9
+    } else {
+        0.0
+    };
     tf.rotation = sphere::frame_quat(up, p.facing) * Quat::from_rotation_x(-lean);
     }
 }
@@ -869,6 +1107,7 @@ pub fn camera_rig(
     if let Ok(mut proj) = q_proj.single_mut() {
         if let Projection::Perspective(pp) = &mut *proj {
             let base = std::f32::consts::FRAC_PI_4;
+            // (a rail rides on the slide's timer, so a grind punches it too)
             let target = if p.slide_timer > 0.0 { base * 1.09 } else { base };
             let k = 1.0 - (-10.0 * time.delta_secs()).exp();
             pp.fov += (target - pp.fov) * k;
@@ -884,7 +1123,8 @@ pub fn camera_rig(
         Some((e, last)) if e == pe => {
             let jump = sphere::arc_dist(last.normalize_or_zero(), body.normalize_or_zero(), planet.radius);
             if jump > CAM_TELEPORT_ARC + p.vel_t.length() * dt * 2.0 {
-                rig.glide = Some((rig.focus, 0.0));
+                let axis = glide_axis(rig.focus, body, rig.forward);
+                rig.glide = Some((rig.focus, 0.0, axis));
             }
         }
         _ => {
@@ -895,11 +1135,11 @@ pub fn camera_rig(
     }
     rig.last_body = Some((pe, body));
     let focus = match rig.glide {
-        Some((from, t)) if t + dt < CAM_TELEPORT_GLIDE_SECS => {
+        Some((from, t, axis)) if t + dt < CAM_TELEPORT_GLIDE_SECS => {
             let t = t + dt;
-            rig.glide = Some((from, t));
+            rig.glide = Some((from, t, axis));
             let s = t / CAM_TELEPORT_GLIDE_SECS;
-            glide_point(from, body, s * s * (3.0 - 2.0 * s), rig.forward)
+            glide_point(from, body, s * s * (3.0 - 2.0 * s), axis)
         }
         _ => {
             rig.glide = None;
@@ -979,6 +1219,44 @@ pub fn cursor_control(
     if c.grab_mode != desired {
         c.grab_mode = desired;
         c.visible = !lock;
+    }
+}
+
+/// Every machine: light or dark each drawn astronaut's flashlight from its switch — a body
+/// this machine moves reads its own intent (the local switch, or a joiner's on the host,
+/// from its input packets); a joiner's teammates read the replicated `NetTransform`. Only a
+/// change is written, since a lens is a material edit. The beam's switch is recorded on
+/// `FlashlightBeam::on`; the spotlight's intensity is written by `tomes::apply_flashlights`
+/// (after this), which folds the switch into the Tome of Nightfall strength so one system
+/// owns the number.
+#[allow(clippy::type_complexity)]
+pub fn sync_flashlights(
+    bodies: Query<(Option<&InputIntent>, Option<&crate::net::NetTransform>)>,
+    mut beams: Query<(&ChildOf, &mut FlashlightBeam)>,
+    mut lenses: Query<(&ChildOf, &mut FlashlightLens)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let lit = |owner: Entity| match bodies.get(owner) {
+        Ok((Some(intent), _)) => intent.light,
+        Ok((None, Some(net))) => net.light,
+        _ => true,
+    };
+    for (parent, mut beam) in &mut beams {
+        let on = lit(parent.parent());
+        if beam.on != on {
+            beam.on = on;
+        }
+    }
+    for (parent, mut lens) in &mut lenses {
+        let on = lit(parent.parent());
+        if lens.on != on {
+            lens.on = on;
+            if let Some(m) = materials.get_mut(&lens.mat) {
+                // unlit: the base colour IS the glow, so a dark lens is a dark base
+                m.base_color = if on { Color::srgb(1.0, 0.97, 0.85) } else { Color::srgb(0.18, 0.18, 0.2) };
+                m.emissive = if on { LinearRgba::rgb(6.0, 5.6, 4.6) } else { LinearRgba::BLACK };
+            }
+        }
     }
 }
 
