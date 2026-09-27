@@ -658,3 +658,24 @@ pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The painted height steps: flat plateaus, climbing monotonically from floor to peak.
+    #[test]
+    fn toon_height_band_is_monotonic_and_stepped() {
+        let n = crate::config::TOON_TERRAIN_BANDS;
+        let mut last = -1.0;
+        let mut levels = Vec::new();
+        for i in 0..=1000 {
+            let b = super::toon_height_band(i as f32 / 1000.0);
+            assert!((0.0..=1.0).contains(&b) && b >= last - 1e-6, "not monotonic at {i}");
+            if levels.last().is_none_or(|l: &f32| (b - l).abs() > 1e-4) && (b * (n - 1) as f32).fract() < 1e-4 {
+                levels.push(b);
+            }
+            last = b;
+        }
+        assert_eq!(levels.len(), n, "want {n} flat levels, got {levels:?}");
+    }
+}
+

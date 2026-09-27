@@ -444,3 +444,34 @@ pub fn camera_bundle() -> impl Bundle {
         ToonInk::default(),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-in lighting module holding each anchor once, as bevy_pbr 0.18.1's does.
+    fn fake_module() -> String {
+        PATCH_SITES.iter().map(|(anchor, _)| format!("    {anchor}\n")).collect()
+    }
+
+    #[test]
+    fn patch_rewrites_every_site_and_appends_the_toon_functions() {
+        let out = toon_lighting_source(&fake_module()).expect("patch");
+        for (anchor, toon) in PATCH_SITES {
+            assert!(!out.contains(anchor), "anchor left behind: {anchor}");
+            assert!(out.contains(toon));
+        }
+        for name in ["fn toon_band(", "fn toon_spec(", "fn toon_cone(", PATCH_MARK] {
+            assert!(out.contains(name), "{name} missing");
+        }
+    }
+
+    #[test]
+    fn patch_refuses_whole_when_an_anchor_is_missing_or_doubled() {
+        let src = fake_module();
+        let missing = src.replacen(PATCH_SITES[1].0, "", 1);
+        assert!(toon_lighting_source(&missing).is_err());
+        let doubled = format!("{src}{}", PATCH_SITES[2].0);
+        assert!(toon_lighting_source(&doubled).is_err());
+    }
+}
