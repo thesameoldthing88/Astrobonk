@@ -126,7 +126,23 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(faces));
     mesh.compute_smooth_normals();
+    if !std::env::var("TOONDBG").unwrap_or_default().contains("nolean") { toon_terrain_normals(&mut mesh); }
     mesh
+}
+
+/// Cel bands quantize N·L, so every small bump in a noisy normal field turns into a speckle
+/// of triangles flipping between bands. Lean the shading normals toward the planet's own
+/// radial normal: the terminator becomes one clean line across the world and only the big
+/// hills and crater walls step into their own bands. Visual only — collision stays analytic.
+fn toon_terrain_normals(mesh: &mut Mesh) {
+    let Some(pos) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else { return };
+    let radial: Vec<Vec3> = pos.iter().map(|p| Vec3::from(*p).normalize_or_zero()).collect();
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(nrm)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+        for (n, up) in nrm.iter_mut().zip(radial) {
+            let lean = up.lerp(Vec3::from(*n), crate::config::TOON_TERRAIN_NORMAL_DETAIL).normalize_or_zero();
+            *n = lean.to_array();
+        }
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {

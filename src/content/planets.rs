@@ -47,6 +47,19 @@ pub struct PlanetDef {
     pub threat: f32,
 }
 
+/// A world's toon grade (locked direction #7), applied by `toon::apply_world_look` whenever
+/// the stage's planet changes. Its sky, sun and ground colors stay on `PlanetDef`.
+pub struct ToonLook {
+    /// Ink outline color: a deep shade of the world, never pure black, never danger red.
+    pub ink: Color,
+    /// The night side's only light (the global ambient): tint and brightness. Dark enough
+    /// that the flashlight cone is THE read at night, cold enough to feel like dread.
+    pub night: Color,
+    pub night_brightness: f32,
+    /// Color grading: post-tonemap saturation, so the flat cel colors pop.
+    pub saturation: f32,
+}
+
 impl PlanetKind {
     pub const ALL: [PlanetKind; 3] = [PlanetKind::Moon, PlanetKind::Mars, PlanetKind::DarkMoon];
 
@@ -127,6 +140,31 @@ impl PlanetKind {
                 has_earthrise: false,
                 meteor_showers: false,
                 threat: 1.25,
+            },
+        }
+    }
+
+    /// The toon grade (see `ToonLook`). Exhaustive on purpose: a new world must pick one.
+    pub fn look(&self) -> ToonLook {
+        use PlanetKind::*;
+        match self {
+            Moon => ToonLook {
+                ink: Color::srgb(0.05, 0.06, 0.15),
+                night: Color::srgb(0.55, 0.64, 1.0),
+                night_brightness: 70.0,
+                saturation: 1.1,
+            },
+            Mars => ToonLook {
+                ink: Color::srgb(0.13, 0.05, 0.05),
+                night: Color::srgb(0.72, 0.55, 0.9),
+                night_brightness: 70.0,
+                saturation: 1.1,
+            },
+            DarkMoon => ToonLook {
+                ink: Color::srgb(0.06, 0.02, 0.1),
+                night: Color::srgb(0.5, 0.45, 1.0),
+                night_brightness: 60.0,
+                saturation: 1.15,
             },
         }
     }
