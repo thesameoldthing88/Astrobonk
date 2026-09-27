@@ -1553,13 +1553,38 @@ pub(crate) fn send_local_input(
 }
 
 /// Dev harness: override the local intent with a slow circle-strafe. Runs after the
-/// keyboard gather, so it stands in for a human holding W and easing the stick over.
-pub(crate) fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
-    let Ok((p, mut intent)) = q.single_mut() else { return };
+/// keyboard gather, so it stands in for a human holding W and easing the stick over. It
+/// answers a teammate's Beacon (§11) the way a player would — walks to it and stands in its
+/// ring — so a two-instance run exercises a real revive over the wire.
+#[allow(clippy::type_complexity)]
+pub(crate) fn bot_input(
+    time: Res<Time>,
+    mut q: Query<(&crate::player::Player, &mut InputIntent, &Transform, &crate::run::PlayerState), With<LocalPlayer>>,
+    squad: Query<
+        (&Transform, Option<&crate::run::PlayerState>, Option<&PlayerVitals>),
+        (Or<(With<crate::player::Player>, With<crate::remote::RemoteAstronaut>)>, Without<LocalPlayer>),
+    >,
+) {
+    let Ok((p, mut intent, tf, ps)) = q.single_mut() else { return };
     let (t, b) = crate::sphere::tangent_frame(p.dir);
+    intent.forward = t;
+    let beacon = squad
+        .iter()
+        .filter(|(_, sps, v)| match (sps, v) {
+            (Some(s), _) => s.dead && !s.claimed,
+            (None, Some(v)) => v.down && v.status & VITALS_CLAIMED == 0,
+            _ => false,
+        })
+        .map(|(btf, ..)| btf.translation)
+        .min_by(|a, b| a.distance_squared(tf.translation).total_cmp(&b.distance_squared(tf.translation)));
+    if let (Some(bpos), false) = (beacon, ps.dead) {
+        let v = bpos - tf.translation;
+        let flat = v - p.dir * v.dot(p.dir);
+        intent.wish = if flat.length() > 1.2 { flat.normalize_or_zero() } else { Vec3::ZERO };
+        return;
+    }
     let a = time.elapsed_secs() * 0.35;
     intent.wish = (t * a.cos() + b * a.sin()).normalize_or_zero();
-    intent.forward = t;
 }
 
 /// Dev harness: once a second, print where every astronaut actually is. This is how we

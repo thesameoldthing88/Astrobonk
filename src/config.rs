@@ -618,13 +618,15 @@ pub const REJOIN_HP_FRAC: f32 = 0.5;
 pub const ADRENALINE_SPEED: f32 = 0.2;
 pub const ADRENALINE_SECS: f32 = 5.0;
 /// Friendly fire is OFF for damage, ON for physics (§11). A knockback swing, a rocket's
-/// blast or a Slam boops a teammate caught in it — at most this fast (m/s along the ground,
-/// plus a hop), and at most once per FRIENDLY_SHOVE_CD for one astronaut.
+/// blast or a Slam boops a teammate caught in it — at most this fast (m/s along the ground;
+/// a blast adds a FRIENDLY_POP hop, a swing only nudges), and at most once per
+/// FRIENDLY_SHOVE_CD for one astronaut, so fighting shoulder to shoulder is a jostle, not a
+/// juggle.
 pub const FRIENDLY_SHOVE_MAX: f32 = 7.0;
-pub const FRIENDLY_SWING_SHOVE: f32 = 5.0;
+pub const FRIENDLY_SWING_SHOVE: f32 = 3.5;
 pub const FRIENDLY_BLAST_SHOVE: f32 = 6.5;
 pub const FRIENDLY_POP: f32 = 3.0;
-pub const FRIENDLY_SHOVE_CD: f32 = 0.8;
+pub const FRIENDLY_SHOVE_CD: f32 = 1.2;
 /// A teammate's cryo field chills you too: this much slower while inside it.
 pub const FRIENDLY_CHILL_SLOW: f32 = 0.25;
 pub const FRIENDLY_CHILL_SECS: f32 = 0.6;

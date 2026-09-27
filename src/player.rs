@@ -231,6 +231,21 @@ pub fn spawn_player(
         crate::sphere::offset_dir(Vec3::Y, (t * a.cos() + b * a.sin()).normalize(), 3.5, planet.radius)
     };
     let pos = planet.surface_point(dir) + dir * PLAYER_HEIGHT;
+    // a carried sheet arrives through a teleporter: refill its per-stage grants
+    let sheet = carried
+        .map(|mut ps| {
+            ps.enter_stage();
+            ps
+        })
+        .unwrap_or_else(|| PlayerState::new(character, save));
+    // The replicated vitals start as the sheet says, not blank: a joiner reads its drop-in
+    // level from the very first copy of its body it receives (`coop::adopt_drop_in`).
+    let vitals = crate::net::PlayerVitals {
+        level: sheet.level,
+        drop_level: sheet.drop_level.min(u8::MAX as u32) as u8,
+        grace: sheet.grace.ceil().clamp(0.0, 255.0) as u8,
+        ..Default::default()
+    };
 
     let root = commands
         .spawn((
@@ -252,13 +267,7 @@ pub fn spawn_player(
                 squash_amt: 0.0,
                 lean: 0.0,
             },
-            // a carried sheet arrives through a teleporter: refill its per-stage grants
-            carried
-                .map(|mut ps| {
-                    ps.enter_stage();
-                    ps
-                })
-                .unwrap_or_else(|| PlayerState::new(character, save)),
+            sheet,
             PlayerId(id),
             InputIntent::default(),
             RigHero(character),
@@ -268,7 +277,7 @@ pub fn spawn_player(
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
-                crate::net::PlayerVitals { level: 1, ..Default::default() },
+                vitals,
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 crate::net::NetItemVis::default(),

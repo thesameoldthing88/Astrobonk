@@ -475,9 +475,10 @@ pub fn beacon_flares(
 /// What a teammate's weapon does to YOU (§11: friendly fire off for damage, ON for physics).
 #[derive(Clone, Copy, Debug)]
 pub enum ForceKind {
-    /// Knocked along the ground at up to this speed (m/s, fading to half at the edge), with a
-    /// hop — a Wrench arc, a rocket's blast, a Slam, a drop-in's landing.
-    Shove(f32),
+    /// Knocked along the ground at up to this speed (m/s, fading to half at the edge) and
+    /// popped up at the second (a blast's hop; a swing's is 0) — a Wrench arc, a rocket's
+    /// blast, a Slam, a drop-in's landing.
+    Shove(f32, f32),
     /// A cryo field: slowed for this long (refreshed while you stand in it).
     Chill(f32),
     /// A Tesla arc passing close: a jolt into a hop.
@@ -541,14 +542,14 @@ pub fn friendly_physics(
             }
             let away = away.unwrap_or_else(|| sphere::tangent_frame(p.dir).0);
             match f.kind {
-                ForceKind::Shove(speed) => {
+                ForceKind::Shove(speed, pop) => {
                     if cooldown.contains_key(&e) {
                         continue;
                     }
                     let falloff = 1.0 - 0.5 * (arc / f.radius.max(0.1)).min(1.0);
                     let dv = away * (speed * falloff).min(FRIENDLY_SHOVE_MAX);
                     p.vel_t += dv;
-                    let pop = if p.grounded && !ps.dead { FRIENDLY_POP } else { 0.0 };
+                    let pop = if p.grounded && !ps.dead { pop } else { 0.0 };
                     if pop > 0.0 {
                         p.vel_r = p.vel_r.max(pop);
                         p.grounded = false;
@@ -655,7 +656,7 @@ pub fn orbital_drops(
             let away = (en.dir - p.dir * en.dir.dot(p.dir)).try_normalize().unwrap_or_else(|| sphere::tangent_frame(p.dir).0);
             en.knock += away * DROPIN_LAND_KNOCK * (1.0 - arc / DROPIN_LAND_RADIUS).max(0.3);
         }
-        forces.write(FriendlyForce { from: e, at: tf.translation, radius: DROPIN_LAND_RADIUS, cone: None, kind: ForceKind::Shove(FRIENDLY_BLAST_SHOVE) });
+        forces.write(FriendlyForce { from: e, at: tf.translation, radius: DROPIN_LAND_RADIUS, cone: None, kind: ForceKind::Shove(FRIENDLY_BLAST_SHOVE, FRIENDLY_POP) });
         let level = ps.drop_level.clamp(1, u8::MAX as u32) as u8;
         fx.write(CoopFxMsg { fx: CoopFx::DropIn { owner: pid.0, level, dir: p.dir }, from_wire: false });
         info!("COOP player {} dropped in at level {}", pid.0, level);
@@ -677,11 +678,13 @@ pub fn adopt_drop_in(
         return;
     }
     let Some((_, v, nt)) = server.iter().find(|(pid, ..)| pid.0 == my_id) else { return };
+    // 0: there from the start (checked every frame, it costs a lookup — a drop-in's level is
+    // on its body from the first copy the host sends)
+    if v.drop_level == 0 {
+        return;
+    }
     let Ok((mut p, mut ps)) = q.single_mut() else { return };
     *done = Some(run.run_seed);
-    if v.drop_level == 0 {
-        return; // there from the start
-    }
     let target = v.drop_level as u32;
     while ps.level < target {
         let need = (ps.xp_needed - ps.xp).max(0.0);
@@ -898,4 +901,58 @@ pub fn log_coop(time: Res<Time>, telemetry: Res<CoopTelemetry>, run: Res<RunStat
         telemetry.jolts, telemetry.dropins, telemetry.dropin_landings, telemetry.autopilot_secs, telemetry.cascades,
         telemetry.cascade_hits, telemetry.feats, telemetry.fx_seen, run.cascade_charge, run.feats.len()
     );
+}
+
+// ─── dev harness (`--dev`, CLAUDE.md rule 10) ─────────────────────────────────
+
+/// `--dev --downpeer` (host): put the first joiner's astronaut down through the real hit
+/// path 20 s in, and again 45 s after it is back up — so a two-instance run shows the
+/// Beacon, the revive over the wire (`--botinput` answers Beacons) and the joiner's own
+/// down panel without waiting for the horde to do it.
+pub fn dev_down_peer(
+    time: Res<Time>,
+    q: Query<(Entity, &PlayerState), (With<Player>, Without<LocalPlayer>)>,
+    mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
+    mut next: Local<Option<f32>>,
+) {
+    let now = time.elapsed_secs();
+    let due = next.get_or_insert(now + 20.0);
+    let Some((e, ps)) = q.iter().next() else { return };
+    if ps.dead {
+        *due = now + 45.0;
+        return;
+    }
+    if now >= *due {
+        hits.write(crate::messages::PlayerHitMsg { victim: e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+        info!("DEV --downpeer: downing a joiner");
+        *due = now + 1.0; // re-sent until it lands (a revive's iframes can eat one)
+    }
+}
+
+/// `--dev --splitsquad` (host): 15 s in, move every joiner to 150° round the planet from the
+/// host (its body snaps there, like a blink) — the split STATIC CASCADE needs, for a
+/// two-instance run with `--give stormcore` on both.
+pub fn dev_split_squad(
+    time: Res<Time>,
+    planet: Res<CurrentPlanet>,
+    host: Query<&Player, With<LocalPlayer>>,
+    mut peers: Query<(&mut Player, &mut crate::techs::MoveTech), Without<LocalPlayer>>,
+    mut done: Local<bool>,
+) {
+    if *done || time.elapsed_secs() < 15.0 {
+        return;
+    }
+    let Ok(h) = host.single() else { return };
+    *done = true;
+    let (t, b) = sphere::tangent_frame(h.dir);
+    for (k, (mut p, mut tech)) in peers.iter_mut().enumerate() {
+        let a = k as f32 * 0.9;
+        let to = sphere::offset_dir(h.dir, (t * a.cos() + b * a.sin()).normalize(), 150f32.to_radians() * planet.radius, planet.radius);
+        tech.cancel_moves();
+        p.dir = to;
+        p.vel_t = Vec3::ZERO;
+        p.vel_r = 0.0;
+        p.height = 0.0;
+    }
+    info!("DEV --splitsquad: joiners moved 150 degrees round the planet");
 }

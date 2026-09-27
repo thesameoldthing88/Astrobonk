@@ -312,7 +312,7 @@ fn fire_volley(
                 at: v.center,
                 radius: r,
                 cone: (arc_deg < 360.0).then_some((aim, cos_half)),
-                kind: crate::coop::ForceKind::Shove(FRIENDLY_SWING_SHOVE * stats.knockback.clamp(0.5, 2.0)),
+                kind: crate::coop::ForceKind::Shove(FRIENDLY_SWING_SHOVE * stats.knockback.clamp(0.5, 2.0), 0.0),
             });
             // sweep visual
             commands.spawn((
@@ -1066,7 +1066,7 @@ fn explode(
         at: pos,
         radius: aoe,
         cone: None,
-        kind: crate::coop::ForceKind::Shove(FRIENDLY_BLAST_SHOVE),
+        kind: crate::coop::ForceKind::Shove(FRIENDLY_BLAST_SHOVE, FRIENDLY_POP),
     });
     if let Some(pa) = particles {
         fx::burst(commands, pa, pos, up, Pcolor::Red, 16, 8.0);
