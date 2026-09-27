@@ -3101,7 +3101,9 @@ fn duos_probe(
             probe.next();
         }
         5 if t >= 0.3 => {
-            let shattered = crowd.get(probe.staged[1]).map(|(_, en, _)| 1000.0 - en.hp).unwrap_or(0.0);
+            let shattered = crowd.get(probe.staged[1]).map(|(_, en, _)| 1000.0 - en.hp).unwrap_or(-1.0);
+            let beside = crowd.get(probe.staged[1]).map(|(_, en, _)| (en.dir, en.speed, en.kind)).ok();
+            println!("  DUOS neighbour: {beside:?}");
             let got = |f: CoopFeat| telemetry.feats[f.code() as usize];
             let pair_ok = |f: CoopFeat| run.feats.iter().any(|x| x.feat == f && x.a.0 == 0 && x.b.0 == 1 && x.count == 1);
             let want_shatter = 100.0 * DUO_SHATTER_FRAC;

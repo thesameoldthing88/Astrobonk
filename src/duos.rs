@@ -173,6 +173,7 @@ pub fn duo_payoffs(
         if m.feat == CoopFeat::DeepFreeze {
             let at = planet.surface_point(m.dir);
             let burst = m.max_hp * DUO_SHATTER_FRAC;
+            eprintln!("DBG shatter at {:?} cands {:?}", m.dir, hash.near(at, DUO_SHATTER_RADIUS + 1.5).map(|(e, p)| (e, enemies.get(e).map(|en| (en.hp, sphere::arc_dist(en.dir, m.dir, planet.radius))).ok(), p.distance(at))).collect::<Vec<_>>());
             for (te, _) in hash.near(at, DUO_SHATTER_RADIUS + 1.5) {
                 let Ok(en) = enemies.get(te) else { continue };
                 if en.hp <= 0.0 || sphere::arc_dist(en.dir, m.dir, planet.radius) > DUO_SHATTER_RADIUS {

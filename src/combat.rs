@@ -1303,7 +1303,8 @@ pub fn apply_hits(
             }
             // lifesteal: chance to heal 1 — heals the SHOOTER, not an arbitrary player
             if let Some((mut ps, _)) = msg.source.and_then(|s| q_ps.get_mut(s).ok()) {
-                if ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
+                // (a shot still in flight when its shooter went down heals no Beacon)
+                if !ps.dead && ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
                     ps.hp = (ps.hp + 1.0).min(ps.stats.max_hp);
                 }
             }
@@ -1392,7 +1393,8 @@ pub fn apply_player_hits(
                 from_wire: false,
             });
         };
-        if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
+        // a Beacon takes no hits (it is not "killed again", which would reset its meters)
+        if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 || run_ps.dead {
             continue;
         }
         // evasion
