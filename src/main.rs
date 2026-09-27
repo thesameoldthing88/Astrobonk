@@ -413,6 +413,15 @@ fn main() {
         .add_systems(
             Update,
             (
+                coop::dev_down_peer.run_if(|| dev_flag("--downpeer")),
+                coop::dev_split_squad.run_if(|| dev_flag("--splitsquad")),
+            )
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (
                 coop::adopt_drop_in.run_if(net::is_client),
                 coop::tumble_pose.after(player::player_physics).after(remote::drive_remote_transforms),
                 coop::hide_claimed,

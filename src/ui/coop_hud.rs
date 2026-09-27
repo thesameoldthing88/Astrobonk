@@ -312,6 +312,7 @@ pub fn update_squad_hud(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_down_panel(
     time: Res<Time<Real>>,
+    phase: Res<crate::run::RunPhase>,
     save: Res<crate::save::MetaSave>,
     role: Res<NetRole>,
     mine: Res<crate::net::MyPlayerId>,
@@ -324,9 +325,12 @@ pub fn update_down_panel(
 ) {
     let Ok(ps) = q_me.single() else { return };
     let (_, mates) = squad_view(&role, &mine, &q);
+    // a card panel or the pause menu takes the middle of the screen: the tint stays, the
+    // panel steps aside
+    let behind = matches!(*phase, crate::run::RunPhase::LevelUp | crate::run::RunPhase::Modal | crate::run::RunPhase::Paused);
     let show = ps.dead && !mates.is_empty();
     if let Ok(mut vis) = panel.single_mut() {
-        let want = if show { Visibility::Inherited } else { Visibility::Hidden };
+        let want = if show && !behind { Visibility::Inherited } else { Visibility::Hidden };
         if *vis != want {
             *vis = want;
         }
@@ -379,6 +383,7 @@ pub fn update_down_panel(
 /// The revive WE are giving: standing in a teammate's ring, the line shows their progress.
 #[allow(clippy::type_complexity)]
 pub fn update_rescue_line(
+    phase: Res<crate::run::RunPhase>,
     role: Res<NetRole>,
     mine: Res<crate::net::MyPlayerId>,
     planet: Res<crate::planet::CurrentPlanet>,
@@ -391,7 +396,7 @@ pub fn update_rescue_line(
     let text = q_me
         .single()
         .ok()
-        .filter(|(_, ps)| !ps.dead)
+        .filter(|(_, ps)| !ps.dead && *phase == crate::run::RunPhase::Playing)
         .and_then(|(p, _)| {
             mates.iter().find(|m| {
                 m.v.down
