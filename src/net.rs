@@ -7,8 +7,10 @@
 //!
 //! What replicates (deliberately small — with ~1200 enemies, bandwidth is the budget):
 //!   * `PlayerId`        — who an astronaut belongs to
-//!   * `NetTransform`    — position/facing of each astronaut
+//!   * `NetTransform`    — position/facing/slide of each astronaut
 //!   * `PlayerVitals`    — hp / max_hp / level, for teammate HUD + the down-state
+//!   * `NetHero`         — which hero it is, so every machine draws the right suit
+//!   * `NetComet`        — its Comet Combo, for its owner's HUD and everyone's tail sparks
 //! A player's *build* (weapons, items, cards) stays local — each player picks their own
 //! upgrades, so only its visible effects need to cross the wire.
 //!
@@ -31,9 +33,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use bevy::time::common_conditions::on_timer;
 use std::time::{Duration, SystemTime};
 
-/// Bumped whenever the wire format changes — mismatched builds refuse to connect
-/// instead of desyncing in confusing ways.
-pub const PROTOCOL_ID: u64 = 0xA570B0_2; // bumped: enemy streaming changed the wire
+/// Bumped whenever the wire format changes — mismatched builds refuse to connect instead of
+/// desyncing in confusing ways. The refusal is a netcode handshake that never completes (a
+/// wrong id means the packets do not even decrypt), so `watch_client_connection` is what
+/// turns the resulting timeout into a readable "different version?" line.
+pub const PROTOCOL_ID: u64 = 0xA570B0_3; // bumped: hero/slide/comet/storm/aim-line/session-end wire
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -65,6 +69,34 @@ pub struct NetTransform {
     pub dir: Vec3,
     pub height: f32,
     pub facing: Vec3,
+    /// Mid-slide. Rides the pose rather than being derived on the client: a slide is a
+    /// speed burst the finite-differenced speed can't tell apart from a bhop, and the rig
+    /// has to TUCK for the whole slide, not just while it happens to be fast.
+    pub sliding: bool,
+}
+
+/// Which hero an astronaut is, as an explicit wire code (`hero_code`). Replicated so every
+/// machine draws a teammate in THEIR suit — without it a client could only guess a palette
+/// by slot. Written only when it changes, so it costs nothing after the join.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetHero(pub u8);
+
+/// An astronaut's Comet Combo as the HUD needs it. The HOST computes every astronaut's
+/// combo (it owns the horde the tail is counted from) and mirrors it here; each machine's
+/// HUD — the host's included — reads only this, so there is one presentation path.
+///
+/// `fires` is a lifetime counter rather than a "just cashed out" flag: replication sends
+/// the LATEST value, so a one-frame flag can be skipped entirely, while a counter that went
+/// up is noticed no matter how many updates were lost. `peak` is that cash-out's tail.
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetComet {
+    pub active: bool,
+    pub count: u16,
+    /// Charge progress quantized to 0..=255 — the HUD bar has 12 cells, and a coarse value
+    /// only changes (and so only replicates) a few times a second.
+    pub progress: u8,
+    pub fires: u16,
+    pub peak: u16,
 }
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
@@ -116,7 +148,32 @@ pub struct RunSnapMsg {
     pub boss_spawned: bool,
     pub boss_dead: bool,
     pub teleporter_open: bool,
+    /// Mars's MIGRATING DUST STORM. The host rolls where it forms and when; a client
+    /// dead-reckons the drift between snapshots from the heading, so 4 Hz is plenty for a
+    /// cell that moves 3 m/s. Without it a joiner neither sees the storm nor gets the haze
+    /// that tells them the ranged horde has lost them.
+    pub storm_active: bool,
+    pub storm_dir: [f32; 3],
+    pub storm_heading: [f32; 3],
+    pub storm_radius: f32,
 }
+
+/// HOST -> CLIENT: the session is over, and why. Sent just before the host drops the
+/// connection, so a joiner lands back on the menu with a reason instead of a timeout.
+#[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct SessionEndMsg {
+    /// SESSION_END_* code. Explicit numbers: this is a wire format.
+    pub reason: u8,
+}
+
+pub const SESSION_END_BY_HOST: u8 = 0;
+pub const SESSION_END_VICTORY: u8 = 1;
+pub const SESSION_END_DEFEAT: u8 = 2;
+
+/// LOCAL (never networked): the pause menu's LEAVE / END SESSION button. A client leaves
+/// (the host plays on); a host ends the session for everyone and keeps its run solo.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct LeaveSession;
 
 /// Client-side: has the authoritative run arrived yet? A joiner must NOT build its world
 /// until it has the host's seed, or it builds the wrong one and has to tear it down.
@@ -174,8 +231,9 @@ pub struct BossSnapMsg {
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
 pub struct PlayerBuildMsg {
     /// NOT cosmetic: the character gates hero branches the host evaluates every frame
-    /// (Nova's sprint attack-speed bonus, etc.), and the host currently spawns peers with
-    /// the HOST's character, so without this a joiner is simulated as the wrong hero.
+    /// (Nova's sprint attack-speed bonus, etc.). A peer is seated before its first
+    /// heartbeat, as the host's hero; this is what corrects the sheet, the host-side rig
+    /// (`refit_astronaut_rigs`) and, through NetHero, every client's view of it.
     pub character: crate::content::characters::AstronautKind,
     pub level: u32,
     pub stats: crate::stats::Stats,
@@ -255,6 +313,22 @@ pub enum HazardEvent {
         to: [f32; 3],
         dur: f32,
     },
+    // ---- appended: variant order is the wire code, never reorder ----
+    /// A Beamer started painting its aim line. The line TRACKS its target until the last
+    /// quarter second, so rather than streaming the line every frame we send who it is
+    /// locked on: the client knows where every astronaut is and derives the same sweep.
+    AimLine {
+        /// the beamer's crowd-stream NetId
+        enemy: u16,
+        /// the PlayerId it latched onto
+        target: u8,
+        /// charge left, seconds
+        charge: f32,
+    },
+    /// The host's aim line is gone: it fired, the beamer lost its target in the dust storm,
+    /// or the beamer died. A client also retires a line itself when the charge runs out, so
+    /// an End that arrives late (this lane is unordered) never leaves one hanging.
+    AimLineEnd { enemy: u16 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -288,6 +362,36 @@ pub struct EnemySnapMsg {
 #[derive(Resource, Default, Debug)]
 pub struct MyPlayerId(pub Option<u8>);
 
+/// Session lifecycle — the bits that outlive a single frame while a session winds down.
+#[derive(Resource, Default)]
+pub struct SessionState {
+    /// HOST: the session is winding down — SessionEndMsg went out, the transport goes next.
+    pub closing: Option<SessionClose>,
+    /// CLIENT: why the session ended, when someone told us (the host's SessionEndMsg,
+    /// replicon's ProtocolMismatch, or our own LEAVE). Shown on the menu once we are out.
+    pub end_note: Option<String>,
+}
+
+/// HOST: how long until the transport is torn down. The delay is the point: disconnect
+/// packets are sent instantly and would overtake the reliable goodbye, leaving joiners with
+/// "the host ended the session" instead of why. Frames as well as seconds, because the
+/// frame that ENTERS the results screen can itself be longer than the whole delay.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionClose {
+    pub secs: f32,
+    pub frames: u8,
+}
+
+impl SessionClose {
+    fn start() -> Self {
+        Self { secs: crate::config::NET_SESSION_CLOSE_SECS, frames: 3 }
+    }
+}
+
+/// CLIENT: the address we dialled, so a failed join can say WHERE it failed.
+#[derive(Resource, Clone, Copy)]
+pub struct JoinTarget(pub SocketAddr);
+
 /// Client -> host input intent. The host is authoritative: it applies these to the
 /// matching astronaut and simulates the result.
 #[derive(Message, Serialize, Deserialize, Clone, Copy, Debug)]
@@ -306,6 +410,9 @@ pub struct PlayerInputMsg {
 #[derive(Resource, Default)]
 pub struct PeerSlots {
     map: HashMap<Entity, u8>,
+    /// The hero each seated peer told us it plays (from its PlayerBuildMsg). Kept per SLOT
+    /// so an astronaut re-embodied after a stage change comes back as the same hero.
+    heroes: HashMap<u8, crate::content::characters::AstronautKind>,
 }
 
 impl PeerSlots {
@@ -317,7 +424,14 @@ impl PeerSlots {
         Some(id)
     }
     fn release(&mut self, client: Entity) -> Option<u8> {
-        self.map.remove(&client)
+        let id = self.map.remove(&client)?;
+        self.heroes.remove(&id);
+        Some(id)
+    }
+    /// The hero to embody this slot as. Falls back to the host's own pick only until the
+    /// peer's first build heartbeat lands (~0.5 s); `refit_astronaut_rigs` then re-suits it.
+    fn hero_for(&self, id: u8, fallback: crate::content::characters::AstronautKind) -> crate::content::characters::AstronautKind {
+        self.heroes.get(&id).copied().unwrap_or(fallback)
     }
     /// Reverse lookup: which connected client owns this PlayerId. Needed to address
     /// collector-only loot at the right machine.
@@ -348,6 +462,8 @@ impl Plugin for NetPlugin {
             .replicate::<PlayerId>()
             .replicate::<NetTransform>()
             .replicate::<PlayerVitals>()
+            .replicate::<NetHero>()
+            .replicate::<NetComet>()
             // client -> host intent
             .add_client_message::<PlayerInputMsg>(Channel::Unreliable)
             .add_client_message::<PlayerBuildMsg>(Channel::Ordered)
@@ -359,7 +475,18 @@ impl Plugin for NetPlugin {
             )
             .add_systems(Update, apply_player_build.run_if(is_hosting))
             .add_systems(Update, adopt_my_vitals.run_if(is_client))
+            .add_systems(
+                Update,
+                reconcile_own_astronaut
+                    .before(crate::player::player_physics)
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(is_client),
+            )
             .add_server_message::<AssignPlayerId>(Channel::Ordered)
+            // Independent: it can be the last thing a joiner hears, possibly before it was
+            // ever authorized (a version-mismatched or mid-handshake client).
+            .add_server_message::<SessionEndMsg>(Channel::Ordered)
+            .make_message_independent::<SessionEndMsg>()
             // Registered LAST of the server messages on purpose: registration order is
             // renet priority order, and the crowd is what should starve first if the
             // link is tight.
@@ -394,6 +521,11 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 push_run_snapshot
+                    // Only a LIVE run is authoritative. A host still picking its hero sends
+                    // the boot placeholder's seed, which a waiting joiner would adopt and
+                    // build a world from — then never rebuild, because the real run starts
+                    // on the same stage number.
+                    .run_if(in_state(crate::AppState::InRun))
                     .run_if(is_hosting)
                     .run_if(on_timer(Duration::from_millis(250))),
             )
@@ -445,14 +577,48 @@ impl Plugin for NetPlugin {
             // Ordered before movement so intent lands the same frame it arrives.
             .add_systems(
                 Update,
-                (seat_joining_players, unseat_leaving_players, apply_remote_input)
+                (
+                    // Seating needs a planet to stand on; unseating must still run from the
+                    // results screen so a slot frees up however the peer left.
+                    seat_joining_players.run_if(in_state(crate::AppState::InRun)),
+                    unseat_leaving_players,
+                    apply_remote_input,
+                )
                     .chain()
                     .before(crate::player::player_input)
                     .run_if(is_hosting),
             )
             .add_systems(
                 Update,
-                (push_net_transform, push_player_vitals).run_if(is_simulating),
+                (push_net_transform, push_player_vitals, push_net_hero).run_if(is_simulating),
+            )
+            // ---- session lifecycle: leaving, the host ending it, the host vanishing ----
+            .init_resource::<SessionState>()
+            .add_message::<LeaveSession>()
+            .add_observer(on_protocol_mismatch)
+            .add_systems(
+                PreUpdate,
+                receive_session_end.after(ClientSystems::Receive).run_if(is_client),
+            )
+            .add_systems(
+                Update,
+                (
+                    handle_leave_session,
+                    finish_session_close.run_if(is_hosting),
+                    watch_client_connection.run_if(is_client),
+                    // Runs on the frame the role flips back to Solo, from any path.
+                    reset_after_session.run_if(
+                        resource_changed::<NetRole>.and(|r: Res<NetRole>| *r == NetRole::Solo),
+                    ),
+                )
+                    .chain(),
+            )
+            .add_systems(
+                OnEnter(crate::AppState::Results),
+                // BEFORE banking: bank_results clears run.result, which is the reason we send.
+                close_session_on_run_end
+                    .before(crate::director::bank_results)
+                    .run_if(is_hosting),
             );
     }
 }
@@ -493,7 +659,11 @@ fn announce_player_ids(
 /// HOST -> clients: the authoritative run. `CLIENTS_ONLY`, never `All` — `All` also writes
 /// the message into the host's own queue for listen-server support, and the host would
 /// then apply its own snapshot back over its authoritative RunState.
-fn push_run_snapshot(run: Res<crate::run::RunState>, mut out: MessageWriter<ToClients<RunSnapMsg>>) {
+fn push_run_snapshot(
+    run: Res<crate::run::RunState>,
+    storm: Res<crate::events_world::DustStorm>,
+    mut out: MessageWriter<ToClients<RunSnapMsg>>,
+) {
     out.write(ToClients {
         targets: SendTargets::CLIENTS_ONLY,
         message: RunSnapMsg {
@@ -512,6 +682,10 @@ fn push_run_snapshot(run: Res<crate::run::RunState>, mut out: MessageWriter<ToCl
             boss_spawned: run.boss_spawned,
             boss_dead: run.boss_dead,
             teleporter_open: run.teleporter_open,
+            storm_active: storm.active,
+            storm_dir: storm.dir.to_array(),
+            storm_heading: storm.heading.to_array(),
+            storm_radius: storm.radius,
         },
     });
 }
@@ -522,6 +696,7 @@ fn apply_run_snapshot(
     mut msgs: MessageReader<RunSnapMsg>,
     mut run: ResMut<crate::run::RunState>,
     mut sync: ResMut<RunSync>,
+    mut storm: ResMut<crate::events_world::DustStorm>,
 ) {
     for m in msgs.read() {
         let first = !sync.seeded;
@@ -547,6 +722,12 @@ fn apply_run_snapshot(
         run.boss_spawned = m.boss_spawned;
         run.boss_dead = m.boss_dead;
         run.teleporter_open = m.teleporter_open;
+        // The storm's shape only; the host alone decides when one forms or blows out, and
+        // `dust_storm_visuals` dead-reckons the drift between these snapshots.
+        storm.active = m.storm_active;
+        storm.dir = Vec3::from(m.storm_dir);
+        storm.heading = Vec3::from(m.storm_heading);
+        storm.radius = m.storm_radius;
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
@@ -573,6 +754,42 @@ fn planet_from_code(c: u8) -> crate::content::planets::PlanetKind {
     }
 }
 
+/// Explicit hero wire codes (NetHero). Same rule as planets: never renumber, only append.
+pub fn hero_code(k: crate::content::characters::AstronautKind) -> u8 {
+    use crate::content::characters::AstronautKind::*;
+    match k {
+        Buzz => 0,
+        Valentina => 1,
+        B0nk => 2,
+        Yuki => 3,
+        ChimpO => 4,
+        Doug => 5,
+        Reticle => 6,
+        Nova => 7,
+        Ironclad => 8,
+        Fortuna => 9,
+        Aurora => 10,
+        Gristle => 11,
+    }
+}
+pub fn hero_from_code(c: u8) -> crate::content::characters::AstronautKind {
+    use crate::content::characters::AstronautKind::*;
+    match c {
+        1 => Valentina,
+        2 => B0nk,
+        3 => Yuki,
+        4 => ChimpO,
+        5 => Doug,
+        6 => Reticle,
+        7 => Nova,
+        8 => Ironclad,
+        9 => Fortuna,
+        10 => Aurora,
+        11 => Gristle,
+        _ => Buzz,
+    }
+}
+
 /// CLIENT: take our OWN hp from the host.
 ///
 /// Once a client stops simulating, its local PlayerState.hp is frozen — nothing damages or
@@ -594,6 +811,56 @@ fn adopt_my_vitals(
             break;
         }
     }
+}
+
+/// CLIENT: pull our predicted astronaut toward the host's authoritative copy of it.
+///
+/// We move ourselves locally for crisp controls (GDD §11), but the HOST decides where we
+/// really are — the horde chases that copy, the comet tail is counted around it, the dust
+/// storm hides it. Unreconciled, the two drifted 3–10 m apart within a minute: every host
+/// hitstop or open panel freezes our server-side body while we keep running here.
+///
+/// The copy always TRAILS us by speed × latency, so it is compared against the path we ran
+/// over the last NET_RECONCILE_WINDOW_SECS, not our current spot: a copy sitting on that
+/// path is just late, and is left alone. Only the offset from the nearest point of the
+/// path is corrected — carried over to where we are now and closed exponentially — so a
+/// real divergence eases home without dragging a joiner backwards through its own lag.
+fn reconcile_own_astronaut(
+    time: Res<Time>,
+    mine: Res<MyPlayerId>,
+    planet: Option<Res<crate::planet::CurrentPlanet>>,
+    server_copy: Query<(&PlayerId, &NetTransform), Without<crate::player::Player>>,
+    mut q: Query<&mut crate::player::Player, With<LocalPlayer>>,
+    mut path: Local<std::collections::VecDeque<(f32, Vec3)>>,
+) {
+    use crate::config::{NET_RECONCILE_DEADZONE, NET_RECONCILE_RATE, NET_RECONCILE_WINDOW_SECS};
+    let dt = time.delta_secs();
+    let (Some(my_id), Some(planet)) = (mine.0, planet) else { return };
+    let Ok(mut p) = q.single_mut() else { return };
+    if dt <= 0.0 {
+        return;
+    }
+    let now = time.elapsed_secs();
+    path.push_back((now, p.dir));
+    while path.front().is_some_and(|(t, _)| now - *t > NET_RECONCILE_WINDOW_SECS) {
+        path.pop_front();
+    }
+    let Some((_, host)) = server_copy.iter().find(|(pid, _)| pid.0 == my_id) else { return };
+    let Some(nearest) = path
+        .iter()
+        .map(|(_, d)| *d)
+        .max_by(|a, b| a.dot(host.dir).total_cmp(&b.dot(host.dir)))
+    else {
+        return;
+    };
+    let err = crate::sphere::arc_dist(nearest, host.dir, planet.radius);
+    if err <= NET_RECONCILE_DEADZONE {
+        return;
+    }
+    // The offset from our path to the copy, re-applied where we stand now.
+    let target = (Quat::from_rotation_arc(nearest, host.dir) * p.dir).normalize();
+    let share = (err - NET_RECONCILE_DEADZONE) / err * (1.0 - (-NET_RECONCILE_RATE * dt).exp());
+    p.dir = crate::sphere::step_toward(p.dir, target, p.dir.angle_between(target) * share);
 }
 
 /// CLIENT: push our build up. Rate-limited rather than on-change because the sheet is
@@ -618,12 +885,16 @@ fn send_player_build(
 /// had just applied — the player would appear to heal every time a heartbeat landed.
 fn apply_player_build(
     mut msgs: MessageReader<FromClient<PlayerBuildMsg>>,
-    slots: Res<PeerSlots>,
+    mut slots: ResMut<PeerSlots>,
     mut q: Query<(&crate::player::PlayerId, &mut crate::run::PlayerState)>,
 ) {
     for FromClient { client_id, message } in msgs.read() {
         let Some(client) = client_id.entity() else { continue };
         let Some(pid) = slots.player_id(client) else { continue };
+        // Remember the hero per slot: a stage change re-embodies peers, and they must come
+        // back as themselves. The astronaut's rig follows `ps.character` via
+        // `refit_astronaut_rigs`, and every client follows via the replicated NetHero.
+        slots.heroes.insert(pid, message.character);
         for (id, mut ps) in &mut q {
             if id.0 != pid {
                 continue;
@@ -880,6 +1151,7 @@ fn log_astronauts(
 }
 
 /// HOST. Give each newly-connected client a PlayerId and an astronaut on the surface.
+#[allow(clippy::too_many_arguments)]
 fn seat_joining_players(
     mut commands: Commands,
     mut slots: ResMut<PeerSlots>,
@@ -893,6 +1165,7 @@ fn seat_joining_players(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     existing: Query<&PlayerId>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     let mut respawn: Vec<(u8, Entity)> = Vec::new();
     let (Some(planet), Some(run), Some(save)) = (planet, run, save) else {
@@ -917,6 +1190,10 @@ fn seat_joining_players(
             warn!("lobby full — refusing extra client {client}");
             continue;
         };
+        // The peer's own hero is not known until its first build heartbeat, so this is
+        // usually the host's pick for the first half second; `refit_astronaut_rigs`
+        // re-suits the body the moment apply_player_build learns the real one.
+        let hero = slots.hero_for(id, run.character);
         crate::player::spawn_player(
             &mut commands,
             &mut meshes,
@@ -925,15 +1202,18 @@ fn seat_joining_players(
             &run,
             &save,
             id,
-            run.character,
+            hero,
             false, // remote: no LocalPlayer marker, no camera, driven by their input
             None,
         );
         info!("NET seated client {client} as player {id}");
+        crate::playlog::line(format!("NET seated client {client} as player {id}"));
+        banners.write(crate::messages::BannerMsg(format!("PLAYER {} JOINED", id + 1)));
     }
 
     // Re-embody peers whose astronaut was reaped by a stage change.
     for (id, client) in respawn {
+        let hero = slots.hero_for(id, run.character);
         crate::player::spawn_player(
             &mut commands,
             &mut meshes,
@@ -942,7 +1222,7 @@ fn seat_joining_players(
             &run,
             &save,
             id,
-            run.character,
+            hero,
             false,
             None,
         );
@@ -950,12 +1230,15 @@ fn seat_joining_players(
     }
 }
 
-/// HOST. Someone dropped: free their slot and remove their astronaut.
+/// HOST. Someone dropped: free their slot and remove their astronaut. The run itself
+/// carries on — one player leaving must never end it for the rest.
 fn unseat_leaving_players(
     mut commands: Commands,
     mut slots: ResMut<PeerSlots>,
+    mut residency: ResMut<crate::netenemy::ClientResidency>,
     connected: Query<Entity, With<ConnectedClient>>,
-    astronauts: Query<(Entity, &PlayerId)>,
+    astronauts: Query<(Entity, &PlayerId), With<crate::player::Player>>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     let live: Vec<Entity> = connected.iter().collect();
     let gone: Vec<Entity> = slots
@@ -965,6 +1248,9 @@ fn unseat_leaving_players(
         .filter(|c| !live.contains(c))
         .collect();
     for client in gone {
+        // Their crowd residency too: a later joiner can be handed the same client entity
+        // index, and would otherwise inherit a set of "already sent" enemies it never got.
+        residency.forget(client);
         let Some(id) = slots.release(client) else { continue };
         for (e, pid) in &astronauts {
             if pid.0 == id {
@@ -972,6 +1258,8 @@ fn unseat_leaving_players(
             }
         }
         info!("NET client {client} left — freed player {id}");
+        crate::playlog::line(format!("NET client {client} left — freed player {id}"));
+        banners.write(crate::messages::BannerMsg(format!("PLAYER {} LEFT", id + 1)));
     }
 }
 
@@ -1123,18 +1411,22 @@ pub fn start_join(
 
     commands.insert_resource(client);
     commands.insert_resource(transport);
+    commands.insert_resource(JoinTarget(SocketAddr::new(addr, port)));
     commands.insert_resource(NetRole::Client);
     info!("joining {addr}:{port}");
     crate::playlog::line(format!("NET joining {addr}:{port}"));
     Ok(())
 }
 
-/// Tear the connection down and go back to solo.
+/// Tear the connection down and go back to solo. Drops the transports (freeing the port
+/// for the next HOST CO-OP); `reset_after_session` then clears everything the session left
+/// behind, whichever path got us here. Send any goodbye packets BEFORE calling this.
 pub fn disconnect(commands: &mut Commands) {
     commands.remove_resource::<RenetServer>();
     commands.remove_resource::<NetcodeServerTransport>();
     commands.remove_resource::<RenetClient>();
     commands.remove_resource::<NetcodeClientTransport>();
+    commands.remove_resource::<JoinTarget>();
     commands.insert_resource(NetRole::Solo);
 }
 
@@ -1182,6 +1474,19 @@ fn push_net_transform(
         nt.dir = p.dir;
         nt.height = p.height;
         nt.facing = p.facing;
+        nt.sliding = p.slide_timer > 0.0;
+    }
+}
+
+/// Host: keep each astronaut's replicated hero in step with its sheet. Compared before
+/// writing, because replicon sends a component whenever it is touched and this one only
+/// changes once, when a peer's first build heartbeat lands.
+pub fn push_net_hero(mut q: Query<(&crate::run::PlayerState, &mut NetHero)>) {
+    for (ps, mut hero) in &mut q {
+        let code = hero_code(ps.character);
+        if hero.0 != code {
+            hero.0 = code;
+        }
     }
 }
 
@@ -1193,6 +1498,213 @@ fn push_player_vitals(
         v.max_hp = ps.stats.max_hp;
         v.level = ps.level;
         v.down = ps.dead;
+    }
+}
+
+// ─── session lifecycle ────────────────────────────────────────────────────────
+//
+// A co-op session lives exactly as long as the HOST'S RUN. Joiners adopt the host's run the
+// moment a snapshot lands, with no notion of "which run", so closing the session when the
+// run ends is what guarantees nobody drops into a stale world between runs. Every way out
+// funnels into two places: `watch_client_connection` (a client going back to the menu, with
+// a readable reason) and `reset_after_session` (whatever the session left behind).
+
+/// HOST: the run is over — victory, a wipe, or ABANDON. Tell every joiner why, then close.
+fn close_session_on_run_end(
+    run: Res<crate::run::RunState>,
+    mut session: ResMut<SessionState>,
+    mut out: MessageWriter<ToClients<SessionEndMsg>>,
+) {
+    let reason = match run.result {
+        Some(crate::run::RunResult::Victory) => SESSION_END_VICTORY,
+        _ => SESSION_END_DEFEAT,
+    };
+    out.write(ToClients { targets: SendTargets::CLIENTS_ONLY, message: SessionEndMsg { reason } });
+    session.closing = Some(SessionClose::start());
+    info!("NET run over — closing the session");
+    crate::playlog::line("NET run over — closing the session".to_string());
+}
+
+/// The pause menu's LEAVE / END SESSION.
+///   * CLIENT: say goodbye (netcode's disconnect packet goes out instantly) and let
+///     `watch_client_connection` take us to the menu. The host plays on without us.
+///   * HOST: end it for everyone, and keep playing this run solo — ABANDON RUN is the button
+///     for "I want out of the run as well".
+fn handle_leave_session(
+    mut msgs: MessageReader<LeaveSession>,
+    role: Res<NetRole>,
+    mut session: ResMut<SessionState>,
+    client: Option<ResMut<NetcodeClientTransport>>,
+    mut out: MessageWriter<ToClients<SessionEndMsg>>,
+    mut phase: ResMut<crate::run::RunPhase>,
+    mut banners: MessageWriter<crate::messages::BannerMsg>,
+    state: Res<State<crate::AppState>>,
+) {
+    if msgs.read().count() == 0 {
+        return;
+    }
+    match *role {
+        NetRole::Client => {
+            // From the menu this is JOIN CO-OP pressed again while still waiting to get in.
+            let in_run = *state.get() == crate::AppState::InRun;
+            session.end_note =
+                Some(if in_run { "You left the session." } else { "Join cancelled." }.into());
+            if let Some(mut transport) = client {
+                transport.disconnect();
+            }
+        }
+        NetRole::Host => {
+            if session.closing.is_some() {
+                return;
+            }
+            out.write(ToClients {
+                targets: SendTargets::CLIENTS_ONLY,
+                message: SessionEndMsg { reason: SESSION_END_BY_HOST },
+            });
+            session.closing = Some(SessionClose::start());
+            // Close the pause menu: the host's run carries on, now solo.
+            *phase = crate::run::RunPhase::Playing;
+            banners.write(crate::messages::BannerMsg("SESSION ENDED: PLAYING ON SOLO".into()));
+            info!("NET host ended the session");
+            crate::playlog::line("NET host ended the session".to_string());
+        }
+        NetRole::Solo => {}
+    }
+}
+
+/// HOST: once the goodbye has had time to flush, drop every client and the socket.
+/// Real time, not virtual: END SESSION is pressed from the pause menu, where virtual time
+/// is stopped, and a countdown on it would never finish.
+fn finish_session_close(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut session: ResMut<SessionState>,
+    server: Option<ResMut<RenetServer>>,
+    transport: Option<ResMut<NetcodeServerTransport>>,
+    mut note: ResMut<crate::ui::menus::CoopNote>,
+) {
+    let Some(left) = session.closing.as_mut() else { return };
+    left.secs -= time.delta_secs();
+    left.frames = left.frames.saturating_sub(1);
+    if left.secs > 0.0 || left.frames > 0 {
+        return;
+    }
+    session.closing = None;
+    // Explicit disconnect packets: without them every joiner sits out netcode's timeout.
+    if let (Some(mut server), Some(mut transport)) = (server, transport) {
+        transport.disconnect_all(&mut server);
+    }
+    disconnect(&mut commands);
+    // Replace the "HOSTING — tell the other player…" line, which is no longer true.
+    note.0 = "Co-op session over. HOST CO-OP to open a new one.".into();
+    info!("NET session closed");
+}
+
+/// CLIENT: the host told us the session is over. Leave straight away — our goodbye is
+/// instant — rather than wait for the host's own teardown half a second later.
+fn receive_session_end(
+    mut msgs: MessageReader<SessionEndMsg>,
+    mut session: ResMut<SessionState>,
+    transport: Option<ResMut<NetcodeClientTransport>>,
+) {
+    let Some(m) = msgs.read().last().copied() else { return };
+    session.end_note = Some(
+        match m.reason {
+            SESSION_END_VICTORY => "SESSION OVER: the host's run ended. PLANET SAVED!",
+            SESSION_END_DEFEAT => "SESSION OVER: the host's run ended. The squad got BONKED.",
+            _ => "The host ended the session.",
+        }
+        .into(),
+    );
+    if let Some(mut transport) = transport {
+        transport.disconnect();
+    }
+}
+
+/// CLIENT: replicon's own handshake found the host registers a different protocol (same
+/// PROTOCOL_ID, different build). The host disconnects us right after; this is the reason.
+fn on_protocol_mismatch(_: On<ProtocolMismatch>, mut session: ResMut<SessionState>) {
+    session.end_note =
+        Some("The host runs a different ASTROBONK build. Both players need the same version.".into());
+}
+
+/// CLIENT: notice the connection is gone — however it went — and go back to the menu
+/// with a line that says why. This is also where a failed JOIN reports: a wrong address
+/// and a version mismatch look identical on the wire (the handshake never answers), so
+/// the line names both.
+#[allow(clippy::too_many_arguments)]
+fn watch_client_connection(
+    mut commands: Commands,
+    client: Option<Res<RenetClient>>,
+    transport: Option<ResMut<NetcodeClientTransport>>,
+    target: Option<Res<JoinTarget>>,
+    mut session: ResMut<SessionState>,
+    mut note: ResMut<crate::ui::menus::CoopNote>,
+    state: Res<State<crate::AppState>>,
+    mut next: ResMut<NextState<crate::AppState>>,
+    mut phase: ResMut<crate::run::RunPhase>,
+) {
+    use bevy_replicon_renet::netcode::NetcodeDisconnectReason as Why;
+    let (Some(client), Some(mut transport)) = (client, transport) else { return };
+    // A host that crashed or lost its network sends nothing at all, not even keep-alives.
+    if client.is_connected()
+        && transport.time_since_last_received_packet().as_secs_f32() > crate::config::NET_HOST_SILENCE_SECS
+    {
+        session.end_note.get_or_insert_with(|| "Lost connection to the host.".into());
+        transport.disconnect();
+    }
+    let why = transport.disconnect_reason();
+    if why.is_none() && !client.is_disconnected() {
+        return;
+    }
+    let addr = target.map(|t| t.0.to_string()).unwrap_or_else(|| "the host".into());
+    let text = session.end_note.take().unwrap_or_else(|| match why {
+        Some(Why::ConnectionRequestTimedOut | Why::ConnectionResponseTimedOut | Why::ConnectTokenExpired) => {
+            format!(
+                "No answer from {addr}.\nNobody is hosting there, or the host runs a different \
+                 ASTROBONK version (this build: protocol {PROTOCOL_ID:X})."
+            )
+        }
+        Some(Why::ConnectionDenied) => format!("{addr} refused the join: the lobby is full ({MAX_PLAYERS} players)."),
+        Some(Why::DisconnectedByServer) => "The host ended the session.".into(),
+        Some(Why::ConnectionTimedOut) => "Lost connection to the host.".into(),
+        _ => "Disconnected from the host.".into(),
+    });
+    info!("NET session over: {text}");
+    crate::playlog::line(format!("NET session over: {text}"));
+    note.0 = text;
+    disconnect(&mut commands);
+    // A panel or the pause menu may be up; the menu must not inherit a stopped clock.
+    *phase = crate::run::RunPhase::Playing;
+    if *state.get() != crate::AppState::MainMenu {
+        next.set(crate::AppState::MainMenu);
+    }
+}
+
+/// Whatever path ended the session (leave, host closed, host vanished, run over), this
+/// runs on the frame the role flips back to Solo and clears what it left behind — so the
+/// next HOST CO-OP or JOIN starts clean instead of inheriting a stale seed or slot table.
+#[allow(clippy::too_many_arguments)]
+fn reset_after_session(
+    mut commands: Commands,
+    mut mine: ResMut<MyPlayerId>,
+    mut sync: ResMut<RunSync>,
+    mut slots: ResMut<PeerSlots>,
+    mut residency: ResMut<crate::netenemy::ClientResidency>,
+    mut session: ResMut<SessionState>,
+    // CLIENT: teammates' replicated entities. replicon only forgets its entity map on
+    // disconnect; it never despawns, so without this a rejoin draws the old squad as ghosts.
+    remote: Query<Entity, With<Remote>>,
+    // HOST playing on solo: the peers' astronauts would otherwise stand there, still firing.
+    peers: Query<Entity, (With<crate::player::Player>, Without<LocalPlayer>)>,
+) {
+    mine.0 = None;
+    *sync = RunSync::default();
+    *slots = PeerSlots::default();
+    residency.clear();
+    session.closing = None;
+    for e in remote.iter().chain(peers.iter()) {
+        commands.entity(e).try_despawn();
     }
 }
 
@@ -1244,11 +1756,26 @@ fn push_player_vitals(
 //    change, not a query change — PlayerHitMsg carries no victim entity. (Done: it does
 //    now.)
 //
-// 2d. Smaller follow-ups: replicate each player's AstronautKind so teammates wear their own
-//    suit (remote.rs currently picks a stable palette by slot, and seat_joining_players
-//    spawns peers with the HOST's character); add slide state to NetTransform so remotes
-//    tuck; cache the rig's meshes/materials and drop shadow-casting on remote flashlights
-//    (each rig currently allocates 8 meshes, 5 materials and a shadow-casting spotlight).
+// 2d. Teammates wear their own hero (NetHero, re-suited live) and tuck on slides
+//    (NetTransform.sliding) — DONE. Still open: cache the rig's meshes/materials and drop
+//    shadow-casting on remote flashlights (each rig allocates 8 meshes, 5 materials and a
+//    shadow-casting spotlight).
+//
+// 2e. CLIENT PARITY — DONE: every astronaut's Comet Combo (NetComet), Mars's dust storm
+//    (RunSnapMsg + per-astronaut InStorm on the host), Anubot's verdict beam (BossRec
+//    angle/state -> the shared anubot_beam_visuals) and Beamer aim lines (hazard lane,
+//    locked-target form). Session lifecycle: see "session lifecycle" above.
+//    Pattern for the next one: a host-only SIM system plus an ungated VISUALS system both
+//    machines run on the replicated/streamed state (anubot_beam_visuals, aim_line_visuals,
+//    dust_storm_visuals, comet_presentation). Repro:
+//        headless: --coop2 --comet-peer | --coop2 --peer-hero valentina |
+//                  --fast-boss --coop2 --planet mars --storm-peer
+//        windowed: host  --host --autodrop --botinput --autopick --netlog --planet mars --bossnow
+//                  client --join 127.0.0.1 --autodrop --botinput --autopick --netlog --hero valentina
+//    and compare the two sides' NETPARITY lines.
+//    Client prediction now reconciles softly against the host's copy of us
+//    (`reconcile_own_astronaut`); a proper rewind-and-replay of unacknowledged inputs is
+//    still open, and is only worth it once latency beyond a LAN matters.
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

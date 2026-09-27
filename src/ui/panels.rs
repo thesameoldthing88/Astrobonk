@@ -41,6 +41,9 @@ pub struct ResumeBtn;
 pub struct AbandonBtn;
 #[derive(Component)]
 pub struct PauseSettingsBtn;
+/// Co-op only: LEAVE SESSION on a client, END SESSION on the host.
+#[derive(Component)]
+pub struct LeaveSessionBtn;
 
 /// (Re)build the choice panel whenever its contents change.
 pub fn sync_choice_panel(
@@ -496,6 +499,19 @@ pub fn shop_panel(
     }
 }
 
+/// Leaving the run strips every modal overlay. The panel systems only run in a run, so
+/// they cannot tidy up after it — and a co-op client can be pulled out mid-panel (the host
+/// ended the session, or it left from the pause menu) straight onto the main menu.
+#[allow(clippy::type_complexity)]
+pub fn despawn_panels(
+    mut commands: Commands,
+    q: Query<Entity, Or<(With<ChoiceRoot>, With<ChestRoot>, With<ShopRoot>, With<PauseRoot>)>>,
+) {
+    for e in &q {
+        commands.entity(e).despawn();
+    }
+}
+
 /// Escape toggles pause; pause menu buttons.
 #[allow(clippy::too_many_arguments)]
 pub fn pause_panel(
@@ -509,6 +525,9 @@ pub fn pause_panel(
     resume: Query<&Interaction, (Changed<Interaction>, With<ResumeBtn>)>,
     abandon: Query<&Interaction, (Changed<Interaction>, With<AbandonBtn>)>,
     psettings: Query<&Interaction, (Changed<Interaction>, With<PauseSettingsBtn>)>,
+    leave: Query<&Interaction, (Changed<Interaction>, With<LeaveSessionBtn>)>,
+    role: Res<crate::net::NetRole>,
+    mut leave_out: MessageWriter<crate::net::LeaveSession>,
 ) {
     // While the settings overlay is up, it owns input (incl. ESC) — don't also resume.
     if settings_open.0 {
@@ -559,10 +578,38 @@ pub fn pause_panel(
                             .with_children(|b| {
                                 b.spawn(txt("SETTINGS", FONT_MED, Color::WHITE));
                             });
-                        root.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
-                            .with_children(|b| {
-                                b.spawn(txt("ABANDON RUN", FONT_MED, Color::WHITE));
-                            });
+                        // A joiner's run is the HOST'S run: it cannot abandon it (nothing on a
+                        // client ends a run), only leave it — and the host plays on.
+                        if *role != crate::net::NetRole::Client {
+                            root.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
+                                .with_children(|b| {
+                                    b.spawn(txt(
+                                        if role.is_networked() { "ABANDON RUN (ENDS SESSION)" } else { "ABANDON RUN" },
+                                        FONT_MED,
+                                        Color::WHITE,
+                                    ));
+                                });
+                        }
+                        if role.is_networked() {
+                            let label = if *role == crate::net::NetRole::Host {
+                                "END SESSION (PLAY ON SOLO)"
+                            } else {
+                                "LEAVE SESSION"
+                            };
+                            root.spawn((LeaveSessionBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.7, 0.3))))
+                                .with_children(|b| {
+                                    b.spawn(txt(label, FONT_MED, Color::WHITE));
+                                });
+                            root.spawn(txt(
+                                if *role == crate::net::NetRole::Host {
+                                    "you host this run: pausing freezes it for your whole squad"
+                                } else {
+                                    "the host's world keeps running while this menu is open"
+                                },
+                                FONT_SMALL,
+                                Color::srgb(0.6, 0.65, 0.8),
+                            ));
+                        }
                     });
             }
             let mut do_resume = keys.just_pressed(KeyCode::Escape);
@@ -578,6 +625,11 @@ pub fn pause_panel(
                 if *i == Interaction::Pressed {
                     run.result = Some(RunResult::Death);
                     *phase = RunPhase::Dead;
+                }
+            }
+            for i in &leave {
+                if *i == Interaction::Pressed {
+                    leave_out.write(crate::net::LeaveSession);
                 }
             }
         }

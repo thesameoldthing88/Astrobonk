@@ -109,6 +109,185 @@ fn bot_drive(
     let _ = &planet;
 }
 
+/// Co-op probes. Headless IS a host, so the per-astronaut paths a joiner depends on can be
+/// staged around `--coop2`'s peer (player 1) and ASSERTED, instead of only eyeballed in two
+/// windows:
+///   * `--comet-peer`  — the peer strings a tail and cashes out a Comet Combo: the host must
+///     run the combo for EVERY astronaut and pay it out around the one who earned it.
+///   * `--storm-peer`  — (Mars) a tight dust storm is pinned on the peer: only the peer may
+///     wear `InStorm`, and no Beamer may keep an aim line on it.
+///   * `--peer-hero X` — the peer's sheet switches hero (what a joiner's first build
+///     heartbeat does): its rig and replicated NetHero must follow.
+#[derive(Resource, Default)]
+struct CoopProbe {
+    comet_peer: bool,
+    storm_peer: bool,
+    peer_hero: Option<AstronautKind>,
+    ticks: u64,
+    comet_staged: bool,
+    /// (peer fires, run silver) when the tail was staged
+    comet_base: (u32, u64),
+    /// run silver gained on the cash-out frame, once it happened
+    comet_paid: Option<u64>,
+    hero_swapped: bool,
+    storm_ticks_hidden: u32,
+    storm_marker_errors: u32,
+    storm_hidden_locks: u32,
+    storm_host_locks: u32,
+}
+
+/// `--comet-peer`: a couple of seconds in, put a 12-strong tail right in the peer's wake
+/// and its charge one step short of the goal. The next frames must cash out FOR THE PEER.
+fn comet_peer_stage(
+    mut commands: Commands,
+    mut probe: ResMut<CoopProbe>,
+    run: Res<RunState>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    planet: Res<CurrentPlanet>,
+    mut q: Query<(&crate::player::PlayerId, &Player, &PlayerState, &mut crate::comet::CometState)>,
+) {
+    probe.ticks += 1;
+    if probe.comet_staged {
+        if probe.comet_paid.is_none() {
+            let fired = q.iter().any(|(pid, _, _, c)| pid.0 == 1 && c.fires > probe.comet_base.0);
+            if fired {
+                probe.comet_paid = Some(run.silver_run.saturating_sub(probe.comet_base.1));
+            }
+        }
+        return;
+    }
+    if probe.ticks < 60 {
+        return;
+    }
+    let mut rng = rand::thread_rng();
+    for (pid, p, ps, mut c) in &mut q {
+        if pid.0 != 1 || ps.dead {
+            continue;
+        }
+        let back = (-p.vel_t).try_normalize().unwrap_or(sphere::tangent_frame(p.dir).0);
+        let side = back.cross(p.dir).normalize_or_zero();
+        for i in 0..12 {
+            let along = 3.0 + (i / 3) as f32 * 1.5;
+            let lateral = ((i % 3) as f32 - 1.0) * 1.2;
+            let v = back * along + side * lateral;
+            let dir = sphere::offset_dir(p.dir, v.normalize(), v.length(), planet.radius);
+            crate::enemies::spawn_enemy(
+                &mut commands,
+                &assets,
+                &planet,
+                crate::content::enemies::EnemyKind::Shambler,
+                dir,
+                false,
+                1.0,
+                1.0,
+                &mut rng,
+            );
+        }
+        c.active = true;
+        c.charge = COMET_CHARGE_GOAL - 1.0;
+        c.peak = c.peak.max(12);
+        probe.comet_base = (c.fires, run.silver_run);
+        probe.comet_staged = true;
+        println!("  COMETPEER staged a 12-tail behind player 1 at tick {}", probe.ticks);
+    }
+}
+
+/// `--peer-hero X`: swap the peer's hero on its sheet, as apply_player_build does when a
+/// joiner's first heartbeat names a different hero than the host seated it with.
+fn peer_hero_swap(
+    mut probe: ResMut<CoopProbe>,
+    mut q: Query<(&crate::player::PlayerId, &mut PlayerState)>,
+    mut ticks: Local<u32>,
+) {
+    *ticks += 1;
+    if probe.hero_swapped || *ticks < 30 {
+        return;
+    }
+    let Some(hero) = probe.peer_hero else { return };
+    for (pid, mut ps) in &mut q {
+        if pid.0 == 1 {
+            ps.character = hero;
+            probe.hero_swapped = true;
+        }
+    }
+}
+
+/// Size of the storm `--storm-peer` pins on the peer: tight, so the host astronaut is
+/// usually OUTSIDE it and the test proves the hiding is per-astronaut.
+const STORM_PROBE_RADIUS: f32 = 2.5;
+
+/// `--storm-peer`: keep a tight storm centred on the peer.
+fn storm_peer_pin(mut storm: ResMut<crate::events_world::DustStorm>, q: Query<(&crate::player::PlayerId, &Player)>) {
+    let Some(dir) = q.iter().find(|(pid, _)| pid.0 == 1).map(|(_, p)| p.dir) else { return };
+    storm.primed = true;
+    storm.active = true;
+    storm.timer = 999.0;
+    storm.radius = STORM_PROBE_RADIUS;
+    storm.dir = dir;
+}
+
+/// `--storm-peer`: the markers must match who is actually inside, and no Beamer may hold a
+/// line on the hidden peer for more than the frame it takes to notice.
+fn storm_peer_check(
+    mut probe: ResMut<CoopProbe>,
+    storm: Res<crate::events_world::DustStorm>,
+    planet: Res<CurrentPlanet>,
+    q: Query<(Entity, &crate::player::PlayerId, &Player, Has<crate::events_world::InStorm>)>,
+    beamers: Query<(Entity, &crate::enemies::Beamer)>,
+    mut offenders: Local<Vec<Entity>>,
+    mut host_charging: Local<Vec<Entity>>,
+    mut armed: Local<bool>,
+) {
+    // The very first check follows the very first pin, before the sim has marked anyone.
+    let first = !*armed;
+    *armed = true;
+    let mut peer = None;
+    for (e, pid, p, hidden) in &q {
+        let arc = sphere::arc_dist(p.dir, storm.dir, planet.radius);
+        // a little slack: the pin and the sim see positions a frame apart
+        if !first && ((hidden && arc > storm.radius + 0.6) || (!hidden && arc < storm.radius - 0.6)) {
+            probe.storm_marker_errors += 1;
+        }
+        if pid.0 == 1 && hidden {
+            peer = Some(e);
+            probe.storm_ticks_hidden += 1;
+        }
+    }
+    let mut now_offending = Vec::new();
+    let mut now_host = Vec::new();
+    for (be, b) in &beamers {
+        if b.charging <= 0.0 {
+            continue;
+        }
+        if b.target.is_some() && b.target == peer {
+            // one frame of grace: beamer_attack may run before the marker lands
+            if offenders.contains(&be) {
+                probe.storm_hidden_locks += 1;
+            }
+            now_offending.push(be);
+        } else if b.target.is_some() {
+            if !host_charging.contains(&be) {
+                probe.storm_host_locks += 1; // a fresh charge on someone visible
+            }
+            now_host.push(be);
+        }
+    }
+    *offenders = now_offending;
+    *host_charging = now_host;
+}
+
+/// Gems collected over the run (every collection writes one `GrantOut::Xp`).
+#[derive(Resource, Default)]
+struct XpTally(u64);
+
+fn tally_xp(mut grants: MessageReader<crate::net::GrantOut>, mut tally: ResMut<XpTally>) {
+    for g in grants.read() {
+        if matches!(g, crate::net::GrantOut::Xp(_)) {
+            tally.0 += 1;
+        }
+    }
+}
+
 /// Fail-fast sanity checks each tick.
 /// `--enemydist`: histogram how far the horde actually is from each astronaut, in
 /// great-circle metres. This is the number the co-op streaming bandwidth budget rests on —
@@ -206,6 +385,20 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         save.tome_levels.insert(crate::content::tomes::TomeKind::Damage, 20);
         save.tome_levels.insert(crate::content::tomes::TomeKind::Health, 20);
     }
+    let args: Vec<String> = std::env::args().collect();
+    let coop2 = args.iter().any(|a| a == "--coop2");
+    let probe = CoopProbe {
+        // all three stage a scene around the PEER, so they need `--coop2`'s second astronaut
+        comet_peer: coop2 && args.iter().any(|a| a == "--comet-peer"),
+        storm_peer: coop2 && planet_kind == PlanetKind::Mars && args.iter().any(|a| a == "--storm-peer"),
+        peer_hero: args
+            .iter()
+            .position(|a| a == "--peer-hero")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| AstronautKind::from_name(s))
+            .filter(|_| coop2),
+        ..default()
+    };
     let mut run = RunState::new(hero, planet_kind, 1, &save);
     if let Some(s) = seed {
         run.run_seed = s;
@@ -233,6 +426,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::planet::PropColliders>()
         .init_resource::<crate::events_world::DustStorm>()
         .init_resource::<ButtonInput<KeyCode>>()
+        // The host path: headless IS the host (or solo), so these stay at their defaults —
+        // but the shared presentation systems read them.
+        .init_resource::<crate::net::NetRole>()
+        .init_resource::<crate::net::MyPlayerId>()
+        .insert_resource(probe)
+        .init_resource::<XpTally>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
@@ -251,11 +450,13 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::enemies::enemy_move,
                 crate::enemies::craterpillar_update,
                 crate::enemies::anubot_beam_system,
+                crate::enemies::anubot_beam_visuals,
                 crate::enemies::boss_phase_system,
                 crate::enemies::burrower_emerge,
                 crate::enemies::enemy_contact,
                 crate::enemies::spitter_attack,
                 crate::enemies::beamer_attack,
+                crate::enemies::aim_line_visuals,
                 crate::enemies::lobber_attack,
                 crate::enemies::mortar_shells,
                 crate::enemies::enemy_projectiles,
@@ -277,9 +478,21 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::director::run_clock,
                 crate::director::levelup_trigger,
                 crate::comet::comet_system,
-                crate::events_world::dust_storm_system,
+                crate::comet::comet_presentation,
+                crate::events_world::dust_storm_sim,
+                storm_peer_pin.run_if(|p: Res<CoopProbe>| p.storm_peer),
+                crate::events_world::dust_storm_visuals,
+                storm_peer_check.run_if(|p: Res<CoopProbe>| p.storm_peer),
             )
                 .chain()
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (
+                comet_peer_stage.run_if(|p: Res<CoopProbe>| p.comet_peer),
+                peer_hero_swap.run_if(|p: Res<CoopProbe>| p.peer_hero.is_some()),
+            )
                 .run_if(crate::playing),
         )
         .add_systems(
@@ -293,10 +506,13 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::pickups::kill_drops,
                 crate::combat::fader_update,
                 crate::player::player_physics,
+                crate::player::refit_astronaut_rigs,
+                crate::net::push_net_hero,
                 crate::player::player_upkeep,
                 crate::fx::update_particles,
                 crate::director::stage_transition,
                 bot_watchdog,
+                tally_xp,
             ),
         );
 
@@ -314,10 +530,32 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
 
     let world = app.world_mut();
     let run = world.resource::<RunState>().clone();
-    let ps = world.query::<&PlayerState>().iter(world).next().cloned();
+    // The LOCAL astronaut's sheet: with `--coop2` an arbitrary one could be the peer.
+    let ps = world
+        .query_filtered::<&PlayerState, With<crate::player::LocalPlayer>>()
+        .iter(world)
+        .next()
+        .cloned();
     let (p_level, p_gold, p_hp, p_maxhp) = ps
         .map(|p| (p.level, p.gold, p.hp, p.stats.max_hp))
         .unwrap_or((1, 0, 0.0, 100.0));
+    // The XP pipeline is kills -> gems -> collection -> XP. Judge each link on its own:
+    // "kills but level 1" alone flaked on the base build, because a fast-boss squad can
+    // die with a hundred kills' worth of gems still on the ground (one Comet cash-out
+    // clears ~100) — a short run, not a dead pipeline. XP is also granted only to
+    // astronauts still standing, so look at every sheet, not just the local one.
+    let best_level = world.query::<&PlayerState>().iter(world).map(|p| p.level).max().unwrap_or(1);
+    let any_xp = world.query::<&PlayerState>().iter(world).any(|p| p.xp > 0.0);
+    let gems_left = world
+        .query::<&crate::pickups::Pickup>()
+        .iter(world)
+        .filter(|p| matches!(p.kind, crate::pickups::PickupKind::Xp(_)))
+        .count();
+    let peers: Vec<(u8, crate::content::characters::AstronautKind, crate::player::RigHero, crate::net::NetHero, u32, crate::net::NetComet)> = world
+        .query::<(&crate::player::PlayerId, &PlayerState, &crate::player::RigHero, &crate::net::NetHero, &crate::comet::CometState, &crate::net::NetComet)>()
+        .iter(world)
+        .map(|(id, ps, rig, nh, c, nc)| (id.0, ps.character, *rig, *nh, c.fires, *nc))
+        .collect();
     let enemies = world.query_filtered::<(), With<Enemy>>().iter(world).count();
     let phase = *world.resource::<RunPhase>();
     let comet_fires = world.resource::<crate::comet::Comet>().fires;
@@ -339,9 +577,57 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: bot killed nothing");
         ok = false;
     }
-    if p_level < 2 && run.kills > 50 {
-        println!("FAIL: XP pipeline dead (kills but no levels)");
+    let xp_grants = world.resource::<XpTally>().0;
+    if run.kills > 50 && xp_grants == 0 && gems_left == 0 {
+        println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
+    }
+    if xp_grants > 0 && best_level < 2 && !any_xp {
+        println!("FAIL: XP pipeline dead ({xp_grants} gems collected, no XP, no levels)");
+        ok = false;
+    }
+    // Every astronaut's replicated mirrors must agree with its simulated state — this is
+    // exactly what a joiner's HUD and rigs are drawn from.
+    for (id, hero, rig, net_hero, fires, nc) in &peers {
+        if rig.0 != *hero || net_hero.0 != crate::net::hero_code(*hero) {
+            println!("FAIL: player {id} is {} but its rig/NetHero disagree", hero.def().name);
+            ok = false;
+        }
+        if nc.fires as u32 != *fires {
+            println!("FAIL: player {id} NetComet.fires={} but CometState.fires={fires}", nc.fires);
+            ok = false;
+        }
+    }
+    let probe = world.resource::<CoopProbe>();
+    if let Some(hero) = probe.peer_hero {
+        let peer = peers.iter().find(|p| p.0 == 1);
+        if !probe.hero_swapped || peer.map(|p| p.1 != hero || p.2.0 != hero).unwrap_or(true) {
+            println!("FAIL: peer never re-suited as {}", hero.def().name);
+            ok = false;
+        } else {
+            println!("PEERHERO OK: player 1 re-suited as {} (NetHero {})", hero.def().name, crate::net::hero_code(hero));
+        }
+    }
+    if probe.comet_peer {
+        match probe.comet_paid {
+            Some(silver) if silver >= 12 => {
+                println!("COMETPEER OK: player 1 cashed out its own combo (+{silver} silver)")
+            }
+            other => {
+                println!("FAIL: peer's staged comet never cashed out for it (paid={other:?}, staged={})", probe.comet_staged);
+                ok = false;
+            }
+        }
+    }
+    if probe.storm_peer {
+        println!(
+            "STORMPEER hidden_ticks={} marker_errors={} beamer_locks_on_hidden_peer={} beamer_locks_on_visible={}",
+            probe.storm_ticks_hidden, probe.storm_marker_errors, probe.storm_hidden_locks, probe.storm_host_locks
+        );
+        if probe.storm_ticks_hidden == 0 || probe.storm_marker_errors > 0 || probe.storm_hidden_locks > 0 {
+            println!("FAIL: dust storm hiding is not per-astronaut");
+            ok = false;
+        }
     }
     if enemies == 0 && !run.boss_dead {
         println!("FAIL: spawner produced no live enemies");

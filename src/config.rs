@@ -32,6 +32,11 @@ pub const ENEMY_SEPARATION_CELL: f32 = 2.2;
 pub const SPAWN_ARC_MIN: f32 = 42.0; // meters beyond the player (over the horizon)
 pub const SPAWN_ARC_MAX: f32 = 58.0;
 pub const CONTACT_TICK: f32 = 0.5; // seconds between contact hits from one enemy
+/// A Beamer's telegraph: how long it paints the aim line, and the final stretch where the
+/// line stops tracking and holds (the dodge window). A co-op client derives the same sweep
+/// from these, so they are the one copy of the numbers.
+pub const BEAMER_CHARGE_SECS: f32 = 1.1;
+pub const BEAMER_LOCK_SECS: f32 = 0.25;
 
 pub const GEM_CAP: usize = 550;
 pub const PICKUP_BASE_RANGE: f32 = 3.2;
@@ -97,3 +102,25 @@ pub const NET_ENEMY_SNAP_ARC: f32 = 12.0;
 /// Seconds an unseen proxy survives before despawning — long enough that a dropped
 /// unreliable packet doesn't flicker the horde.
 pub const NET_ENEMY_GRACE: f32 = 2.0;
+
+// ── Co-op session lifecycle ──────────────────────────────────────────────────
+/// Real seconds between the host sending SessionEndMsg and dropping the transport. Disconnect
+/// packets go out instantly, so without this gap they overtake the reliable goodbye and a
+/// joiner only ever learns "connection lost", never why.
+pub const NET_SESSION_CLOSE_SECS: f32 = 0.5;
+/// A connected client that has heard NOTHING from the host for this long (not even renet's
+/// keep-alives, which flow while the host is paused or on a menu) treats it as gone. netcode's
+/// own timeout is 15 s — a long time to stare at a frozen planet.
+pub const NET_HOST_SILENCE_SECS: f32 = 6.0;
+/// CLIENT reconciliation: how far the host's authoritative copy of our astronaut may sit
+/// off the path we ran before we pull ourselves toward it. Measured against our recent PATH,
+/// not our current position — the copy trails us by speed × latency (metres at a low frame
+/// rate or mid-bhop), and correcting that lag would drag every joiner backwards. What it
+/// catches is real divergence: a host hitstop or open panel that froze our server-side body
+/// while we ran on, a lost jump packet.
+pub const NET_RECONCILE_DEADZONE: f32 = 1.0;
+/// How much of our own path to remember for that comparison. Must exceed the copy's lag.
+pub const NET_RECONCILE_WINDOW_SECS: f32 = 1.0;
+/// How fast the excess beyond the deadzone is closed, per second (exponential, so a big
+/// error eases home in about a second instead of snapping the camera).
+pub const NET_RECONCILE_RATE: f32 = 2.5;

@@ -553,11 +553,11 @@ pub fn update_comet_hud(
         text.0 = "\u{2604} COMET!".into();
         color.0 = Color::srgb(1.0, 0.9, 0.4);
     } else if comet.active {
-        let filled = (comet.progress() * 12.0).round() as usize;
+        let filled = (comet.progress * 12.0).round() as usize;
         let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(12 - filled);
         text.0 = format!("\u{2604} x{}  {bar}", comet.count);
         // warm up from amber to white-hot as the charge fills
-        let t = comet.progress();
+        let t = comet.progress;
         color.0 = Color::srgb(1.0, 0.8 + 0.2 * t, 0.3 + 0.5 * t);
     } else {
         text.0 = String::new();

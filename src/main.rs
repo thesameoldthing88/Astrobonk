@@ -140,7 +140,13 @@ fn main() {
         .add_systems(OnEnter(AppState::InRun), (enter_run, ui::hud::spawn_hud, music::start_music))
         .add_systems(
             OnExit(AppState::InRun),
-            (planet::despawn_stage, ui::hud::despawn_hud, clear_panels, music::stop_music),
+            (
+                planet::despawn_stage,
+                ui::hud::despawn_hud,
+                ui::panels::despawn_panels,
+                clear_panels,
+                music::stop_music,
+            ),
         )
         .add_systems(
             OnEnter(AppState::Results),
@@ -196,11 +202,16 @@ fn main() {
                 // apply_player_hits is host-only.
                 enemies::craterpillar_update,
                 enemies::anubot_beam_system.run_if(net::is_simulating),
+                // KEPT on clients: the beam's pose and slab, drawn from the streamed boss
+                // (after drive_boss_proxies has placed the proxy this frame).
+                enemies::anubot_beam_visuals.after(netenemy::drive_boss_proxies),
                 enemies::boss_phase_system.run_if(net::is_simulating),
                 enemies::burrower_emerge.run_if(net::is_simulating),
                 enemies::enemy_contact.run_if(net::is_simulating),
                 enemies::spitter_attack.run_if(net::is_simulating),
                 enemies::beamer_attack.run_if(net::is_simulating),
+                // KEPT on clients: aim lines rebuilt from the hazard lane draw here too.
+                enemies::aim_line_visuals.after(netenemy::drive_net_aim_lines),
                 enemies::lobber_attack.run_if(net::is_simulating),
                 // KEPT on clients: these three integrate the hazards the host streamed as
                 // spawn events. Gating them would freeze every shot and telegraph mid-air.
@@ -241,14 +252,21 @@ fn main() {
                 // adopts them from RunSnapMsg instead of running a second, drifting copy.
                 director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
-                enemies::debug_spawn_boss,
+                enemies::debug_spawn_boss.run_if(net::is_simulating),
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
         )
         .add_systems(
             Update,
-            (comet::comet_system, events_world::dust_storm_system).run_if(net::is_simulating)
+            (
+                // The host computes every astronaut's combo and owns the storm; what they
+                // look like runs everywhere, from the replicated/streamed state.
+                comet::comet_system.run_if(net::is_simulating),
+                comet::comet_presentation,
+                events_world::dust_storm_sim.run_if(net::is_simulating),
+                events_world::dust_storm_visuals,
+            )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
         )
@@ -272,6 +290,7 @@ fn main() {
                 combat::fader_update,
                 enemies::enemy_flash,
                 player::player_physics,
+                player::refit_astronaut_rigs,
                 player::animate_player,
                 // Regen, i-frames, shield recharge and powerup decay are all host-owned
                 // per-player state. A client adopts its own hp from the replicated
@@ -354,14 +373,19 @@ fn setup_camera(mut commands: Commands) {
 fn client_follow_host_run(
     role: Res<net::NetRole>,
     sync: Res<net::RunSync>,
+    mine: Res<net::MyPlayerId>,
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
     mut announced: Local<bool>,
 ) {
     if !matches!(*role, net::NetRole::Client) {
+        *announced = false;
         return;
     }
-    if !sync.seeded {
+    // The player id too, not just the seed: our astronaut drops at OUR slot's spot around
+    // the landing site — the same spot the host seats our server-side body — so the two
+    // start in the same place instead of a few metres apart for the whole run.
+    if !sync.seeded || mine.0.is_none() {
         if !*announced {
             *announced = true;
             info!("NET waiting for the host's run seed before building the world");
@@ -383,12 +407,20 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     // DarkMoon, which also exercises the planet RADIUS change (140 -> 160) that would
     // otherwise decode the streamed horde at the wrong arc scale.
     let dev_tier = if std::env::args().any(|a| a == "--stagenow") { 3 } else { 1 };
-    let run_state = run::RunState::new(
-        content::characters::AstronautKind::Buzz,
-        content::planets::PlanetKind::Moon,
-        dev_tier,
-        &save,
-    );
+    // Harness flags for the windowed/co-op tests, mirroring the headless ones: which hero
+    // this instance plays (a joiner's own pick is what the host must seat), and which world
+    // an --autodrop run lands on.
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let hero = arg("--hero")
+        .and_then(|s| content::characters::AstronautKind::from_name(&s))
+        .unwrap_or(content::characters::AstronautKind::Buzz);
+    let planet = match arg("--planet").as_deref() {
+        Some("mars") => content::planets::PlanetKind::Mars,
+        Some("darkmoon") => content::planets::PlanetKind::DarkMoon,
+        _ => content::planets::PlanetKind::Moon,
+    };
+    let run_state = run::RunState::new(hero, planet, dev_tier, &save);
     commands.insert_resource(save);
     commands.insert_resource(run_state);
     // Dev/co-op harness: drop straight into a run so two instances can be tested
@@ -416,8 +448,11 @@ fn enter_run(
     mut tut: ResMut<tutorial::Tutorial>,
     role: Res<net::NetRole>,
     mut sync: ResMut<net::RunSync>,
+    mine: Res<net::MyPlayerId>,
+    mut storm: ResMut<events_world::DustStorm>,
 ) {
     *comet_res = comet::Comet::default();
+    *storm = events_world::DustStorm::default();
     // first-run onboarding, only for a brand-new player on a normal run
     *tut = tutorial::Tutorial {
         active: !save.tutorial_done && !run_state.is_daily,
@@ -425,14 +460,16 @@ fn enter_run(
         timer: 0.0,
     };
     sync.world_built = true;
-    let _ = &role;
+    // A joiner stands in its OWN slot (client_follow_host_run waits for the id), which is
+    // where the host seats its server-side body.
+    let my_slot = if *role == net::NetRole::Client { mine.0.unwrap_or(0) } else { 0 };
     // seed the run's deterministic RNG streams from the run seed + stage
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
+    player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
         &mut commands,
         &mut meshes,
@@ -511,6 +548,10 @@ fn dev_fast_boss(
     }
     if std::env::args().any(|a| a == "--bossnow") {
         run.timer = config::BOSS_MARK + 4.0;
+        // ...and the spawn mix with it: a real boss arrives ~8 minutes in, with Beamers,
+        // Burrowers and UFOs in the horde. Without this the boss is fought among a
+        // minute-one crowd of shamblers, which tests none of the late-game lanes.
+        run.elapsed = config::STAGE_SECONDS[0] - run.timer;
         // Winding past MINIBOSS_MARKS would fire BOTH minibosses on the next tick as well,
         // burying a level-1 test player under three bosses at once. Mark them done.
         run.minibosses_spawned = [true; 2];

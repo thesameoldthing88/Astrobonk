@@ -4,6 +4,7 @@
 
 use crate::config::*;
 use crate::content::enemies::{time_scaling, BossKind, EliteMods, EnemyKind};
+use crate::events_world::InStorm;
 use crate::fx::{self, Pcolor, ParticleAssets, Shake};
 use crate::messages::*;
 use crate::planet::{random_dir, CurrentPlanet, StageScoped};
@@ -75,6 +76,35 @@ pub struct AnubotBeam {
 impl Default for AnubotBeam {
     fn default() -> Self {
         Self { angle: 0.0, state: 0, timer: 2.5 }
+    }
+}
+
+impl AnubotBeam {
+    /// Sweep speed in rad/s: slow while charging (the telegraph), fast while firing, and
+    /// faster each phase. Shared with the co-op client, which spins its copy of the beam
+    /// between boss snapshots with exactly these numbers.
+    pub fn spin(state: u8, phase: u8) -> f32 {
+        let ph = phase as f32;
+        match state {
+            1 => 0.5,
+            2 => 1.15 * (1.0 + 0.3 * ph),
+            _ => 0.25,
+        }
+    }
+    /// How long a state lasts once entered. The client restarts its local timer from this
+    /// when a snapshot reports a new state, which is all the charge-up pose needs.
+    pub fn state_secs(state: u8, phase: u8) -> f32 {
+        let ph = phase as f32;
+        match state {
+            1 => 1.3 - 0.3 * ph,          // shorter telegraph as he enrages
+            2 => 3.0 + 0.6 * ph,          // longer sweep
+            _ => (2.6 - 0.7 * ph).max(0.8), // shorter rest
+        }
+    }
+    /// World-space heading of the beam for a boss standing at `up`.
+    pub fn heading(&self, up: Vec3) -> Vec3 {
+        let base = sphere::tangent_frame(up).0;
+        (Quat::from_axis_angle(up, self.angle) * base).normalize_or_zero()
     }
 }
 
@@ -480,7 +510,9 @@ pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform)
     hash.map.retain(|_, v| !v.is_empty());
 }
 
-fn spawn_enemy(
+/// One crowd enemy. Public so the headless probes can stage an exact scene (a comet tail).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy(
     commands: &mut Commands,
     assets: &EnemyAssets,
     planet: &CurrentPlanet,
@@ -702,14 +734,7 @@ pub fn spawn_boss(
 
     if is_anubot {
         commands.entity(head).insert(AnubotBeam::default());
-        commands.spawn((
-            AnubotBeamVis { boss: head },
-            Mesh3d(assets.beam_mesh.clone()),
-            MeshMaterial3d(assets.beam_charge_mat.clone()),
-            Transform::from_translation(pos),
-            Visibility::Hidden,
-            StageScoped,
-        ));
+        spawn_anubot_beam_vis(commands, assets, head, pos);
     }
 }
 
@@ -794,17 +819,12 @@ pub fn boss_phase_system(
 
 /// Judge Anubot's Verdict Beam — a lighthouse railbeam that telegraphs, then sweeps the
 /// surface. Idle → charge (dim, slow rotate) → fire (bright, faster, damaging) → idle.
-#[allow(clippy::type_complexity)]
+/// HOST-only: this advances the beam and deals the damage. What it looks like is
+/// `anubot_beam_visuals`, which a co-op client runs on its streamed copy of the boss.
 pub fn anubot_beam_system(
     time: Res<Time>,
-    assets: Res<EnemyAssets>,
-    run: Res<RunState>,
-    q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>, Without<AnubotBeamVis>)>,
-    mut q_boss: Query<(Entity, &mut Transform, &Enemy, &Boss, &mut AnubotBeam)>,
-    mut q_vis: Query<
-        (&AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
-        (Without<AnubotBeam>, Without<Player>),
-    >,
+    q_player: Query<(Entity, &Transform), (With<Player>, Without<AnubotBeam>)>,
+    mut q_boss: Query<(Entity, &Transform, &Enemy, &Boss, &mut AnubotBeam)>,
     mut writer: MessageWriter<PlayerHitMsg>,
 ) {
     let dt = time.delta_secs();
@@ -813,67 +833,68 @@ pub fn anubot_beam_system(
     }
     // Every astronaut in the corridor is hit — a sweeping beam is AoE, not single-target.
     let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
-    let t_now = time.elapsed_secs();
-    // pass 1: advance each beam, apply damage, snapshot for the visuals
-    let mut snap: std::collections::HashMap<Entity, (Vec3, Vec3, u8, f32)> = std::collections::HashMap::new();
-    for (e, mut tf, enemy, boss, mut beam) in &mut q_boss {
+    for (e, tf, enemy, boss, mut beam) in &mut q_boss {
         beam.timer -= dt;
-        let ph = boss.phase as f32;
-        // rotate: slow while charging (telegraph), fast while firing; faster each phase
-        let spin = match beam.state {
-            1 => 0.5,
-            2 => 1.15 * (1.0 + 0.3 * ph),
-            _ => 0.25,
-        };
-        beam.angle = (beam.angle + spin * dt) % std::f32::consts::TAU;
+        beam.angle = (beam.angle + AnubotBeam::spin(beam.state, boss.phase) * dt) % std::f32::consts::TAU;
         if beam.timer <= 0.0 {
             beam.state = match beam.state {
-                0 => {
-                    beam.timer = 1.3 - 0.3 * ph; // shorter telegraph as he enrages
-                    1
-                }
-                1 => {
-                    beam.timer = 3.0 + 0.6 * ph; // longer sweep
-                    2
-                }
-                _ => {
-                    beam.timer = (2.6 - 0.7 * ph).max(0.8); // shorter rest
-                    0
-                }
+                0 => 1,
+                1 => 2,
+                _ => 0,
             };
+            beam.timer = AnubotBeam::state_secs(beam.state, boss.phase);
+        }
+        // damage while firing
+        if beam.state != 2 {
+            continue;
         }
         let up = tf.translation.normalize_or_zero();
-        let base = sphere::tangent_frame(up).0;
-        let heading = (Quat::from_axis_angle(up, beam.angle) * base).normalize_or_zero();
-
-        // damage while firing
-        if beam.state == 2 {
-            for (pe, pp) in ppos.iter().copied() {
-                {
-                    let v = pp - tf.translation;
-                    let along = v.dot(heading);
-                    let perp = (v - heading * along - up * v.dot(up)).length();
-                    if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
-                        writer.write(PlayerHitMsg {
-                            victim: pe,
-                            amount: enemy.damage * 1.2,
-                            from: tf.translation,
-                            attacker: Some(e),
-                        });
-                    }
-                }
+        let heading = beam.heading(up);
+        for (pe, pp) in ppos.iter().copied() {
+            let v = pp - tf.translation;
+            let along = v.dot(heading);
+            let perp = (v - heading * along - up * v.dot(up)).length();
+            if along > 0.0 && along < BEAM_LENGTH && perp < BEAM_WIDTH {
+                writer.write(PlayerHitMsg {
+                    victim: pe,
+                    amount: enemy.damage * 1.2,
+                    from: tf.translation,
+                    attacker: Some(e),
+                });
             }
         }
+    }
+}
+
+/// The Verdict Beam as everyone SEES it: the boss's charge-up pose plus the beam slab.
+/// Runs on host and client alike — on a client the boss is a streamed proxy whose
+/// `AnubotBeam` is kept in step from BossRec — so a joiner gets the same dodge tell the
+/// host does. Must run after whatever placed the boss this frame (enemy_move on the host,
+/// drive_boss_proxies on a client): the pose layers on top of that transform.
+#[allow(clippy::type_complexity)]
+pub fn anubot_beam_visuals(
+    mut commands: Commands,
+    time: Res<Time>,
+    assets: Res<EnemyAssets>,
+    mut q_boss: Query<(Entity, &mut Transform, &Boss, &AnubotBeam)>,
+    mut q_vis: Query<
+        (Entity, &AnubotBeamVis, &mut Transform, &mut Visibility, &mut MeshMaterial3d<StandardMaterial>),
+        Without<AnubotBeam>,
+    >,
+) {
+    let t_now = time.elapsed_secs();
+    let mut snap: HashMap<Entity, (Vec3, Vec3, u8)> = HashMap::new();
+    for (e, mut tf, boss, beam) in &mut q_boss {
+        let up = tf.translation.normalize_or_zero();
         // Hero-tier body tell (code-art-animation skill): the boss's POSE announces the
         // attack, not just the light — anticipation while charging, follow-through firing.
-        // Layers on top of enemy_move's write, which ran earlier in the chain.
         match beam.state {
             1 => {
                 // rear up as the charge builds (anticipation)
-                let wind = 1.0 - (beam.timer / (1.3 - 0.3 * ph).max(0.2)).clamp(0.0, 1.0);
+                let full = AnubotBeam::state_secs(1, boss.phase).max(0.2);
+                let wind = 1.0 - (beam.timer / full).clamp(0.0, 1.0);
                 tf.rotation *= Quat::from_rotation_x(0.24 * wind);
-                let s = 1.0 + 0.07 * wind;
-                tf.scale.y *= s;
+                tf.scale.y *= 1.0 + 0.07 * wind;
             }
             2 => {
                 // lurch into the sweep + a high-frequency shudder while it fires
@@ -882,15 +903,14 @@ pub fn anubot_beam_system(
             }
             _ => {}
         }
-
-        snap.insert(e, (tf.translation, heading, beam.state, up.dot(Vec3::Y)));
-        let _ = up;
+        snap.insert(e, (tf.translation, beam.heading(up), beam.state));
     }
 
-    // pass 2: place / colour / show the beam visuals
-    for (vis, mut tf, mut visibility, mut mat) in &mut q_vis {
-        let Some((bpos, heading, state, _)) = snap.get(&vis.boss).copied() else {
-            *visibility = Visibility::Hidden;
+    // place / colour / show the beam slabs
+    for (ve, vis, mut tf, mut visibility, mut mat) in &mut q_vis {
+        let Some((bpos, heading, state)) = snap.get(&vis.boss).copied() else {
+            // Its boss is gone (dead, or a client's proxy reaped): the slab goes with it.
+            commands.entity(ve).try_despawn();
             continue;
         };
         if state == 0 {
@@ -910,8 +930,23 @@ pub fn anubot_beam_system(
     }
 }
 
+/// Spawn the (hidden) beam slab that `anubot_beam_visuals` drives for `boss`. Shared by the
+/// host's `spawn_boss` and the client's boss proxy, so both build the identical visual.
+pub fn spawn_anubot_beam_vis(commands: &mut Commands, assets: &EnemyAssets, boss: Entity, pos: Vec3) {
+    commands.spawn((
+        AnubotBeamVis { boss },
+        Mesh3d(assets.beam_mesh.clone()),
+        MeshMaterial3d(assets.beam_charge_mat.clone()),
+        Transform::from_translation(pos),
+        Visibility::Hidden,
+        StageScoped,
+    ));
+}
+
 /// DEV: press B during play to summon the current planet's stage boss immediately
-/// (so the Craterpillar is testable without surviving 8+ minutes). Remove before ship.
+/// (so the Craterpillar is testable without surviving 8+ minutes). Host/solo only — a
+/// client summoning a boss would spawn one its host never simulates. P28 moves it behind
+/// `--dev`.
 pub fn debug_spawn_boss(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1276,18 +1311,19 @@ pub fn spitter_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
     mut q: Query<(&Enemy, &mut Spitter, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 || storm.player_inside {
-        return; // hidden in the dust storm — ranged enemies can't see you
+    if dt <= 0.0 {
+        return;
     }
+    // Anyone hidden in the dust storm is invisible to ranged enemies — per astronaut, so a
+    // teammate outside the cell is still a target while you ride it.
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps)| !ps.dead)
-        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .filter(|(_, _, ps, hidden)| !ps.dead && !hidden)
+        .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {
         return;
@@ -1323,49 +1359,64 @@ pub fn spitter_attack(
 }
 
 /// Beamers paint the player with a tracking aim line, lock late, then fire a railbolt.
+/// HOST-only (it decides and fires); the line itself is drawn by `aim_line_visuals`,
+/// which a co-op client also runs on the lines it rebuilt from the hazard lane.
 #[allow(clippy::too_many_arguments)]
 pub fn beamer_attack(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
     mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
-    mut q_lines: Query<(Entity, &AimLine, &mut Transform), (Without<Enemy>, Without<Player>)>,
+    q_lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    // Lost the target in the dust — drop every aim line and hold fire.
-    if storm.player_inside {
-        for (le, _, _) in &q_lines {
-            commands.entity(le).despawn();
-        }
-        for (_, _, mut b, _) in &mut q {
-            b.charging = 0.0;
-        }
-        return;
-    }
-    let snaps: Vec<crate::player::AstronautSnap> = q_player
+    // (astronaut, hidden in the dust storm)
+    let all: Vec<(crate::player::AstronautSnap, bool)> = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(en, p, _, tf)| crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation })
+        .filter(|(_, _, ps, _, _)| !ps.dead)
+        .map(|(en, p, _, tf, hidden)| (crate::player::AstronautSnap { entity: en, dir: p.dir, pos: tf.translation }, hidden))
         .collect();
-    if snaps.is_empty() {
-        return;
-    }
+    // Only astronauts OUT of the dust can be picked as a new target.
+    let visible: Vec<crate::player::AstronautSnap> =
+        all.iter().filter(|(_, hidden)| !hidden).map(|(s, _)| *s).collect();
+    let drop_line = |commands: &mut Commands, owner: Entity| {
+        for (le, line) in q_lines.iter() {
+            if line.owner == owner {
+                commands.entity(le).try_despawn();
+            }
+        }
+    };
 
     for (entity, e, mut b, tf) in &mut q {
         // While charging, stay on the LATCHED target (if it still exists); otherwise pick
-        // the nearest astronaut fresh.
-        let locked = b
+        // the nearest visible astronaut fresh.
+        let latched = b
             .target
             .filter(|_| b.charging > 0.0)
-            .and_then(|t| snaps.iter().copied().find(|s| s.entity == t));
-        let Some(player) = locked.or_else(|| crate::player::nearest_astronaut(e.dir, &snaps, planet.radius))
+            .and_then(|t| all.iter().copied().find(|(s, _)| s.entity == t));
+        if let Some((_, true)) = latched {
+            // Its mark ducked into the dust storm: the telegraph was for them, so drop it
+            // and hold fire rather than swing the line onto somebody else mid-sweep.
+            b.charging = 0.0;
+            b.target = None;
+            drop_line(&mut commands, entity);
+            continue;
+        }
+        let Some(player) = latched
+            .map(|(s, _)| s)
+            .or_else(|| crate::player::nearest_astronaut(e.dir, &visible, planet.radius))
         else {
+            // nobody to see: an unfinished charge fizzles
+            if b.charging > 0.0 {
+                b.charging = 0.0;
+                b.target = None;
+                drop_line(&mut commands, entity);
+            }
             continue;
         };
         let ptf = player;
@@ -1373,7 +1424,7 @@ pub fn beamer_attack(
         if b.charging > 0.0 {
             b.charging -= dt;
             // track the player until the final quarter second, then hold the lock
-            if b.charging > 0.25 {
+            if b.charging > BEAMER_LOCK_SECS {
                 let v = ptf.pos - tf.translation;
                 let vt = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
                 if vt != Vec3::ZERO {
@@ -1398,18 +1449,13 @@ pub fn beamer_attack(
                         .with_scale(Vec3::new(0.5, 0.5, 2.2)),
                     StageScoped,
                 ));
-                // drop the aim line
-                for (le, line, _) in q_lines.iter() {
-                    if line.owner == entity {
-                        commands.entity(le).despawn();
-                    }
-                }
+                drop_line(&mut commands, entity);
             }
             continue;
         }
         b.cd -= dt;
         if b.cd <= 0.0 && arc < 26.0 {
-            b.charging = 1.1;
+            b.charging = BEAMER_CHARGE_SECS;
             b.target = Some(player.entity); // commit for the whole telegraph
             let v = ptf.pos - tf.translation;
             b.aim = (v - e.dir * v.dot(e.dir)).normalize_or_zero();
@@ -1422,11 +1468,19 @@ pub fn beamer_attack(
             ));
         }
     }
+}
 
-    // stretch each live aim line from its beamer toward the current aim
+/// Stretch each live aim line from its beamer toward the current aim — thin and pulsing,
+/// thickening as the shot locks in. Shared by the host and a co-op client, so a joiner
+/// reads the exact tell the host would. Lines whose beamer is gone are cleared here.
+pub fn aim_line_visuals(
+    mut commands: Commands,
+    q: Query<(&Enemy, &Beamer, &Transform)>,
+    mut q_lines: Query<(Entity, &AimLine, &mut Transform), Without<Enemy>>,
+) {
     for (le, line, mut ltf) in &mut q_lines {
-        let Ok((_, e, b, tf)) = q.get(line.owner) else {
-            commands.entity(le).despawn();
+        let Ok((e, b, tf)) = q.get(line.owner) else {
+            commands.entity(le).try_despawn();
             continue;
         };
         if b.aim == Vec3::ZERO {
@@ -1436,8 +1490,7 @@ pub fn beamer_attack(
         let mid = tf.translation + e.dir * 1.0 + b.aim * (len * 0.5);
         ltf.translation = mid;
         ltf.rotation = sphere::frame_quat(e.dir, b.aim);
-        // thin pulsing line, thickening as the shot locks in
-        let lock = 1.0 - (b.charging / 1.1).clamp(0.0, 1.0);
+        let lock = 1.0 - (b.charging / BEAMER_CHARGE_SECS).clamp(0.0, 1.0);
         ltf.scale = Vec3::new(0.10 + lock * 0.16, 0.10 + lock * 0.16, len / 0.56);
     }
 }
@@ -1448,18 +1501,18 @@ pub fn lobber_attack(
     time: Res<Time>,
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
-    storm: Res<crate::events_world::DustStorm>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, Has<InStorm>)>,
     mut q: Query<(&Enemy, &mut Lobber, &Transform), Without<Buried>>,
 ) {
     let dt = time.delta_secs();
-    if dt <= 0.0 || storm.player_inside {
-        return; // can't range you through the dust
+    if dt <= 0.0 {
+        return;
     }
+    // can't range anyone through the dust
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps)| !ps.dead)
-        .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
+        .filter(|(_, _, ps, hidden)| !ps.dead && !hidden)
+        .map(|(e, p, _, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     if snaps.is_empty() {
         return;
