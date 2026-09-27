@@ -79,6 +79,11 @@ fn style_number(dn: &DamageNumber, size: f32, text: &mut Text, font: &mut TextFo
             font.font_size = 16.0 * size;
             color.0 = Color::srgb(0.4, 0.95, 1.0);
         }
+        NumKind::Block => {
+            text.0 = "BLOCK".into();
+            font.font_size = 15.0 * size;
+            color.0 = Color::srgb(0.7, 0.8, 0.95);
+        }
     }
 }
 
