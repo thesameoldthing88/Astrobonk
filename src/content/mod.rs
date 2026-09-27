@@ -1,4 +1,5 @@
 pub mod characters;
+pub mod duos;
 pub mod enemies;
 pub mod items;
 pub mod palettes;

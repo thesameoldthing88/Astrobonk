@@ -5,8 +5,10 @@ mod combat;
 mod comet;
 mod config;
 mod content;
+mod coop;
 mod daynight;
 mod director;
+mod duos;
 mod enemies;
 mod events_world;
 mod fx;
@@ -150,6 +152,12 @@ fn main() {
         .init_resource::<techs::GrindLines>()
         .init_resource::<techs::TechTelemetry>()
         .init_resource::<player::FlashlightSwitch>()
+        .init_resource::<coop::CoopTelemetry>()
+        .init_resource::<duos::DuoLedger>()
+        .init_resource::<duos::CascadeState>()
+        .add_message::<coop::FriendlyForce>()
+        .add_message::<coop::CoopFxMsg>()
+        .add_message::<duos::DuoMsg>()
         .init_resource::<gimmicks::WorldFlora>()
         .init_resource::<gimmicks::Crawl>()
         .init_resource::<gimmicks::GimmickTelemetry>()
@@ -178,6 +186,7 @@ fn main() {
                 pickups::setup_pickup_assets,
                 items::setup_item_assets,
                 techs::setup_tech_assets,
+                coop::setup_coop_assets,
                 gimmicks::setup_gimmick_assets,
                 bestiary::setup_bestiary_assets,
                 audio::build_sfx_bank,
@@ -196,12 +205,16 @@ fn main() {
         .add_systems(OnExit(AppState::CharSelect), ui::menus::despawn_menu)
         .add_systems(OnEnter(AppState::PlanetSelect), ui::menus::spawn_planet_select)
         .add_systems(OnExit(AppState::PlanetSelect), ui::menus::despawn_menu)
-        .add_systems(OnEnter(AppState::InRun), (enter_run, ui::hud::spawn_hud, music::start_music))
+        .add_systems(
+            OnEnter(AppState::InRun),
+            (enter_run, ui::hud::spawn_hud, ui::coop_hud::spawn_coop_hud, duos::reset_squad_state, music::start_music),
+        )
         .add_systems(
             OnExit(AppState::InRun),
             (
                 planet::despawn_stage,
                 ui::hud::despawn_hud,
+                ui::coop_hud::despawn_coop_hud,
                 ui::panels::despawn_panels,
                 clear_panels,
                 music::stop_music,
@@ -537,6 +550,56 @@ fn main() {
             dev_grant_items
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| dev_flag("--items")),
+        )
+        // ------------- §11 co-op rules (P18): the host runs the Beacons, friendly physics,
+        // drop-ins and the set-pieces for every astronaut; every machine draws them (vitals,
+        // the hazard lane's CoopFx, RunSnapMsg)
+        .add_systems(
+            Update,
+            (
+                coop::friendly_physics.run_if(net::is_simulating).before(player::player_physics),
+                coop::beacon_rescue.run_if(net::is_simulating).after(player::player_physics),
+                coop::orbital_drops.run_if(net::is_simulating).after(player::player_physics),
+                coop::autopilot_peers
+                    .run_if(net::is_simulating)
+                    .after(net::apply_remote_input)
+                    .before(player::player_input),
+                duos::static_cascade.run_if(net::is_simulating),
+                duos::duo_payoffs.run_if(net::is_simulating).after(combat::apply_hits),
+                coop::autopilot_local
+                    .run_if(net::is_client)
+                    .after(player::gather_local_input)
+                    .after(net::bot_input)
+                    .before(net::send_local_input)
+                    .before(player::player_input),
+            )
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (
+                coop::dev_down_peer.run_if(|| dev_flag("--downpeer")),
+                coop::dev_split_squad.run_if(|| dev_flag("--splitsquad")),
+            )
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (
+                coop::adopt_drop_in.run_if(net::is_client),
+                coop::tumble_pose.after(player::player_physics).after(remote::drive_remote_transforms),
+                coop::hide_claimed,
+                coop::beacon_flares,
+                // presented behind a card panel too, like the item/tech one-shots
+                coop::coop_fx_presentation,
+                duos::animate_cascade_belts,
+                ui::coop_hud::update_squad_hud,
+                ui::coop_hud::update_down_panel,
+                ui::coop_hud::update_rescue_line,
+                ui::coop_hud::update_beacon_markers,
+            )
+                .run_if(in_state(AppState::InRun)),
         )
         // `--dev --warp noon|dusk|night`: the toon look's windowed checks (P36) — every run
         // lands on the night side, so the lit side needs a walk the bot takes minutes over.

@@ -498,7 +498,7 @@ pub fn rollo_roll(
             r.speed = ROLLO_MIN_SPEED;
             r.heading = -r.heading;
             telemetry.rollo_bonks += 1;
-            hits.write(HitMsg { source: None, target: entity, amount: e.max_hp * ROLLO_BONK_SELF, crit: false, knock: Vec3::ZERO, weapon: None });
+            hits.write(HitMsg { source: None, target: entity, amount: e.max_hp * ROLLO_BONK_SELF, crit: false, knock: Vec3::ZERO, by: HitBy::Other });
             if let Some(pa) = &particles {
                 fx::burst(&mut commands, pa, planet.surface_point(up) + up * e.scale * 0.5, up, Pcolor::White, 10, 5.0);
             }

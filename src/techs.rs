@@ -477,6 +477,7 @@ pub fn slam_shockwave(
     mut hits: MessageWriter<HitMsg>,
     mut fx: MessageWriter<TechFxMsg>,
     mut telemetry: ResMut<TechTelemetry>,
+    mut forces: MessageWriter<crate::coop::FriendlyForce>,
 ) {
     let mut rng = rand::thread_rng();
     for (e, pid, p, ps, mut tech, tf) in &mut q {
@@ -493,6 +494,14 @@ pub fn slam_shockwave(
             continue;
         }
         let damage = SLAM_DAMAGE * reach.t * scale * ps.damage_mult();
+        // §11 friendly physics: the shockwave throws a teammate on the rim too (no damage)
+        forces.write(crate::coop::FriendlyForce {
+            from: e,
+            at: tf.translation,
+            radius: reach.radius,
+            cone: None,
+            kind: crate::coop::ForceKind::Shove(SLAM_KNOCK * reach.t * 0.3, FRIENDLY_POP),
+        });
         for (te, _) in hash.near(tf.translation, reach.radius + 1.5) {
             let Ok(en) = enemies.get(te) else { continue };
             let arc = sphere::arc_dist(en.dir, p.dir, planet.radius);
@@ -511,7 +520,7 @@ pub fn slam_shockwave(
                 amount: damage * falloff * cm * elite,
                 crit,
                 knock: away * SLAM_KNOCK * reach.t * falloff,
-                weapon: None,
+                by: HitBy::Other,
             });
             tech.slam_hits += 1;
             telemetry.slam_hits += 1;

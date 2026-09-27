@@ -735,7 +735,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 
 ### M15. Downed teammates stay downed on every later stage
 
-- **Severity:** Medium · **Area:** co-op · **Evidence:** CODE · **Status:** Open
+- **Severity:** Medium · **Area:** co-op · **Evidence:** CODE · **Status:** Fixed (P18)
 - **Where:**
   - `src/director.rs:183-186`: every `PlayerState` is cloned verbatim, including `dead` and `hp = 0`.
   - `src/director.rs:220-224`: the astronauts are respawned with those clones.
@@ -745,7 +745,7 @@ H1, H2 and H3 are solo regressions introduced by co-op Stage 1 (commit `35db5ff`
 - **Symptom:** In co-op, if a teammate is down when the survivor takes the teleporter, that teammate arrives on the next planet still dead and stays dead for the rest of the run.
 - **Root cause:** There is no revive path. The comment at `src/director.rs:234-239` names reviving as future work ("reviving is just clearing `dead`").
 - **Suggested fix:** A revive design (GDD revive / Tumbling Beacon; D10). The minimum: on stage transition, clear `dead` and set `hp` to a fraction of max for carried sheets.
-- **Status:** Open.
+- **Status:** Fixed (P18, 773ba9a): `director::stage_transition` runs `PlayerState::rejoin` on every carried sheet — a teammate left on a Beacon, or claimed by The Static, comes through the teleporter at `REJOIN_HP_FRAC` (a joiner's own carried sheet likewise, `netenemy::client_stage_transition`). The revive itself is the §11 Tumbling Beacon (`coop.rs`).
 
 ### M16. Spawn ramp is about 15x the GDD's and caps out the horde
 
@@ -1080,34 +1080,42 @@ Evidence is CODE unless stated otherwise. Each item carries its own Status.
 
 #### L17. Downed astronauts still anchor spawns, party scale and boss placement
 
-- **Severity:** Low · **Area:** co-op · **Status:** Open
+- **Severity:** Low · **Area:** co-op · **Status:** Fixed (P18)
 - **Where:**
   - `src/enemies.rs:547`, `:556`, `:568`: `director_spawn` uses every `Player` as an anchor and computes P from them, despite the comment "one per living astronaut" (:554).
   - `src/director.rs:66-72`: the boss spawn centroid uses every `Player`.
   - By contrast, `enemy_move` and `enemy_contact` do filter out the dead (`src/enemies.rs:1038`, `:1249`).
 - **Symptom:** A dead teammate's body keeps the horde at the full party size, receives its share of spawns around it, and pulls bosses toward it.
 - **Suggested fix:** Filter out dead astronauts via `PlayerState.dead` in both places.
+- **Status:** Fixed (P18, 773ba9a): `director_spawn` anchors on standing astronauts only and scales by `run::scaling::living_party`; `run_clock` (boss/miniboss/teleporter centroid), `boss_phase_system` and the dev boss key count the standing too.
+
 
 #### L18. A downed astronaut's body absorbs enemy shots
 
-- **Severity:** Low · **Area:** co-op · **Status:** Open
+- **Severity:** Low · **Area:** co-op · **Status:** Fixed (P18)
 - **Where:** `src/enemies.rs:1527`, `:1535`, `:1549-1555`: `enemy_projectiles` tests every `Player` and despawns the shot on the first hit. `src/combat.rs:989`: `apply_player_hits` ignores victims at `hp <= 0`.
 - **Symptom:** A downed teammate acts as a bullet shield.
 - **Suggested fix:** Skip dead astronauts in `enemy_projectiles`.
+- **Status:** Fixed (P18, 773ba9a): `enemy_projectiles` skips downed bodies (on a client too, for its drawn shots).
+
 
 #### L19. A downed astronaut keeps charging shrine rings
 
-- **Severity:** Low · **Area:** co-op · **Status:** Open
+- **Severity:** Low · **Area:** co-op · **Status:** Fixed (P18)
 - **Where:** `src/interact.rs:345`, `:354-362`: the occupancy query is `Query<&Transform, With<Player>>`, with no dead filter.
 - **Symptom:** A dead body standing in a ring keeps charging it.
 - **Suggested fix:** Filter out dead astronauts, as `src/pickups.rs:142` does.
+- **Status:** Fixed (P18, 773ba9a): `charge_shrines` counts standing astronauts only.
+
 
 #### L20. Boss HP ignores party size; boss add rings bypass the cap
 
-- **Severity:** Low · **Area:** co-op · **Status:** Open
+- **Severity:** Low · **Area:** co-op · **Status:** Fixed (P18)
 - **Where:** `src/enemies.rs:645`: `hp = def.hp × (1 + difficulty)`. `src/enemies.rs:775-791`: the phase add rings (11 and 14 adds) call `spawn_enemy` with no cap check.
 - **Symptom:** Co-op bosses die P times faster than intended. Add rings can push the count above the cap.
 - **Suggested fix:** Scale boss HP by a party factor (per the GDD's M5 milestone), and respect the cap for adds.
+- **Status:** Fixed (P18, 773ba9a): boss HP follows the §11 table (`PARTY_BOSS_HP_SCALE`, via `Scaling::boss_hp`), and the phase add rings take only the room left under `Scaling::live_cap`.
+
 
 #### L21. `NET_ENEMY_MAX_RECORDS` is not a hard ceiling
 
@@ -1294,10 +1302,12 @@ Evidence is CODE unless stated otherwise. Each item carries its own Status.
 
 #### L39. No teammate HP or downed indicator
 
-- **Severity:** Low · **Area:** co-op, UI · **Status:** Open
+- **Severity:** Low · **Area:** co-op, UI · **Status:** Fixed (P18)
 - **Where:** `src/net.rs:583-597`: `adopt_my_vitals`, the only reader of `PlayerVitals`, reads only our own id. `max_hp` and `level` are never read, and there is no teammate UI in `src/ui/`.
 - **Symptom:** Nobody can see a teammate's health or whether they are down.
 - **Suggested fix:** Docket item 8 (§8).
+- **Status:** Fixed (P18, 773ba9a): `ui::coop_hud` draws a squad strip (suit, level, HP bar — or DOWN with its Static Meter and revive, or CLAIMED), edge markers for teammates' Beacons, and the downed player's own panel, all from `PlayerVitals`.
+
 
 #### L40. A host that quits leaves the joiner frozen
 
@@ -1627,7 +1637,7 @@ The owner must decide these. They are listed so that nobody "fixes" them unilate
 | D7 | The level-up card count. The GDD says three; the code deals four. | `src/run.rs:566`, `:573` (`opts.len() >= 4`, `while opts.len() < 4`) | `GDD.md:283` |
 | D8 | Lady Fortuna: one free reroll per level (the GDD) or unlimited (the code)? | L30 | `GDD.md:411` **Decided (P30):** the GDD: one free reroll per level. See L30. |
 | D9 | When should the ship-hygiene items go (the B and T keys, Mars and recruit unlocks, the dev CLI)? Re-gating unlocks needs an explicit removal migration. | §9 | Not decided. |
-| D10 | Revive design, and whether a stage change revives the downed. | M15 | The GDD's M5 milestone (revives), the Tumbling Beacon. |
+| D10 | Revive design, and whether a stage change revives the downed. | M15 | The GDD's M5 milestone (revives), the Tumbling Beacon. **Settled by P18:** the §11 Tumbling Beacon (3 s teammate revive at 50% HP, no self-revive, a 40 s Static Meter that claims until the next teleporter) — and yes, a teleporter brings every downed or claimed teammate back at 50% HP. |
 
 ---
 
@@ -1819,7 +1829,7 @@ These are outside the original docket. The audit found that H4, H6 and H8 would 
 #### Item 8: teammate HUD (L39)
 
 - **Goal:** Show each teammate's HP, level and downed state.
-- **Status:** Not started.
+- **Status:** Done (P18): `ui::coop_hud::update_squad_hud` — filtered exactly as below (`Without<LocalPlayer>` on a joiner, plus the MyPlayerId check).
 - **Plan claims checked:**
   - `PlayerVitals { hp, max_hp, level, down }` is replicated for every astronaut (`src/net.rs:350`; spawned at `src/player.rs:166-167`; filled at `src/net.rs:1188-1197`).
   - `update_hud`'s `ParamSet` is at the cap of 8 (`src/ui/hud.rs:319-328`). `update_hud` itself has only 6 of its 16 params, so a second `ParamSet` would also work, but a separate system is cleaner.

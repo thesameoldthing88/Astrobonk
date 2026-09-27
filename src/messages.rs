@@ -15,10 +15,32 @@ pub struct HitMsg {
     pub amount: f32,
     pub crit: bool,
     pub knock: Vec3,
-    /// The weapon that dealt it (`None` for items, techs, thorns, the world). What a hit
-    /// DOES beyond damage keys off it — a Whoopee's stun, a bell's mark, a cryo vent's own
-    /// slow — and so does the §13 hitstop's evolved-weapon bonus.
-    pub weapon: Option<WeaponKind>,
+    /// What dealt it: a weapon, a thorns reflection, or anything else (items, techs, the
+    /// comet, set-pieces). A weapon's family drives the §11 duo combos (`duos::DuoLedger`),
+    /// and what a hit DOES beyond damage keys off the weapon (`HitMsg::weapon`) — a
+    /// Whoopee's stun, a bell's mark, a cryo vent's own slow, the §13 hitstop's evolved bonus.
+    pub by: HitBy,
+}
+
+impl HitMsg {
+    /// The weapon that dealt this hit, if a weapon did.
+    pub fn weapon(&self) -> Option<WeaponKind> {
+        match self.by {
+            HitBy::Weapon(w) => Some(w),
+            _ => None,
+        }
+    }
+}
+
+/// Attribution for a `HitMsg`, beyond the astronaut in `source`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HitBy {
+    Weapon(WeaponKind),
+    /// Thorns reflecting an enemy's hit back at it (`combat::apply_player_hits`).
+    Thorns,
+    /// Items, movement techs, the Comet Combo, co-op set-pieces, the world, dev/test kills.
+    #[default]
+    Other,
 }
 
 /// Player took a hit (pre-mitigation).

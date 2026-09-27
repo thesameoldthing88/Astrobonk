@@ -233,6 +233,8 @@ pub struct Projectile {
     /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
     /// from the host's shoulder.
     pub owner: Entity,
+    /// The weapon that fired it — hit attribution (`HitBy`, the §11 duo combos).
+    pub weapon: WeaponKind,
     pub dir: Vec3,     // unit direction from core
     pub heading: Vec3, // tangent unit
     pub speed: f32,
@@ -247,8 +249,6 @@ pub struct Projectile {
     pub bounces: u8,
     /// Seconds left of the skip's hop (0 = flying level).
     pub hop: f32,
-    /// The weapon that fired it (carried onto its hits).
-    pub weapon: WeaponKind,
 }
 
 impl Projectile {
@@ -281,6 +281,8 @@ pub struct Beam {
     /// weapon annihilate each other's drones in the reconciler, and a peer's beam emits
     /// from the host's shoulder.
     pub owner: Entity,
+    /// The weapon that fired it — hit attribution (`HitBy`, the §11 duo combos).
+    pub weapon: WeaponKind,
     pub heading: Vec3,
     pub range: f32,
     pub width: f32,
@@ -289,7 +291,6 @@ pub struct Beam {
     pub tick_cd: f32,
     /// Fired by Second Astronaut's ghost: it streams from where the ghost floats.
     pub ghost: bool,
-    pub weapon: WeaponKind,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -408,6 +409,7 @@ fn fire_volley(
     hits: &mut MessageWriter<HitMsg>,
     sfx: &mut MessageWriter<SfxMsg>,
     zaps: &mut ZapLook,
+    forces: &mut MessageWriter<crate::coop::FriendlyForce>,
     ax: &mut arsenal::ArsenalCx,
     rng: &mut impl Rng,
 ) {
@@ -434,10 +436,18 @@ fn fire_volley(
                         amount: dmg * cm * elite,
                         crit,
                         knock: vt * 9.0 * stats.knockback,
-                        weapon: Some(v.kind),
+                        by: HitBy::Weapon(v.kind),
                     });
                 }
             }
+            // §11 friendly physics: the swing boops a teammate caught in its arc (no damage)
+            forces.write(crate::coop::FriendlyForce {
+                from: v.owner,
+                at: v.center,
+                radius: r,
+                cone: (arc_deg < 360.0).then_some((aim, cos_half)),
+                kind: crate::coop::ForceKind::Shove(FRIENDLY_SWING_SHOVE * stats.knockback.clamp(0.5, 2.0), 0.0),
+            });
             // sweep visual: a crescent over exactly the arc and reach that just hit
             let arc_mesh = assets.sweep_arcs.get(&(arc_deg.round() as u32)).unwrap_or(&assets.sweep_arcs[&360]);
             commands.spawn((
@@ -472,6 +482,7 @@ fn fire_volley(
                 commands.spawn((
                     Projectile {
                         owner: v.owner,
+                        weapon: v.kind,
                         dir: start_dir,
                         heading: h,
                         speed: speed * stats.proj_speed,
@@ -483,7 +494,6 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: Projectile::roll_bounce(stats, rng),
                         hop: 0.0,
-                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -504,6 +514,7 @@ fn fire_volley(
                 commands.spawn((
                     Projectile {
                         owner: v.owner,
+                        weapon: v.kind,
                         dir: start_dir,
                         heading: h,
                         speed: speed * stats.proj_speed,
@@ -515,7 +526,6 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: Projectile::roll_bounce(stats, rng),
                         hop: 0.0,
-                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -540,6 +550,7 @@ fn fire_volley(
                 commands.spawn((
                     Projectile {
                         owner: v.owner,
+                        weapon: v.kind,
                         dir: start_dir,
                         heading: h,
                         speed: speed * stats.proj_speed * stats.orbit,
@@ -551,7 +562,6 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: 0, // it comes back; it never comes down
                         hop: 0.0,
-                        weapon: v.kind,
                     },
                     Mesh3d(assets.drone_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -567,6 +577,7 @@ fn fire_volley(
                 commands.spawn((
                     Beam {
                         owner: v.owner,
+                        weapon: v.kind,
                         heading: h,
                         range: range * size,
                         width: width * size,
@@ -574,7 +585,6 @@ fn fire_volley(
                         ticks_left: (5.0 * stats.duration) as u32 + 1,
                         tick_cd: 0.0,
                         ghost: v.ghost,
-                        weapon: v.kind,
                     },
                     Mesh3d(assets.beam_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -618,7 +628,15 @@ fn fire_volley(
             for (e, pos) in &chain {
                 let (cm, crit) = roll_crit(v.crit_ch, stats.crit_damage, rng);
                 let elite = enemies.get(*e).map(|(_, _, en)| if en.elite { stats.elite_damage } else { 1.0 }).unwrap_or(1.0);
-                hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(v.kind) });
+                hits.write(HitMsg { source: Some(v.owner), target: *e, amount: dmg * cm * elite, crit, knock: Vec3::ZERO, by: HitBy::Weapon(v.kind) });
+                // §11: the arc jolts a teammate standing next to the foe it jumps to
+                forces.write(crate::coop::FriendlyForce {
+                    from: v.owner,
+                    at: *pos,
+                    radius: FRIENDLY_JOLT_RADIUS,
+                    cone: None,
+                    kind: crate::coop::ForceKind::Jolt,
+                });
                 // zap segment visual
                 if show_zaps {
                     let mid = (prev + *pos) / 2.0;
@@ -651,6 +669,7 @@ fn fire_volley(
                 commands.spawn((
                     Projectile {
                         owner: v.owner,
+                        weapon: v.kind,
                         dir: start_dir,
                         heading: h,
                         speed: speed * stats.proj_speed,
@@ -662,7 +681,6 @@ fn fire_volley(
                         hit_cd: HashMap::new(),
                         bounces: 0, // a rocket that comes down goes off
                         hop: 0.0,
-                        weapon: v.kind,
                     },
                     Mesh3d(assets.proj_mesh.clone()),
                     MeshMaterial3d(assets.mats[&v.kind].clone()),
@@ -779,7 +797,12 @@ pub fn weapon_fire(
     enemies: Foes,
     q_pots: Query<(), With<Pot>>,
     (q_drones, q_auras, q_discs): (Query<(Entity, &Drone)>, Query<(Entity, &AuraVis)>, Query<&arsenal::Disc>),
-    (mut hits, mut sfx, mut weapon_fx): (MessageWriter<HitMsg>, MessageWriter<SfxMsg>, MessageWriter<arsenal::WeaponFxMsg>),
+    (mut hits, mut sfx, mut weapon_fx, mut forces): (
+        MessageWriter<HitMsg>,
+        MessageWriter<SfxMsg>,
+        MessageWriter<arsenal::WeaponFxMsg>,
+        MessageWriter<crate::coop::FriendlyForce>,
+    ),
     role: Res<crate::net::NetRole>,
     (hash, planet): (Res<SpatialHash>, Res<CurrentPlanet>),
 ) {
@@ -842,8 +865,8 @@ pub fn weapon_fire(
             }
             // the yo-yos are always out (`arsenal::tether_update` swings them)
             Behavior::Tether { .. } => continue,
-            Behavior::Aura { radius, slow: _ } => {
-                // (the slow rides on the hit: `apply_hits` reads it off `HitMsg::weapon`)
+            Behavior::Aura { radius, slow } => {
+                // (the slow on foes rides on the hit: `apply_hits` reads it off `HitMsg::weapon`)
                 let radius = radius * aura_sc;
                 want_auras.push((pe, wi.kind));
                 if jammed {
@@ -853,6 +876,16 @@ pub fn weapon_fire(
                 if wi.cd <= 0.0 {
                     wi.cd = def.cooldown;
                     let r = radius * size;
+                    // §11: a cryo field chills a teammate standing in it too
+                    if slow > 0.0 {
+                        forces.write(crate::coop::FriendlyForce {
+                            from: pe,
+                            at: ptf.translation,
+                            radius: r,
+                            cone: None,
+                            kind: crate::coop::ForceKind::Chill(def.cooldown / atk_speed.max(0.1) + FRIENDLY_CHILL_SECS),
+                        });
+                    }
                     for (e, tf, en) in enemies.iter() {
                         if tf.translation.distance_squared(ptf.translation) < r * r {
                             let (cm, crit) = roll_crit(crit_ch, stats.crit_damage, &mut rng);
@@ -863,7 +896,7 @@ pub fn weapon_fire(
                                 amount: dmg * cm * elite,
                                 crit,
                                 knock: Vec3::ZERO,
-                                weapon: Some(wi.kind),
+                                by: HitBy::Weapon(wi.kind),
                             });
                         }
                     }
@@ -938,7 +971,7 @@ pub fn weapon_fire(
             ghost: false,
             crit_ch,
         };
-        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut ax, &mut rng);
+        fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut forces, &mut ax, &mut rng);
         if ax.tolled {
             ax.tolled = false;
             wprocs.last_toll = t_now;
@@ -988,7 +1021,7 @@ pub fn weapon_fire(
                 ghost: true,
                 crit_ch,
             };
-            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut ax, &mut rng);
+            fire_volley(&v, &stats, &assets, &enemies, &q_pots, &mut commands, &mut hits, &mut sfx, &mut zaps, &mut forces, &mut ax, &mut rng);
             ax.tolled = false;
             telemetry.ghost_volleys += 1;
         }
@@ -1083,6 +1116,7 @@ pub fn projectile_move(
     q_pots: Query<(), With<Pot>>,
     mut q: Query<(Entity, &mut Projectile, &mut Transform), Without<Player>>,
     mut hits: MessageWriter<HitMsg>,
+    mut forces: MessageWriter<crate::coop::FriendlyForce>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1163,7 +1197,7 @@ pub fn projectile_move(
         }
         if p.life <= 0.0 {
             if let ProjKind::Rocket { aoe } = p.kind {
-                explode(&mut commands, &hash, &enemies, &run, p.owner, p.weapon, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                explode(&mut commands, &hash, &enemies, &run, (p.owner, p.weapon), tf.translation, aoe, p.damage, &mut hits, &mut forces, &particles, p.dir, &mut rng);
             }
             commands.entity(pe).despawn();
             continue;
@@ -1203,7 +1237,7 @@ pub fn projectile_move(
             let reach = hit_r + en.scale * 0.5;
             if tpos.distance_squared(tf.translation) < reach * reach {
                 if let ProjKind::Rocket { aoe } = p.kind {
-                    explode(&mut commands, &hash, &enemies, &run, p.owner, p.weapon, tf.translation, aoe, p.damage, &mut hits, &particles, p.dir, &mut rng);
+                    explode(&mut commands, &hash, &enemies, &run, (p.owner, p.weapon), tf.translation, aoe, p.damage, &mut hits, &mut forces, &particles, p.dir, &mut rng);
                     exploded = true;
                     break;
                 }
@@ -1215,7 +1249,7 @@ pub fn projectile_move(
                     amount: p.damage * cm * elite,
                     crit,
                     knock: p.heading * 4.0 * run.stats.knockback,
-                    weapon: Some(p.weapon),
+                    by: HitBy::Weapon(p.weapon),
                 });
                 p.hit_cd.insert(te, 0.5);
                 p.pierce -= 1;
@@ -1237,13 +1271,14 @@ fn explode(
     hash: &SpatialHash,
     enemies: &Query<&Enemy>,
     run: &PlayerState,
-    // the astronaut whose rocket this was — carried so AoE damage credits the right player
-    owner: Entity,
-    weapon: WeaponKind,
+    // the astronaut whose rocket this was, and the weapon — so AoE damage credits the
+    // right player and family
+    (owner, weapon): (Entity, WeaponKind),
     pos: Vec3,
     aoe: f32,
     damage: f32,
     hits: &mut MessageWriter<HitMsg>,
+    forces: &mut MessageWriter<crate::coop::FriendlyForce>,
     particles: &Option<Res<ParticleAssets>>,
     up: Vec3,
     rng: &mut impl Rng,
@@ -1254,9 +1289,17 @@ fn explode(
             let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), rng);
             let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
             let kdir = (tpos - pos).normalize_or_zero();
-            hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0, weapon: Some(weapon) });
+            hits.write(HitMsg { source: Some(owner), target: te, amount: damage * cm * elite, crit, knock: kdir * 7.0, by: HitBy::Weapon(weapon) });
         }
     }
+    // §11 friendly physics: the blast throws a teammate too — never hurts them
+    forces.write(crate::coop::FriendlyForce {
+        from: owner,
+        at: pos,
+        radius: aoe,
+        cone: None,
+        kind: crate::coop::ForceKind::Shove(FRIENDLY_BLAST_SHOVE, FRIENDLY_POP),
+    });
     if let Some(pa) = particles {
         fx::burst(commands, pa, pos, up, Pcolor::Red, 16, 8.0);
     }
@@ -1304,7 +1347,7 @@ pub fn drone_update(
                         amount: d.damage * cm * elite,
                         crit,
                         knock: offset.normalize_or_zero() * 5.0,
-                        weapon: Some(d.weapon),
+                        by: HitBy::Weapon(d.weapon),
                     });
                     hit_any = true;
                 }
@@ -1364,7 +1407,7 @@ pub fn beam_update(
                 if perp < beam.width + en.scale * 0.5 {
                     let (cm, crit) = roll_crit(run.crit_chance(), run.crit_damage(), &mut rng);
                     let elite = if en.elite { run.stats.elite_damage } else { 1.0 };
-                    hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(beam.weapon) });
+                    hits.write(HitMsg { source: Some(beam.owner), target: te, amount: beam.damage * cm * elite, crit, knock: Vec3::ZERO, by: HitBy::Weapon(beam.weapon) });
                 }
             }
         }
@@ -1439,9 +1482,10 @@ pub fn apply_hits(
     mut commands: Commands,
     mut reader: MessageReader<HitMsg>,
     mut run: ResMut<RunState>,
-    mut q_ps: Query<&mut PlayerState>,
+    mut q_ps: Query<(&mut PlayerState, &crate::player::PlayerId)>,
     q_local: Query<(), With<crate::player::LocalPlayer>>,
     (mut shake, mut hitstop, time, role): (ResMut<Shake>, ResMut<Hitstop>, Res<Time>, Res<crate::net::NetRole>),
+    (mut ledger, mut duos): (ResMut<crate::duos::DuoLedger>, MessageWriter<crate::duos::DuoMsg>),
     mut enemies: Query<
         (
             &mut Enemy,
@@ -1469,8 +1513,12 @@ pub fn apply_hits(
 ) {
     let mut rng = rand::thread_rng();
     let now = time.elapsed_secs();
+    // the §11 duo combos need a teammate: solo keeps no marks
+    let squad = q_ps.iter().count() > 1;
+    ledger.prune(now);
 
     for msg in reader.read() {
+        let shooter = msg.source.and_then(|s| q_ps.get(s).ok()).map(|(_, pid)| pid.0);
         // Pots first: they piggyback on the enemy hash but die as pots.
         if let Ok((mut pot, tf)) = pots.get_mut(msg.target) {
             if pot.broken {
@@ -1498,17 +1546,24 @@ pub fn apply_hits(
             // Cosmonaut's Bell: a tolled foe takes crits more easily — from anyone's hit
             let (mut amount, mut crit) = (msg.amount, msg.crit);
             if marked && !crit && rng.gen_bool(BELL_MARK_CRIT as f64) {
-                let crit_dmg = msg.source.and_then(|s| q_ps.get(s).ok()).map(|ps| ps.crit_damage()).unwrap_or(2.0);
+                let crit_dmg = msg.source.and_then(|s| q_ps.get(s).ok()).map(|(ps, _)| ps.crit_damage()).unwrap_or(2.0);
                 amount *= crit_dmg;
                 crit = true;
                 tm.mark_crits += 1;
             }
+            // §11 duo combos (crowd and elites; a boss holds its own ground): a teammate's
+            // setup mark on this foe, finished by this hit's family, pays off
+            let combo = match (squad, shooter, boss) {
+                (true, Some(pid), None) => ledger.hit(msg.target, pid, msg.by, now),
+                _ => None,
+            };
+            amount *= combo.map_or(1.0, |(feat, _)| feat.finisher_mult());
             // The Aegis Drone's shield: a hit along its facing cone lands a sliver and does
             // not stagger it (§9 — flank it). A shape-coded BLOCK read-out, throttled per drone.
             let mut blocked = false;
             if let Some(mut sh) = shield {
-                let shooter = msg.source.and_then(|s| shooters.get(s).ok()).map(|p| p.dir);
-                if crate::bestiary::shield_blocks(e.dir, sh.facing, msg.knock, shooter) {
+                let shooter_dir = msg.source.and_then(|s| shooters.get(s).ok()).map(|p| p.dir);
+                if crate::bestiary::shield_blocks(e.dir, sh.facing, msg.knock, shooter_dir) {
                     blocked = true;
                     amount *= AEGIS_BLOCK_FRACTION;
                     telemetry.aegis_blocks += 1;
@@ -1532,7 +1587,7 @@ pub fn apply_hits(
                 1.0
             };
             e.knock += msg.knock * knock_scale;
-            if let Some(w) = msg.weapon {
+            if let Some(w) = msg.weapon() {
                 // a cold field slows by ITS OWN amount, and only its own hits do (L14)
                 if let Behavior::Aura { slow, .. } = w.def().behavior {
                     if slow > 0.0 {
@@ -1556,12 +1611,16 @@ pub fn apply_hits(
                 sfx.write(SfxMsg(Sfx::Crit));
             }
             // lifesteal: chance to heal 1 — heals the SHOOTER, not an arbitrary player
-            if let Some(mut ps) = msg.source.and_then(|s| q_ps.get_mut(s).ok()) {
-                if ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
+            if let Some((mut ps, _)) = msg.source.and_then(|s| q_ps.get_mut(s).ok()) {
+                // (a shot still in flight when its shooter went down heals no Beacon)
+                if !ps.dead && ps.stats.lifesteal > 0.0 && rng.gen_bool((ps.stats.lifesteal.min(1.0)) as f64) {
                     ps.hp = (ps.hp + 1.0).min(ps.stats.max_hp);
                 }
             }
             if e.hp <= 0.0 {
+                if let (Some((feat, setup)), Some(finisher)) = (combo, shooter) {
+                    duos.write(crate::duos::DuoMsg { feat, setup, finisher, dir: e.dir, max_hp: e.max_hp });
+                }
                 let is_boss = boss.map(|b| b.kind.def().is_stage_boss).unwrap_or(false);
                 let is_mini = boss.is_some() && !is_boss;
                 if let Some(m) = mimic {
@@ -1597,7 +1656,7 @@ pub fn apply_hits(
                     } else {
                         fx::KillWeight::Crowd
                     };
-                    hitstop.kill(weight, msg.weapon.is_some_and(|w| w.is_evolution()), now);
+                    hitstop.kill(weight, msg.weapon().is_some_and(|w| w.is_evolution()), now);
                 }
                 commands.entity(msg.target).despawn();
             }
@@ -1661,7 +1720,8 @@ pub fn apply_player_hits(
                 from_wire: false,
             });
         };
-        if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 {
+        // a Beacon takes no hits (it is not "killed again", which would reset its meters)
+        if run_ps.iframes > 0.0 || run_ps.hp <= 0.0 || run_ps.dead {
             continue;
         }
         // evasion
@@ -1706,7 +1766,7 @@ pub fn apply_player_hits(
         // thorns
         if run_ps.stats.thorns > 0.0 {
             if let Some(att) = msg.attacker {
-                hits.write(HitMsg { source: Some(msg.victim), target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO, weapon: None });
+                hits.write(HitMsg { source: Some(msg.victim), target: att, amount: run_ps.stats.thorns, crit: false, knock: Vec3::ZERO, by: HitBy::Thorns });
             }
         }
 
@@ -1739,7 +1799,8 @@ pub fn apply_player_hits(
                         sfx.write(SfxMsg(Sfx::Shrine));
                         info!("revive token spent (hp -> {:.0})", run_ps.hp);
                     } else {
-                        run_ps.dead = true;
+                        // down: a Tumbling Beacon (§11; solo, the end of the run)
+                        run_ps.go_down();
                     }
                 }
             }

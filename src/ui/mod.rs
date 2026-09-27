@@ -1,3 +1,4 @@
+pub mod coop_hud;
 pub mod hud;
 pub mod menus;
 pub mod numbers;

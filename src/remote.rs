@@ -145,7 +145,7 @@ fn refit_remote_rigs(
 /// Ease the drawn pose toward the last replicated snapshot and reconstruct the Transform
 /// with exactly the same formula `player_physics` uses, so a remote stands on the terrain
 /// the same way the local astronaut does.
-fn drive_remote_transforms(
+pub(crate) fn drive_remote_transforms(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     mut q: Query<(&crate::net::NetTransform, &mut RemoteAstronaut, &mut Transform)>,

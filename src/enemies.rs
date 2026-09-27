@@ -1080,7 +1080,9 @@ pub fn director_spawn(
     // carrier (§7: "enemies always know where you are") is listed twice — a double share —
     // and theirs lands closer (the flag).
     let mut anchors: Vec<(Vec3, bool)> = Vec::new();
-    for (p, ps) in &q_player {
+    // Standing astronauts only: a Tumbling Beacon (or a body The Static claimed) is no
+    // longer where the horde arrives, and doesn't keep it at full party size (L17).
+    for (p, ps) in q_player.iter().filter(|(_, ps)| !ps.dead) {
         anchors.push((p.dir, ps.revealed()));
         if ps.revealed() {
             anchors.push((p.dir, true));
@@ -1089,7 +1091,7 @@ pub fn director_spawn(
     if anchors.is_empty() {
         return;
     }
-    let party = q_player.iter().count();
+    let party = scaling::living_party(q_player.iter().map(|(_, ps)| ps));
     let rng = &mut game_rng.0; // deterministic spawn stream from the run seed
 
     let alive = q_crowd.iter().count();
@@ -1343,6 +1345,7 @@ pub fn boss_phase_system(
     mut shake: ResMut<Shake>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q_boss: Query<(&mut Enemy, &mut Boss)>,
+    q_live: Query<(), With<Enemy>>,
     q_horde: Query<&Enemy, (Without<Boss>, Without<crate::interact::Pot>)>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
@@ -1353,7 +1356,9 @@ pub fn boss_phase_system(
         .map(|(e, p, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: Vec3::ZERO })
         .collect();
     let mut rng = rand::thread_rng();
-    let sc = Scaling::for_run(&run, q_player.iter().count());
+    let sc = Scaling::for_run(&run, scaling::living_party(q_player.iter().map(|(_, _, ps)| ps)));
+    // the phase rings respect the live cap like every other spawn (L20)
+    let mut room = sc.live_cap.saturating_sub(q_live.iter().count());
 
     for (mut enemy, mut boss) in &mut q_boss {
         if enemy.hp <= 0.0 || enemy.max_hp <= 0.0 {
@@ -1391,7 +1396,8 @@ pub fn boss_phase_system(
         shake.add(SHAKE_ENEMY_SLAM_MAX);
 
         // encirclement burst: a ring of adds crests the horizon around the player
-        let ring = 8 + want as usize * 3;
+        let ring = (8 + want as usize * 3).min(room);
+        room -= ring;
         // Encircle whoever this boss is closest to; if nobody is up, skip the ring but
         // keep the enrage above — phases must not depend on finding a player.
         let Some(victim) = crate::player::nearest_astronaut(enemy.dir, &snaps, planet.radius) else {
@@ -1557,7 +1563,7 @@ pub fn debug_spawn_boss(
     planet: Res<CurrentPlanet>,
     mut run: ResMut<RunState>,
     q_player: Query<&Player, With<crate::player::LocalPlayer>>,
-    q_party: Query<(), With<Player>>,
+    q_party: Query<&crate::run::PlayerState, With<Player>>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     if !keys.just_pressed(KeyCode::KeyB) {
@@ -1568,7 +1574,7 @@ pub fn debug_spawn_boss(
         crate::content::planets::PlanetKind::Moon => BossKind::Craterpillar,
         _ => BossKind::Anubot,
     };
-    let sc = Scaling::for_run(&run, q_party.iter().count());
+    let sc = Scaling::for_run(&run, scaling::living_party(q_party.iter()));
     spawn_boss(&mut commands, &mut meshes, &assets, &planet, p.dir, kind, &sc);
     run.boss_spawned = true;
     banners.write(crate::messages::BannerMsg(format!("[DEV] {} SUMMONED", kind.def().name)));
@@ -2249,7 +2255,7 @@ pub fn enemy_projectiles(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    q_player: Query<(Entity, &Transform), With<Player>>,
+    q_player: Query<(Entity, &Transform, &crate::run::PlayerState), With<Player>>,
     mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform, Option<&mut crate::bestiary::CurveShot>), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
     particles: Option<Res<ParticleAssets>>,
@@ -2259,7 +2265,8 @@ pub fn enemy_projectiles(
     if dt <= 0.0 {
         return;
     }
-    let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
+    // a Beacon is no bullet shield: shots pass over the downed (L18)
+    let ppos: Vec<(Entity, Vec3)> = q_player.iter().filter(|(_, _, ps)| !ps.dead).map(|(e, t, _)| (e, t.translation)).collect();
     for (e, mut p, mut tf, curve) in &mut q {
         p.life -= dt;
         if p.life <= 0.0 {

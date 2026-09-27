@@ -21,7 +21,7 @@
 use crate::config::*;
 use crate::content::planets::{FloraStyle, PlanetKind};
 use crate::enemies::{EnemyAssets, SpatialHash, Telegraph};
-use crate::messages::{HitMsg, PlayerHitMsg, Sfx, SfxMsg};
+use crate::messages::{HitBy, HitMsg, PlayerHitMsg, Sfx, SfxMsg};
 use crate::planet::{CurrentPlanet, StageScoped};
 use crate::player::{LocalPlayer, Player};
 use crate::run::scaling::Scaling;
@@ -165,7 +165,7 @@ pub fn spore_sim(
                 let off = pos - at;
                 if off.length() < SPORE_RADIUS {
                     let out = (off - b.dir * off.dot(b.dir)).normalize_or_zero();
-                    hits.write(HitMsg { source: None, target: e, amount: SPORE_ENEMY_DAMAGE * sc.hp, crit: false, knock: out * 14.0, weapon: None });
+                    hits.write(HitMsg { source: None, target: e, amount: SPORE_ENEMY_DAMAGE * sc.hp, crit: false, knock: out * 14.0, by: HitBy::Other });
                     telemetry.spore_enemy_hits += 1;
                 }
             }

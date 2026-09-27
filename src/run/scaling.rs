@@ -68,6 +68,13 @@ pub fn difficulty_points(run: &RunState) -> f32 {
     run.difficulty.max(0.0) * DIFFICULTY_POINTS_PER_UNIT + (tier - 1.0) * TIER_DIFFICULTY_POINTS
 }
 
+/// How many astronauts count toward the §11 party scaling: the ones still standing. A
+/// downed or claimed teammate no longer keeps the horde at full party size, nor a boss that
+/// spawns meanwhile at a squad's HP (KNOWN_ISSUES L17). Never below one.
+pub fn living_party<'a>(sheets: impl Iterator<Item = &'a super::PlayerState>) -> usize {
+    sheets.filter(|ps| !ps.dead).count().max(1)
+}
+
 /// Multipliers for one moment of the run.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Scaling {
@@ -87,6 +94,8 @@ pub struct Scaling {
     pub boss_dmg: f32,
     /// Party multiplier alone.
     pub party_spawn: f32,
+    /// The §11 per-enemy HP multiplier alone (already in `hp`; `boss_hp` has its own).
+    pub party_hp: f32,
     /// On top of everything above, for The Static's ghosts only: HP, damage and spawn-rate
     /// multipliers (The Static Radio makes it "angrier", §7).
     pub static_hp: f32,
@@ -105,10 +114,14 @@ impl Scaling {
         let depth_dmg = 1.0 + SCALE_DMG_D * d;
         let delta_hp = 1.0 + SCALE_HP_DELTA * delta;
         let delta_dmg = 1.0 + SCALE_DMG_DELTA * delta;
-        let party_spawn = PARTY_SPAWN_SCALE[i.party.clamp(1, PARTY_SPAWN_SCALE.len()) - 1];
+        let seat = i.party.clamp(1, PARTY_SPAWN_SCALE.len()) - 1;
+        let party_spawn = PARTY_SPAWN_SCALE[seat];
+        // §11: a fuller ring of slightly tougher foes; bosses grow sub-linearly
+        let party_hp = PARTY_HP_SCALE[seat];
+        let party_boss = PARTY_BOSS_HP_SCALE[seat];
         let density = i.density.clamp(ASSIST_DENSITY_MIN, 1.0);
         Self {
-            hp: SCALE_HP_BASE * (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp,
+            hp: SCALE_HP_BASE * (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp * party_hp,
             dmg: SCALE_DMG_BASE * (1.0 + SCALE_DMG_T * t) * depth_dmg * i.planet * delta_dmg,
             spawn: (1.0 + SCALE_RATE_T * t)
                 * (1.0 + SCALE_RATE_D * d)
@@ -117,9 +130,10 @@ impl Scaling {
                 * density,
             elite_chance: (ELITE_CHANCE_T * t + ELITE_CHANCE_D * d + ELITE_CHANCE_DELTA * delta)
                 .clamp(0.0, ELITE_CHANCE_CAP),
-            boss_hp: depth_hp * i.planet * delta_hp,
+            boss_hp: depth_hp * i.planet * delta_hp * party_boss,
             boss_dmg: depth_dmg * i.planet * delta_dmg,
             party_spawn,
+            party_hp,
             static_hp: if i.static_radio { STATIC_RADIO_HP } else { 1.0 },
             static_dmg: if i.static_radio { STATIC_RADIO_DMG } else { 1.0 },
             static_rate: if i.static_radio { STATIC_RADIO_RATE } else { 1.0 },
@@ -236,6 +250,25 @@ pub fn self_check() -> Result<(), String> {
         || s0.live_cap != ENEMY_CAP
     {
         return Err("the density assist must scale spawn rate and live cap only".into());
+    }
+    // §11 party table: spawn 100/175/240/300 %, per-enemy HP 100/110/120/130 %, boss HP
+    // 100/165/225/285 % — and nothing else moves with the party.
+    for (n, (spawn, hp, boss)) in [(1.0, 1.0, 1.0), (1.75, 1.1, 1.65), (2.4, 1.2, 2.25), (3.0, 1.3, 2.85)].into_iter().enumerate() {
+        let solo = Scaling::new(p_inputs(base));
+        let squad = Scaling::new(ScalingInputs { party: n + 1, ..p_inputs(base) });
+        let close = |a: f32, b: f32| (a - b).abs() <= b.abs() * 1e-4;
+        if !close(squad.spawn, solo.spawn * spawn)
+            || !close(squad.hp, solo.hp * hp)
+            || !close(squad.boss_hp, solo.boss_hp * boss)
+            || squad.dmg != solo.dmg
+            || squad.elite_chance != solo.elite_chance
+            || squad.live_cap != (ENEMY_CAP as f32 * spawn) as usize
+        {
+            return Err(format!("party of {}: {squad:?} does not follow the §11 table", n + 1));
+        }
+    }
+    if Scaling::new(ScalingInputs { party: 9, ..base }).boss_hp != Scaling::new(ScalingInputs { party: 4, ..base }).boss_hp {
+        return Err("a party past four must scale as four".into());
     }
     // Rate_base walks the arc beats and never dips outside the breathing modifiers.
     if (spawn_rate_base(600.0, false, 0.0) - SPAWN_RATE_BEATS[0].1).abs() > 1e-4

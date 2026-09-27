@@ -326,7 +326,7 @@ pub fn lob_update(
                     amount: m.damage * cm * elite,
                     crit,
                     knock: away.normalize_or_zero() * 8.0,
-                    weapon: Some(m.weapon),
+                    by: HitBy::Weapon(m.weapon),
                 });
                 n += 1;
             }
@@ -416,7 +416,7 @@ pub fn hug_pulse(
         let share = HUG_EDGE_SHARE + (1.0 - HUG_EDGE_SHARE) * close;
         let (cm, crit) = crate::combat::roll_crit(crit_ch, stats.crit_damage, rng);
         let elite = if *elite { stats.elite_damage } else { 1.0 };
-        hits.write(HitMsg { source: Some(owner), target: *e, amount: dmg * share * crowd * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(kind) });
+        hits.write(HitMsg { source: Some(owner), target: *e, amount: dmg * share * crowd * cm * elite, crit, knock: Vec3::ZERO, by: HitBy::Weapon(kind) });
     }
     tm.hug_hits += n;
     // the cling you can see: short arcs to the nearest few huggers
@@ -478,7 +478,7 @@ pub fn discharge_nova(
             amount: dmg * FULL_DISCHARGE_NOVA_MULT * cm * elite,
             crit,
             knock: away * FULL_DISCHARGE_KNOCK * stats.knockback,
-            weapon: Some(kind),
+            by: HitBy::Weapon(kind),
         });
         tm.nova_hits += 1;
     }
@@ -558,7 +558,7 @@ pub fn fire_cone(
             amount: v.dmg * cm * elite,
             crit,
             knock: vt * WHOOPEE_KNOCK * stats.knockback,
-            weapon: Some(v.kind),
+            by: HitBy::Weapon(v.kind),
         });
         ax.tm.cone_hits += 1;
     }
@@ -657,7 +657,7 @@ pub fn repulsor_update(
                 amount: rp.damage * cm * elite,
                 crit,
                 knock: away * BROWN_NOTE_KNOCK * knock_k,
-                weapon: Some(rp.weapon),
+                by: HitBy::Weapon(rp.weapon),
             });
             tm.repulsor_hits += 1;
         }
@@ -870,7 +870,7 @@ pub fn disc_update(
             amount: d.damage * cm * elite,
             crit,
             knock: d.heading * 3.0 * ps.stats.knockback,
-            weapon: Some(d.weapon),
+            by: HitBy::Weapon(d.weapon),
         });
         tm.disc_hits += 1;
         d.hit_cd.insert(te, DISC_REHIT_SECS);
@@ -983,7 +983,7 @@ pub fn fire_toll(
             amount: v.dmg * cm * elite,
             crit,
             knock: away * 3.0,
-            weapon: Some(v.kind),
+            by: HitBy::Weapon(v.kind),
         });
         commands.entity(e).try_insert(BellMark { secs: BELL_MARK_SECS });
         ax.tm.marks += 1;
@@ -1195,7 +1195,7 @@ pub fn wisp_update(
                         amount: w.damage,
                         crit: false,
                         knock: w.heading * 2.0,
-                        weapon: Some(WeaponKind::Angelus),
+                        by: HitBy::Weapon(WeaponKind::Angelus),
                     });
                     w.hit_cd = WISP_HIT_SECS;
                     tm.wisp_hits += 1;
@@ -1412,7 +1412,7 @@ pub fn tether_update(
                     amount: dmg * cm * elite,
                     crit,
                     knock: offset.normalize_or_zero() * 5.0 * ps.stats.knockback,
-                    weapon: Some(weapon),
+                    by: HitBy::Weapon(weapon),
                 });
                 tm.yoyo_hits += 1;
                 hit_any = true;
@@ -1452,7 +1452,7 @@ pub fn tether_update(
             for te in cut {
                 let (cm, crit) = crate::combat::roll_crit(ps.crit_chance(), ps.crit_damage(), &mut rng);
                 let elite = if enemies.get(te).is_ok_and(|en| en.elite) { ps.stats.elite_damage } else { 1.0 };
-                hits.write(HitMsg { source: Some(owner), target: te, amount: dmg * cm * elite, crit, knock: Vec3::ZERO, weapon: Some(weapon) });
+                hits.write(HitMsg { source: Some(owner), target: te, amount: dmg * cm * elite, crit, knock: Vec3::ZERO, by: HitBy::Weapon(weapon) });
                 body.cut_cd.insert(te, SWORDYO_REHIT_SECS);
                 tm.garrote_hits += 1;
             }

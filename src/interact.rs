@@ -507,7 +507,7 @@ pub fn charge_shrines(
     mut phase: ResMut<RunPhase>,
     mut panel: ResMut<ChoicePanel>,
     save: Res<MetaSave>,
-    q_player: Query<&Transform, With<Player>>,
+    q_player: Query<(&Transform, &PlayerState), With<Player>>,
     mut q: Query<(&mut ChargeShrine, &mut Transform), Without<Player>>,
     mut sfx: MessageWriter<SfxMsg>,
     mut banners: MessageWriter<BannerMsg>,
@@ -516,7 +516,8 @@ pub fn charge_shrines(
     if dt <= 0.0 || *phase != RunPhase::Playing {
         return;
     }
-    let ppos: Vec<Vec3> = q_player.iter().map(|t| t.translation).collect();
+    // only astronauts standing charge a ring: not a Beacon rolling through it (L19)
+    let ppos: Vec<Vec3> = q_player.iter().filter(|(_, ps)| !ps.dead).map(|(t, _)| t.translation).collect();
     let mut rng = rand::thread_rng();
     for (mut s, mut tf) in &mut q {
         if s.done {
@@ -572,6 +573,11 @@ pub fn interact_system(
     }
     let Ok((actor_entity, ptf)) = q_player.single() else { return };
     let Ok(mut ps) = q_ps.single_mut() else { return };
+    // a Beacon can't open, buy or teleport (§11: the downed wait for a teammate)
+    if ps.dead {
+        prompt.0 = None;
+        return;
+    }
     let mut rng = rand::thread_rng();
 
     let mut nearest: Option<(Entity, f32)> = None;

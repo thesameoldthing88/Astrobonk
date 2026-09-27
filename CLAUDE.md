@@ -77,7 +77,8 @@ to the crash site with Hades-style persistence; cartoon-spooky tone (E10+); toon
 `sphere` math · `planet` worldgen/props/lighting · `player` controller+camera+rig ·
 `enemies` horde/bosses/hazards · `combat` weapons/damage · `pickups` drops/magnet ·
 `run` run+player state, upgrade/loot rolls, item grades · `items` what the §7 items DO (procs,
-cursed levers, the one death-save resolver) · `director` clock/stages/results · `interact`
+cursed levers, the one death-save resolver) · `coop` §11 Tumbling Beacon/revive/drop-in/friendly
+physics · `duos` STATIC CASCADE + named duo combos · `director` clock/stages/results · `interact`
 chests/shrines/vendors · `events_world` planetary events · `comet` Comet Combo · `content/`
 data tables · `save` meta save · `ui/` hud/panels/menus/settings/numbers · `fx` shake/hitstop/
 particles · `toon` the toon look (cel-lighting patch of bevy_pbr, ink/rim pass, per-world grade) · `audio`/`music` synth · `net` transport/replication · `netenemy` horde/boss/hazard/

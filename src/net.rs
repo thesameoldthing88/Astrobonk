@@ -55,7 +55,10 @@ use std::time::{Duration, SystemTime};
 // P08 (merged after P12): kind codes 9-15 (the §9 batch-1 enemies), five appended
 // HazardEvents (OwnedTelegraph, CurveBolt, Uppercut, Tracked, MimicSprung) and the
 // EnemyStateMsg lane -> _B.
-pub const PROTOCOL_ID: u64 = 0xA570B0_B;
+// P18 (merged after P08): the down/revive/drop-in fields in PlayerVitals, the squad tally
+// and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots appended to the hazard
+// lane (Revived, Shove, Cascade, Duo, DropIn) -> _C.
+pub const PROTOCOL_ID: u64 = 0xA570B0_C;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -178,15 +181,40 @@ pub const ITEMVIS_ANTIPODE_BOSS: u8 = 64;
 pub const ITEMVIS_INSURED: u8 = 128;
 
 /// Replicated teammate vitals — what another player's HUD marker needs to show.
-#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug)]
+#[derive(Component, Serialize, Deserialize, Clone, Copy, Debug, Default)]
 pub struct PlayerVitals {
     pub hp: f32,
     pub max_hp: f32,
     pub level: u32,
+    /// Down: a Tumbling Beacon (§11) — or claimed by The Static (`VITALS_CLAIMED`).
     pub down: bool,
     /// "One more chance" revives spent (§13). A counter, so a joiner's HUD sees the token
     /// go and announces the revive even if a replication update in between was dropped.
     pub revives: u8,
+    // ---- appended (P18): the §11 co-op rules ----
+    /// The Static Meter while down, 0..=255 of full.
+    pub static_meter: u8,
+    /// A teammate's revive in progress, 0..=255 of done.
+    pub revive: u8,
+    /// VITALS_* bits.
+    pub status: u8,
+    /// Drop-in grace left, whole seconds (the autopilot's clock; the HUD shows it).
+    pub grace: u8,
+    /// The level the host seated this astronaut at as a drop-in (0 = there from the start).
+    /// The joiner levels its own sheet up to it (`coop::adopt_drop_in`).
+    pub drop_level: u8,
+}
+
+/// Claimed by The Static: out, and unseen, until the next teleporter.
+pub const VITALS_CLAIMED: u8 = 1;
+/// Hero's Adrenaline is running (the joiner's own prediction runs faster with it).
+pub const VITALS_ADRENALINE: u8 = 2;
+/// A teammate's cryo field is chilling this astronaut (slower, predicted too).
+pub const VITALS_CHILLED: u8 = 4;
+
+/// Quantize a 0..1 meter for the wire.
+fn meter_code(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Host -> client: "you are player N". The client cannot infer this: replicon 0.40 exposes
@@ -261,6 +289,23 @@ pub struct RunSnapMsg {
     /// joiner's HUD shows the ASSISTED tag and its "one more chance" token from these.
     pub assist: crate::save::AssistOptions,
     pub assisted: bool,
+    // ---- appended (P18) ----
+    /// STATIC CASCADE's link charge, 0..1 (every HUD shows it while two storm-callers link).
+    pub cascade_charge: f32,
+    /// The squad's §11 feats so far (`RunState::feats`): a joiner's lobby line names them
+    /// when the run ends. A handful of records at most.
+    pub feats: Vec<FeatRec>,
+}
+
+/// One `duos::SquadFeat` on the wire: explicit codes (`CoopFeat::code`, `hero_code`).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug)]
+pub struct FeatRec {
+    pub feat: u8,
+    pub a: u8,
+    pub a_hero: u8,
+    pub b: u8,
+    pub b_hero: u8,
+    pub count: u16,
 }
 
 /// HOST -> CLIENT: the session is over. Sent just before the host drops the connection, so
@@ -517,6 +562,18 @@ pub enum HazardEvent {
     /// The disguised chest at `dir` was a Mimic: the joiner drops its copy of the chest (the
     /// monster itself streams as a crowd enemy).
     MimicSprung { dir: [f32; 3] },
+    // ---- appended (P18): co-op one-shots, see `coop::CoopFx` ----
+    /// `rescuer` hauled `downed` off its Tumbling Beacon at `dir`.
+    Revived { rescuer: u8, downed: u8, dir: [f32; 3] },
+    /// Friendly physics moved astronaut `target` by `vel` (m/s along the ground) and `pop`
+    /// (m/s up) — the joiner it names applies it to its own predicted body.
+    Shove { target: u8, vel: [f32; 3], pop: f32 },
+    /// STATIC CASCADE between `a` and `b`, round the great circle about `axis`.
+    Cascade { a: u8, b: u8, axis: [f32; 3] },
+    /// A named duo (`CoopFeat::code`) landed at `dir`; `first` for its pair this run.
+    Duo { feat: u8, a: u8, b: u8, dir: [f32; 3], first: bool },
+    /// Drop-in `owner` landed from orbit at `dir`, at `level`.
+    DropIn { owner: u8, level: u8, dir: [f32; 3] },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -889,6 +946,12 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
+                crate::coop::log_coop
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
                 send_local_input
                     // Must be the LAST touch of InputIntent before movement — anything
                     // that writes intent after this point would move us locally but
@@ -1021,6 +1084,19 @@ fn push_run_snapshot(
             static_radio: run.static_radio,
             assist: run.assist,
             assisted: run.assisted,
+            cascade_charge: run.cascade_charge,
+            feats: run
+                .feats
+                .iter()
+                .map(|f| FeatRec {
+                    feat: f.feat.code(),
+                    a: f.a.0,
+                    a_hero: hero_code(f.a.1),
+                    b: f.b.0,
+                    b_hero: hero_code(f.b.1),
+                    count: f.count.min(u16::MAX as u32) as u16,
+                })
+                .collect(),
         },
     });
 }
@@ -1078,6 +1154,19 @@ fn apply_run_snapshot(
         run.static_radio = m.static_radio;
         run.assist = m.assist;
         run.assisted = m.assisted;
+        run.cascade_charge = m.cascade_charge;
+        run.feats = m
+            .feats
+            .iter()
+            .filter_map(|f| {
+                Some(crate::duos::SquadFeat {
+                    feat: crate::content::duos::CoopFeat::from_code(f.feat)?,
+                    a: (f.a, hero_from_code(f.a_hero)),
+                    b: (f.b, hero_from_code(f.b_hero)),
+                    count: f.count as u32,
+                })
+            })
+            .collect();
         sync.seeded = true;
         if first {
             info!("NET adopted host run: seed={} stage={}", m.run_seed, m.stage);
@@ -1183,6 +1272,13 @@ fn adopt_my_vitals(
         if pid.0 == my_id {
             ps.hp = v.hp;
             ps.dead = v.down;
+            // §11: the Beacon's meters, and the timers our own prediction runs with
+            ps.claimed = v.status & VITALS_CLAIMED != 0;
+            ps.static_meter = v.static_meter as f32 / 255.0;
+            ps.revive = v.revive as f32 / 255.0;
+            ps.adrenaline = if v.status & VITALS_ADRENALINE != 0 { crate::config::ADRENALINE_SECS } else { 0.0 };
+            ps.chill = if v.status & VITALS_CHILLED != 0 { crate::config::FRIENDLY_CHILL_SECS } else { 0.0 };
+            ps.grace = v.grace as f32;
             // The host spent our "one more chance": say so here, where the player is.
             if v.revives as u32 > ps.revives {
                 banners.write(crate::messages::BannerMsg("ONE MORE CHANCE!".into()));
@@ -1528,13 +1624,38 @@ pub(crate) fn send_local_input(
 }
 
 /// Dev harness: override the local intent with a slow circle-strafe. Runs after the
-/// keyboard gather, so it stands in for a human holding W and easing the stick over.
-pub(crate) fn bot_input(time: Res<Time>, mut q: Query<(&crate::player::Player, &mut InputIntent), With<LocalPlayer>>) {
-    let Ok((p, mut intent)) = q.single_mut() else { return };
+/// keyboard gather, so it stands in for a human holding W and easing the stick over. It
+/// answers a teammate's Beacon (§11) the way a player would — walks to it and stands in its
+/// ring — so a two-instance run exercises a real revive over the wire.
+#[allow(clippy::type_complexity)]
+pub(crate) fn bot_input(
+    time: Res<Time>,
+    mut q: Query<(&crate::player::Player, &mut InputIntent, &Transform, &crate::run::PlayerState), With<LocalPlayer>>,
+    squad: Query<
+        (&Transform, Option<&crate::run::PlayerState>, Option<&PlayerVitals>),
+        (Or<(With<crate::player::Player>, With<crate::remote::RemoteAstronaut>)>, Without<LocalPlayer>),
+    >,
+) {
+    let Ok((p, mut intent, tf, ps)) = q.single_mut() else { return };
     let (t, b) = crate::sphere::tangent_frame(p.dir);
+    intent.forward = t;
+    let beacon = squad
+        .iter()
+        .filter(|(_, sps, v)| match (sps, v) {
+            (Some(s), _) => s.dead && !s.claimed,
+            (None, Some(v)) => v.down && v.status & VITALS_CLAIMED == 0,
+            _ => false,
+        })
+        .map(|(btf, ..)| btf.translation)
+        .min_by(|a, b| a.distance_squared(tf.translation).total_cmp(&b.distance_squared(tf.translation)));
+    if let (Some(bpos), false) = (beacon, ps.dead) {
+        let v = bpos - tf.translation;
+        let flat = v - p.dir * v.dot(p.dir);
+        intent.wish = if flat.length() > 1.2 { flat.normalize_or_zero() } else { Vec3::ZERO };
+        return;
+    }
     let a = time.elapsed_secs() * 0.35;
     intent.wish = (t * a.cos() + b * a.sin()).normalize_or_zero();
-    intent.forward = t;
 }
 
 /// Dev harness: once a second, print where every astronaut actually is. This is how we
@@ -1637,7 +1758,7 @@ fn seat_joining_players(
     save: Option<Res<crate::save::MetaSave>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    existing: Query<&PlayerId>,
+    existing: Query<(&PlayerId, &crate::run::PlayerState)>,
     mut banners: MessageWriter<crate::messages::BannerMsg>,
 ) {
     let mut respawn: Vec<(u8, Entity)> = Vec::new();
@@ -1649,7 +1770,9 @@ fn seat_joining_players(
     // despawns peers and respawns only player 0. Without this reconciliation a teammate
     // vanishes for good after the first planet — and on the client their rig disappears
     // with the replicated entity, which looks exactly like a netcode fault.
-    let alive: Vec<u8> = existing.iter().map(|pid| pid.0).collect();
+    let alive: Vec<u8> = existing.iter().map(|(pid, _)| pid.0).collect();
+    // §11 drop-in: a peer seated after the squad has started lands at half its average level
+    let squad_levels: Vec<u32> = existing.iter().map(|(_, ps)| ps.level).collect();
     // A peer's sheet is THEIR build: the host must not fold its own meta tomes into it,
     // even for the moment before their first PlayerBuildMsg lands (with a maxed Tome of
     // Health the placeholder would stand 120 HP taller than the peer really is).
@@ -1678,7 +1801,13 @@ fn seat_joining_players(
             slots.heroes.insert(id, hero);
         }
         let hero = slots.hero_for(id, run.character);
-        crate::player::spawn_player(
+        let drop_in = crate::coop::drop_in_level(&run, &squad_levels);
+        let sheet = drop_in.map(|level| {
+            let mut ps = crate::run::PlayerState::new(hero, &peer_save());
+            crate::coop::drop_in_sheet(&mut ps, level, &peer_save());
+            ps
+        });
+        let body = crate::player::spawn_player(
             &mut commands,
             &mut meshes,
             &mut materials,
@@ -1688,10 +1817,14 @@ fn seat_joining_players(
             id,
             hero,
             false, // remote: no LocalPlayer marker, no camera, driven by their input
-            None,
+            sheet,
         );
-        info!("NET seated client {client} as player {id} ({})", hero.def().name);
-        crate::playlog::line(format!("NET seated client {client} as player {id} ({})", hero.def().name));
+        if drop_in.is_some() {
+            commands.entity(body).insert(crate::coop::OrbitalDrop::default());
+        }
+        let how = drop_in.map(|l| format!(", dropping in at level {l}")).unwrap_or_default();
+        info!("NET seated client {client} as player {id} ({}){how}", hero.def().name);
+        crate::playlog::line(format!("NET seated client {client} as player {id} ({}){how}", hero.def().name));
         banners.write(crate::messages::BannerMsg(format!("PLAYER {} JOINED", id + 1)));
     }
 
@@ -1751,7 +1884,7 @@ fn unseat_leaving_players(
 /// HOST. Route each client's intent onto the astronaut it owns. This is the whole point
 /// of `InputIntent`: from here down, a remote player is indistinguishable from the local
 /// one, so movement/physics/combat need no networking awareness at all.
-fn apply_remote_input(
+pub(crate) fn apply_remote_input(
     slots: Res<PeerSlots>,
     mut incoming: MessageReader<FromClient<PlayerInputMsg>>,
     mut astronauts: Query<(&PlayerId, &mut InputIntent), Without<LocalPlayer>>,
@@ -2016,6 +2149,13 @@ fn push_player_vitals(
         v.level = ps.level;
         v.down = ps.dead;
         v.revives = ps.revives.min(u8::MAX as u32) as u8;
+        v.static_meter = meter_code(ps.static_meter);
+        v.revive = meter_code(ps.revive);
+        v.status = (if ps.claimed { VITALS_CLAIMED } else { 0 })
+            | (if ps.adrenaline > 0.0 { VITALS_ADRENALINE } else { 0 })
+            | (if ps.chill > 0.0 { VITALS_CHILLED } else { 0 });
+        v.grace = ps.grace.ceil().clamp(0.0, 255.0) as u8;
+        v.drop_level = ps.drop_level.min(u8::MAX as u32) as u8;
     }
 }
 
@@ -2084,6 +2224,7 @@ fn announce_run_over(
 /// CLIENT: the host's run ended. Back to the menu, still connected, to wait for its next
 /// one — which `client_follow_host_run` enters like the first, from a fresh snapshot.
 fn receive_run_over(
+    run: Res<crate::run::RunState>,
     mut msgs: MessageReader<RunOverMsg>,
     mut sync: ResMut<RunSync>,
     mut note: ResMut<crate::ui::menus::CoopNote>,
@@ -2100,7 +2241,9 @@ fn receive_run_over(
         RUN_OVER_ABANDONED => "the host abandoned the run.",
         _ => "the squad got BONKED.",
     };
-    note.0 = format!("RUN OVER: {why}\nWaiting for the host's next run...   JOIN CO-OP again leaves the session");
+    // §11: the squad's callouts, as the host's results screen names them
+    let squad: String = crate::director::squad_lines(&run.feats).iter().take(4).map(|l| format!("\n{l}")).collect();
+    note.0 = format!("RUN OVER: {why}{squad}\nWaiting for the host's next run...   JOIN CO-OP again leaves the session");
     // Forget the run outright: nothing of it may seed the next world.
     *sync = RunSync { min_gen: m.run_gen + 1, ..default() };
     // A panel or the pause menu may be up; the menu must not inherit a stopped clock.
@@ -2430,7 +2573,7 @@ fn reset_after_session(
 //    Repro: headless `--daynight [--coop2] [--planet …]`, `--hazards --planet mars|darkmoon
 //    [--coop2]`; windowed coop.sh … --planet darkmoon --dev --staticnow and compare the
 //    two sides' SKY / GIMMICK lines.
-// 2i. NEW ENEMIES (P08, see bestiary.rs) — the seven §9 batch-1 kinds are ordinary crowd
+// 2j. NEW ENEMIES (P08, see bestiary.rs) — the seven §9 batch-1 kinds are ordinary crowd
 //    records (kind codes 9-15). What a client cannot derive from position rides a new
 //    ENEMY-STATE lane (EnemyStateMsg, 7-byte records at NET_ENEMY_STATE_HZ, only for ids
 //    already resident on that client): a Trencher's cycle (so the proxy sinks under the
@@ -2444,6 +2587,25 @@ fn reset_after_session(
 //    Everything that hurts, and the Mimic's refund to the purse that paid, is the host's.
 //    Repro: headless `--bestiary [--coop2] [--planet mars]`; windowed coop.sh … --dev
 //    --enemies all and compare the joiner's `states=` count on its NETENEMY line.
+// 2k. CO-OP RULES (P18, see coop.rs / duos.rs) — the §11 Tumbling Beacon, drop-in, friendly
+//    physics and the co-op set-pieces are simulated by the host for every astronaut. What a
+//    joiner must see: PlayerVitals carries down / claimed / Static Meter / revive progress /
+//    Hero's Adrenaline / friendly chill / drop-in grace and level (its own are adopted into its
+//    sheet, so its prediction rolls a Beacon, runs with the adrenaline and slows in a chill
+//    like the host's copy); RunSnapMsg carries STATIC CASCADE's charge and the squad tally;
+//    the hazard lane carries the one-shots (HazardEvent::Revived / Shove / Cascade / Duo /
+//    DropIn -> coop::CoopFxMsg, one presentation path). A Shove names its target, and that
+//    joiner applies the same impulse to its predicted body. A drop-in is decided on the seat
+//    (`coop::drop_in_level`), rides the peer's first vitals, and the joiner levels its own
+//    sheet up to it (its cards, its screen); while its player is idle the joiner's machine
+//    steers it (`coop::autopilot_local`) and, behind a panel, the host does
+//    (`coop::autopilot_peers`). Repro:
+//        headless: --revive --coop2 | --cascade --coop2 | --duos --coop2 | --dropin | --coop4
+//        windowed: HOST_ARGS="--dev --downpeer" coop.sh 100 /tmp/x            (revive over the wire)
+//                  CLIENTS=3 coop.sh 90 /tmp/x                                  (a squad of four)
+//                  JOIN_DELAY=40 CLIENT_BOT=0 coop.sh 100 /tmp/x                (drop-in + autopilot)
+//                  HOST_ARGS="--splitsquad" coop.sh 80 /tmp/x --dev --give stormcore (STATIC CASCADE)
+//    and compare both sides' COOP lines (a joiner's `fx_seen` counts the one-shots it got).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with
@@ -2452,6 +2614,6 @@ fn reset_after_session(
 //    gift here: the far horizon is naturally low-detail. Prototype this with two local
 //    instances BEFORE building any lobby UI, because it decides whether the design holds.
 //
-// 4. CO-OP RULES: shared XP grant on gem pickup, per-player gold, revives (the Tumbling
-//    Beacon), enemy scaling by player count.
+// 4. CO-OP RULES: shared XP grant on gem pickup, per-player gold — and (P18, 2i) revives
+//    (the Tumbling Beacon), enemy scaling by player count, drop-in, friendly physics.
 // ─────────────────────────────────────────────────────────────────────────────

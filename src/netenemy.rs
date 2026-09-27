@@ -602,15 +602,18 @@ fn stream_hazards(
     // line entity -> its beamer's NetId, because by the time a removal is seen the line
     // (and possibly the beamer) is gone and can no longer be asked
     mut live_lines: Local<HashMap<Entity, u16>>,
-    // §7 item one-shots (a yo-yo throw, a singularity, an ignition, a death-save): the item
-    // systems already say them as local messages, so they ride this lane as-is
-    mut item_fx: MessageReader<crate::items::ItemFxMsg>,
-    // §4 movement-tech one-shots (a Slam landing, a blink), the same way
-    mut tech_fx: MessageReader<crate::techs::TechFxMsg>,
-    // §6/§12 weapon one-shots (an evolution's fanfare, THE ANGELUS's wisps), the same way
-    mut weapon_fx: MessageReader<crate::arsenal::WeaponFxMsg>,
-    // §9 new-enemy one-shots (an uppercut, a tracker, a sprung mimic), the same way
-    mut bestiary_fx: MessageReader<crate::bestiary::BestiaryFxMsg>,
+    // The one-shots other systems already say as local messages ride this lane as-is: §7 items
+    // (a yo-yo throw, a singularity, an ignition, a death-save), §4 movement techs (a Slam
+    // landing, a blink), §6/§12 weapons (an evolution's fanfare, THE ANGELUS's wisps), §9 new
+    // enemies (an uppercut, a tracker, a sprung mimic), §11 co-op (a revive, a shove, STATIC
+    // CASCADE, a duo, a drop-in landing)
+    (mut item_fx, mut tech_fx, mut weapon_fx, mut bestiary_fx, mut coop_fx): (
+        MessageReader<crate::items::ItemFxMsg>,
+        MessageReader<crate::techs::TechFxMsg>,
+        MessageReader<crate::arsenal::WeaponFxMsg>,
+        MessageReader<crate::bestiary::BestiaryFxMsg>,
+        MessageReader<crate::coop::CoopFxMsg>,
+    ),
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
     use crate::items::ItemFx;
@@ -649,6 +652,16 @@ fn stream_hazards(
             BestiaryFx::Uppercut { dir, launched } => HazardEvent::Uppercut { dir: dir.to_array(), launched },
             BestiaryFx::Tracked { owner, secs } => HazardEvent::Tracked { owner, secs },
             BestiaryFx::MimicSprung { dir } => HazardEvent::MimicSprung { dir: dir.to_array() },
+        });
+    }
+    for m in coop_fx.read().filter(|m| !m.from_wire) {
+        use crate::coop::CoopFx;
+        events.push(match m.fx {
+            CoopFx::Revived { rescuer, downed, dir } => HazardEvent::Revived { rescuer, downed, dir: dir.to_array() },
+            CoopFx::Shove { target, vel, pop } => HazardEvent::Shove { target, vel: vel.to_array(), pop },
+            CoopFx::Cascade { a, b, axis } => HazardEvent::Cascade { a, b, axis: axis.to_array() },
+            CoopFx::Duo { feat, a, b, dir, first } => HazardEvent::Duo { feat: feat.code(), a, b, dir: dir.to_array(), first },
+            CoopFx::DropIn { owner, level, dir } => HazardEvent::DropIn { owner, level, dir: dir.to_array() },
         });
     }
     // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
@@ -743,6 +756,7 @@ fn receive_hazards(
     mut weapon_fx: MessageWriter<crate::arsenal::WeaponFxMsg>,
     flora: Option<Res<crate::gimmicks::WorldFlora>>,
     mut bestiary_fx: MessageWriter<crate::bestiary::BestiaryFxMsg>,
+    mut coop_fx: MessageWriter<crate::coop::CoopFxMsg>,
 ) {
     use crate::bestiary::{BestiaryFx, BestiaryFxMsg};
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
@@ -803,6 +817,20 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 bestiary_fx.write(BestiaryFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the co-op one-shots, for `coop::coop_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::Revived { rescuer, downed, dir } => Some(crate::coop::CoopFx::Revived { rescuer, downed, dir: Vec3::from(dir) }),
+                HazardEvent::Shove { target, vel, pop } => Some(crate::coop::CoopFx::Shove { target, vel: Vec3::from(vel), pop }),
+                HazardEvent::Cascade { a, b, axis } => Some(crate::coop::CoopFx::Cascade { a, b, axis: Vec3::from(axis) }),
+                HazardEvent::Duo { feat, a, b, dir, first } => crate::content::duos::CoopFeat::from_code(feat)
+                    .map(|feat| crate::coop::CoopFx::Duo { feat, a, b, dir: Vec3::from(dir), first }),
+                HazardEvent::DropIn { owner, level, dir } => Some(crate::coop::CoopFx::DropIn { owner, level, dir: Vec3::from(dir) }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                coop_fx.write(crate::coop::CoopFxMsg { fx, from_wire: true });
                 continue;
             }
             match *ev {
@@ -924,7 +952,12 @@ fn receive_hazards(
                 | HazardEvent::Tracked { .. }
                 | HazardEvent::MimicSprung { .. }
                 | HazardEvent::Evolve { .. }
-                | HazardEvent::Wisp { .. } => {}
+                | HazardEvent::Wisp { .. }
+                | HazardEvent::Revived { .. }
+                | HazardEvent::Shove { .. }
+                | HazardEvent::Cascade { .. }
+                | HazardEvent::Duo { .. }
+                | HazardEvent::DropIn { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
@@ -1274,7 +1307,12 @@ fn client_stage_transition(
     // the next stage of the SAME run. A world from another seed means another run, and a
     // sheet from it (levels, gold, items) must not come along.
     let same_run = sync.built_for.map(|(seed, _)| seed) == Some(run.run_seed);
-    let carried = if same_run { mine.single().ok().cloned() } else { None };
+    let mut carried = if same_run { mine.single().ok().cloned() } else { None };
+    // the host rejoins everyone left down through the teleporter (§11) — so do we, rather
+    // than wear the old Beacon until its vitals catch up
+    if let Some(ps) = carried.as_mut() {
+        ps.rejoin();
+    }
     sync.built_for = Some((run.run_seed, stage));
 
     // Tear the old stage down. This eats our astronaut and every streamed proxy too —

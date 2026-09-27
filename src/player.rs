@@ -232,7 +232,7 @@ pub fn spawn_player(
     // Carried progression, when this astronaut already existed (a stage change). `None`
     // starts a fresh sheet. Without this, every player's build is wiped on teleport.
     carried: Option<PlayerState>,
-) {
+) -> Entity {
     let def = character.def();
     // fan players out around the drop point so they don't spawn inside each other
     let dir = if id == 0 {
@@ -243,6 +243,21 @@ pub fn spawn_player(
         crate::sphere::offset_dir(Vec3::Y, (t * a.cos() + b * a.sin()).normalize(), 3.5, planet.radius)
     };
     let pos = planet.surface_point(dir) + dir * PLAYER_HEIGHT;
+    // a carried sheet arrives through a teleporter: refill its per-stage grants
+    let sheet = carried
+        .map(|mut ps| {
+            ps.enter_stage();
+            ps
+        })
+        .unwrap_or_else(|| PlayerState::new(character, save));
+    // The replicated vitals start as the sheet says, not blank: a joiner reads its drop-in
+    // level from the very first copy of its body it receives (`coop::adopt_drop_in`).
+    let vitals = crate::net::PlayerVitals {
+        level: sheet.level,
+        drop_level: sheet.drop_level.min(u8::MAX as u32) as u8,
+        grace: sheet.grace.ceil().clamp(0.0, 255.0) as u8,
+        ..Default::default()
+    };
 
     let root = commands
         .spawn((
@@ -264,13 +279,7 @@ pub fn spawn_player(
                 squash_amt: 0.0,
                 lean: 0.0,
             },
-            // a carried sheet arrives through a teleporter: refill its per-stage grants
-            carried
-                .map(|mut ps| {
-                    ps.enter_stage();
-                    ps
-                })
-                .unwrap_or_else(|| PlayerState::new(character, save)),
+            sheet,
             PlayerId(id),
             InputIntent::default(),
             RigHero(character),
@@ -281,7 +290,7 @@ pub fn spawn_player(
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false, grinding: false, light: true },
-                crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false, revives: 0 },
+                vitals,
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
                 crate::net::NetItemVis::default(),
@@ -295,6 +304,7 @@ pub fn spawn_player(
         .insert_if(LocalPlayer, || is_local)
         .id();
     build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor, is_local);
+    root
 }
 
 /// Which hero's suit an astronaut's rig was built in. Compared against the sheet by
@@ -687,6 +697,11 @@ pub fn player_input(
     mut q: Query<(&mut Player, &mut PlayerState, &Transform, &InputIntent, &mut crate::techs::MoveTech)>,
 ) {
     for (mut p, mut run, ptf, intent, mut tech) in &mut q {
+    // A downed astronaut is a Tumbling Beacon: no input moves it, only the ground
+    // (`coop::tumble`) — and nobody revives themselves (§11).
+    if run.dead {
+        continue;
+    }
     let dt = time.delta_secs();
     let wish = intent.wish;
 
@@ -865,6 +880,11 @@ pub fn player_physics(
             procs.hover_left = ANTIGRAV_HOVER_SECS;
             riding = true;
         }
+    }
+
+    // Down: the Tumbling Beacon rolls down the fall line instead of being driven (§11).
+    if run.dead {
+        crate::coop::tumble(&mut p, &planet, run.claimed, dt);
     }
 
     if !riding {
@@ -1188,11 +1208,16 @@ pub fn camera_rig(
     planet: Res<CurrentPlanet>,
     phase: Res<RunPhase>,
     save: Res<crate::save::MetaSave>,
-    q_player: Query<(Entity, &Player, &Transform), (With<LocalPlayer>, Without<PlayerRig>)>,
+    q_player: Query<(Entity, &Player, &Transform, &PlayerState), (With<LocalPlayer>, Without<PlayerRig>)>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
     mut q_proj: Query<&mut Projection, With<PlayerRig>>,
+    // teammates, for a claimed astronaut's camera to follow (below)
+    squad: Query<
+        (&Transform, Option<&PlayerState>, Option<&crate::net::PlayerVitals>),
+        (Or<(With<Player>, With<crate::remote::RemoteAstronaut>)>, Without<LocalPlayer>, Without<PlayerRig>),
+    >,
 ) {
-    let Ok((pe, p, ptf)) = q_player.single() else { return };
+    let Ok((pe, p, ptf, ps)) = q_player.single() else { return };
     let Ok(mut cam) = q_cam.single_mut() else { return };
     let dt = time.delta_secs();
 
@@ -1211,7 +1236,21 @@ pub fn camera_rig(
     // Tether's rewind, P06's blink, a joiner snapped by the host) it GLIDES there over
     // CAM_TELEPORT_GLIDE_SECS — re-aiming at the new spot in one frame would whip the view
     // round (camera law: never snap). Walking can't trip it: the threshold rides on speed.
-    let body = ptf.translation;
+    // Claimed by The Static (§11), our body is gone until the next teleporter: the camera
+    // follows the nearest teammate still standing instead. The switch reads as a teleport
+    // of the followed body, so it GLIDES there (camera law: never snap), and back again.
+    let spectating = ps.claimed.then(|| {
+        squad
+            .iter()
+            .filter(|(_, sps, v)| match (sps, v) {
+                (Some(sps), _) => !sps.dead,
+                (None, Some(v)) => !v.down,
+                _ => false,
+            })
+            .map(|(tf, ..)| tf.translation)
+            .min_by(|a, b| a.distance_squared(ptf.translation).total_cmp(&b.distance_squared(ptf.translation)))
+    });
+    let body = spectating.flatten().unwrap_or(ptf.translation);
     match rig.last_body {
         Some((e, last)) if e == pe => {
             let jump = sphere::arc_dist(last.normalize_or_zero(), body.normalize_or_zero(), planet.radius);
@@ -1369,7 +1408,7 @@ pub fn player_upkeep(
     run.difficulty = q.iter().map(|p| p.stats.difficulty).fold(0.0f32, f32::max);
     for mut run in &mut q {
     run.reticle_timer = (run.reticle_timer + dt) % 1.5;
-    if run.hp > 0.0 {
+    if run.hp > 0.0 && !run.dead {
         let regen = run.stats.regen / 60.0;
         run.hp = (run.hp + regen * dt).min(run.stats.max_hp);
     }
