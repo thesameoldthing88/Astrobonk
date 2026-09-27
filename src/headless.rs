@@ -734,6 +734,8 @@ fn assist_probe_check(
 ///   * the antipode read — a crowd staged at the far pole shows in the scan and in the
 ///     replicated `NetItemVis` the HUD dial reads;
 ///   * slope-boost — a slide down the steepest slope on the world speeds up, one up it slows;
+///   * no ramp, no bomb — a plain running hop held forward (air control steering it as
+///     `player_input` would) comes down at run speed, and a Slam from it is a dud;
 ///   * Boomerang Insurance — a hit that drops a charged, armed astronaut under its line
 ///     blinks it to the antipode through the same mechanic.
 /// The probe keeps everyone standing between its stages, so a short run can't end it early.
@@ -753,6 +755,10 @@ struct TechProbe {
     insuring: Vec<u8>,
     insure_base: HashMap<u8, u32>,
     insured: Vec<u8>,
+    /// The no-ramp hop: fastest speed seen in the air, and the speed its Slam banked, by
+    /// PlayerId
+    hop_top: HashMap<u8, f32>,
+    hop_bank: HashMap<u8, f32>,
     /// Slam blinks/slams seen as TechFx, by owner
     fx_slams: Vec<u8>,
     fx_blinks: Vec<u8>,
@@ -773,6 +779,10 @@ const TECH_ANTIPODE: u64 = 240;
 const TECH_ANTIPODE_CHECK: u64 = 262;
 const TECH_SLOPE_DOWN: u64 = 280;
 const TECH_SLOPE_UP: u64 = 300;
+const TECH_HOP: u64 = 320;
+/// Into the hop, the air slide that arms the Slam (the hop is ~22 ticks of hang).
+const TECH_HOP_ARM: u64 = TECH_HOP + 6;
+const TECH_HOP_CHECK: u64 = TECH_HOP + 40;
 /// Past the blink's recharge (BLINK_COOLDOWN from TECH_BLINK, at 33 ms a tick).
 const TECH_INSURE: u64 = TECH_BLINK + (BLINK_COOLDOWN / 0.033) as u64 + 30;
 const TECH_DONE: u64 = TECH_INSURE + 120;
@@ -798,6 +808,7 @@ fn tech_probe(
         &crate::net::NetItemVis,
     )>,
     enemies: Query<&Enemy>,
+    placed: Query<&Transform, Or<(With<crate::interact::Interactable>, With<crate::interact::ChargeShrine>)>>,
     mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
 ) {
     use crate::content::enemies::EnemyKind;
@@ -810,6 +821,18 @@ fn tech_probe(
         crate::enemies::spawn_enemy(commands, &assets, &planet, kind, dir, false, 1.0, 1.0, rng);
     };
     let run_speed = PLAYER_RUN_SPEED;
+    if t == TECH_GRANT {
+        // no chest, shrine or vendor was placed standing on a rail
+        let on_rail = placed
+            .iter()
+            .filter(|tf| lines.closest(tf.translation.normalize()).is_some_and(|(arc, ..)| arc <= GRIND_INTERACT_CLEARANCE))
+            .count();
+        if on_rail > 0 {
+            probe.fail.push(format!("{on_rail} of {} interactables stand on a Grind-Line", placed.iter().count()));
+        } else {
+            probe.ok.push(format!("all {} interactables stand clear of the rails", placed.iter().count()));
+        }
+    }
     for (_, pid, mut p, mut ps, mut tech, procs, mut intent, vis) in &mut q {
         let who = format!("player {}", pid.0);
         // keep everyone standing through the stages (not while the Insurance dip is staged)
@@ -1003,6 +1026,62 @@ fn tech_probe(
                 }
                 tech.grind_cd = 0.0;
                 probe.holding = false;
+            }
+            TECH_HOP => {
+                // a plain running hop off whatever ground this is, W held
+                probe.holding = true;
+                tech.grind = None;
+                tech.grind_cd = 10.0; // the held slide must not catch a rail instead
+                p.height = 0.0;
+                p.grounded = true;
+                p.slide_timer = 0.0;
+                p.land_timer = 10.0;
+                p.vel_t = p.facing * run_speed * ps.move_speed_mult();
+                p.vel_r = PLAYER_JUMP_VEL * ps.stats.jump_height.sqrt();
+                p.grounded = false;
+                intent.wish = p.facing;
+                probe.hop_top.insert(pid.0, 0.0);
+                probe.hop_bank.remove(&pid.0);
+            }
+            x if x > TECH_HOP && x < TECH_HOP_CHECK => {
+                // what player_input does with W held (in the air: `steer`, 60% authority)
+                if !p.grounded && tech.slam.is_none() {
+                    let drive = run_speed * ps.move_speed_mult();
+                    p.vel_t = crate::player::steer(p.vel_t, intent.wish, false, drive, 0.033);
+                    let top = probe.hop_top.entry(pid.0).or_default();
+                    *top = top.max(p.vel_t.length());
+                }
+                // ...and with slide pressed in the air, then held
+                if x == TECH_HOP_ARM && !p.grounded {
+                    tech.slam_armed = true;
+                    tech.slam_hold = 0.0;
+                }
+                intent.slide_held = x >= TECH_HOP_ARM && (tech.slam_armed || tech.slam.is_some());
+                if let Some(bank) = tech.slam {
+                    probe.hop_bank.insert(pid.0, bank);
+                }
+            }
+            TECH_HOP_CHECK => {
+                intent.slide_held = false;
+                intent.wish = Vec3::ZERO;
+                tech.grind_cd = 0.0;
+                probe.holding = false;
+                let run = run_speed * ps.move_speed_mult();
+                let top = probe.hop_top.get(&pid.0).copied().unwrap_or(0.0);
+                match probe.hop_bank.get(&pid.0).copied() {
+                    None => probe.fail.push(format!("{who}: the no-ramp hop's Slam never committed")),
+                    Some(bank) => {
+                        let reach = crate::techs::slam_reach(crate::techs::slam_power(bank, ps.move_speed_mult()));
+                        if top > run * 1.05 || reach.t > 0.0 {
+                            probe.fail.push(format!(
+                                "{who}: a plain hop reached {top:.2} m/s (run {run:.2}) and slammed at {bank:.2} m/s for {:.0}% of the bomb",
+                                reach.t * 100.0
+                            ));
+                        } else {
+                            probe.ok.push(format!("{who}: no ramp, no bomb — a hop held forward topped {top:.2} m/s, its Slam a dud"));
+                        }
+                    }
+                }
             }
             x if x >= TECH_INSURE && x < TECH_DONE => {
                 if probe.insured.contains(&pid.0) {
@@ -1229,9 +1308,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::save::settings_self_check())
         .and_then(|_| crate::fx::flash_gate_self_check())
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
-        .and_then(|_| crate::techs::self_check());
+        .and_then(|_| crate::techs::self_check())
+        .and_then(|_| crate::net::edge_presses_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, movement techs)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, movement techs, input edges)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -1858,7 +1938,7 @@ fn headless_enter(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
-    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
@@ -1866,7 +1946,8 @@ fn headless_enter(
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, Vec3::Y);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
 }
 

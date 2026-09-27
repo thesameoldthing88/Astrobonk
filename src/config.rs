@@ -8,7 +8,8 @@ pub const PLAYER_FRICTION: f32 = 38.0;
 pub const PLAYER_AIR_CONTROL: f32 = 0.6;
 /// ...and the share of THAT which may push against your own momentum. Curving keeps the
 /// whole 60%; braking gets a third of it, so a run-speed hop can be slowed but never turned
-/// round before it lands.
+/// round before it lands. Neither ever ADDS speed past your run (or slide) speed — see
+/// `player::steer`: speed above it is only banked (a slide, a slope, a rail) and kept.
 pub const PLAYER_AIR_BRAKE: f32 = 0.35;
 pub const PLAYER_JUMP_VEL: f32 = 8.0;
 pub const PLAYER_GRAVITY: f32 = 22.0;
@@ -45,13 +46,16 @@ pub const SLAM_MIN_HEIGHT: f32 = 0.6;
 /// the rest is what the shockwave is made of.
 pub const SLAM_DIVE_SPEED: f32 = 30.0;
 pub const SLAM_KEEP: f32 = 0.15;
-/// "Whiff the ramp, whiff the bomb": the banked speed, in units of base run speed, maps
-/// onto the shockwave from nothing at SLAM_MIN_POWER (a plain running hop) to full at
-/// SLAM_FULL_POWER (a redlined slide — the bhop hard cap), and on past it for speed builds
-/// up to SLAM_MAX_T × full.
-pub const SLAM_MIN_POWER: f32 = 1.0;
+/// "Whiff the ramp, whiff the bomb": the banked speed, in units of the slammer's OWN run
+/// speed (base × move-speed stat), maps onto the shockwave from nothing at SLAM_MIN_POWER
+/// to the full bomb at SLAM_FULL_POWER (redline — the bhop hard cap). The floor sits just
+/// over a slide's own boost, so a slide-jump off flat ground is a dud: the bomb is made of
+/// the speed a slope (or a hot rail) added on top of it.
+pub const SLAM_MIN_POWER: f32 = SLIDE_BOOST + 0.05;
 pub const SLAM_FULL_POWER: f32 = SPEED_HARD_CAP;
-pub const SLAM_MAX_T: f32 = 2.0;
+/// Speed builds: a redline that is faster in metres per second hits harder — the bomb's
+/// damage scales with the move-speed stat, up to this.
+pub const SLAM_SPEED_SCALE_MAX: f32 = 2.0;
 /// The shockwave at full power: damage (× the slammer's damage multiplier, rolls crits),
 /// radius (grows from MIN at the first useful speed) and outward knock (m/s).
 pub const SLAM_DAMAGE: f32 = 90.0;
@@ -89,6 +93,9 @@ pub const GRIND_MAX_TURN_DEG: f32 = 35.0;
 pub const GRIND_SEEDS: usize = 12000;
 /// A rail stops this far short of a solid prop rather than running through it.
 pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
+/// Chests, shrines and vendors are placed at least this far off a rail (inside the rail
+/// lookup's ~4 m reach), so none stands on one.
+pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;

@@ -139,14 +139,16 @@ fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
 
 use crate::meshkit::icosphere;
 
-/// Spawn terrain, props, sky, lights for the current stage.
+/// Spawn terrain, props, sky, lights for the current stage. Returns the solid props and the
+/// Grind-Lines for the caller to insert as resources — after `interact::spawn_interactables`
+/// has placed the stage's chests and shrines clear of the rails.
 pub fn spawn_stage(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     planet: &CurrentPlanet,
     seed: u64,
-) -> PropColliders {
+) -> (PropColliders, crate::techs::GrindLines) {
     let def = planet.kind.def();
     // deterministic prop scatter from the run seed (terrain was already seed-driven)
     let mut rng = StdRng::seed_from_u64(seed ^ 0xA11CE ^ planet.terrain.seed as u64);
@@ -454,7 +456,6 @@ pub fn spawn_stage(
             StageScoped,
         ));
     }
-    commands.insert_resource(lines);
 
     // Starfield
     let star_mesh = meshes.add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
@@ -520,7 +521,7 @@ pub fn spawn_stage(
         StageScoped,
     ));
 
-    PropColliders(colliders)
+    (PropColliders(colliders), lines)
 }
 
 /// The stage's Grind-Lines: the terrain's crest spines, smoothed, and cut short of every

@@ -685,7 +685,7 @@ fn enter_run(
     let stage_seed = run_state.run_seed.wrapping_add(run_state.stage as u64);
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
-    let props = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
@@ -696,8 +696,10 @@ fn enter_run(
         &run_state,
         &run::PlayerState::new(run_state.character, &save),
         &save,
+        &rails,
         Vec3::Y,
     );
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();
     *phase = run::RunPhase::Playing;

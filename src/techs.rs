@@ -218,9 +218,9 @@ pub fn ride_rail(p: &mut Player, g: &mut Grind, lines: &GrindLines, move_mult: f
 
 // ─── the Slam ────────────────────────────────────────────────────────────────
 
-/// A Slam's shockwave from its banked speed (`power`, in base-run-speeds): how much of the
-/// full bomb it is (0 = a dud — "whiff the ramp, whiff the bomb"; past 1 for speed builds)
-/// and how far it reaches.
+/// A Slam's shockwave from its banked speed (`power`, in the slammer's own run speeds —
+/// `slam_power`): how much of the full bomb it is (0 = a dud — "whiff the ramp, whiff the
+/// bomb" — up to 1 at redline) and how far it reaches.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlamReach {
     pub t: f32,
@@ -228,8 +228,20 @@ pub struct SlamReach {
 }
 
 pub fn slam_reach(power: f32) -> SlamReach {
-    let t = ((power - SLAM_MIN_POWER) / (SLAM_FULL_POWER - SLAM_MIN_POWER)).clamp(0.0, SLAM_MAX_T);
-    SlamReach { t, radius: SLAM_RADIUS_MIN + (SLAM_RADIUS_MAX - SLAM_RADIUS_MIN) * t.min(1.0) }
+    let t = ((power - SLAM_MIN_POWER) / (SLAM_FULL_POWER - SLAM_MIN_POWER)).clamp(0.0, 1.0);
+    SlamReach { t, radius: SLAM_RADIUS_MIN + (SLAM_RADIUS_MAX - SLAM_RADIUS_MIN) * t }
+}
+
+/// A banked speed (m/s) in units of the slammer's own run speed. Measured against their
+/// OWN run so the ramp is never optional: a speed build's flat slide is still a flat slide
+/// (its redline is faster, and `slam_speed_scale` pays that out instead).
+pub fn slam_power(bank: f32, move_mult: f32) -> f32 {
+    bank / (PLAYER_RUN_SPEED * move_mult.max(0.05))
+}
+
+/// Speed builds' bonus on a Slam's damage: their redline is faster in m/s.
+pub fn slam_speed_scale(move_mult: f32) -> f32 {
+    move_mult.clamp(1.0, SLAM_SPEED_SCALE_MAX)
 }
 
 // ─── Antipode Blink ──────────────────────────────────────────────────────────
@@ -332,7 +344,8 @@ impl AntipodeBand {
 /// set, so `tech_fx_presentation` is one system on every machine.
 #[derive(Clone, Copy, Debug)]
 pub enum TechFx {
-    /// `owner` (a PlayerId) landed a Slam at `dir` with `power` base-run-speeds banked.
+    /// `owner` (a PlayerId) landed a Slam at `dir` with `power` of their own run speeds
+    /// banked (`slam_power`).
     Slam { owner: u8, dir: Vec3, power: f32 },
     /// `owner` blinked; `insured` = Boomerang Insurance paid out.
     Blink { owner: u8, from: Vec3, to: Vec3, axis: Vec3, insured: bool },
@@ -459,8 +472,9 @@ pub fn slam_shockwave(
     for (e, pid, p, ps, mut tech, tf) in &mut q {
         // taken, so a frame the physics skipped (hitstop, dt 0) can't detonate it twice
         let Some(bank) = tech.slam_landed.take() else { continue };
-        let power = bank / PLAYER_RUN_SPEED;
+        let power = slam_power(bank, ps.move_speed_mult());
         let reach = slam_reach(power);
+        let scale = slam_speed_scale(ps.move_speed_mult());
         telemetry.slams += 1;
         telemetry.best_slam_power = telemetry.best_slam_power.max(power);
         fx.write(TechFxMsg { fx: TechFx::Slam { owner: pid.0, dir: p.dir, power }, from_wire: false });
@@ -468,7 +482,7 @@ pub fn slam_shockwave(
             telemetry.slam_duds += 1;
             continue;
         }
-        let damage = SLAM_DAMAGE * reach.t * ps.damage_mult();
+        let damage = SLAM_DAMAGE * reach.t * scale * ps.damage_mult();
         for (te, _) in hash.near(tf.translation, reach.radius + 1.5) {
             let Ok(en) = enemies.get(te) else { continue };
             let arc = sphere::arc_dist(en.dir, p.dir, planet.radius);
@@ -486,7 +500,7 @@ pub fn slam_shockwave(
                 target: te,
                 amount: damage * falloff * cm * elite,
                 crit,
-                knock: away * SLAM_KNOCK * reach.t.min(1.0) * falloff,
+                knock: away * SLAM_KNOCK * reach.t * falloff,
             });
             tech.slam_hits += 1;
             telemetry.slam_hits += 1;
@@ -643,11 +657,11 @@ pub fn tech_fx_presentation(
                     let at = planet.surface_point(dir) + dir * 0.3;
                     fx::burst(&mut commands, pa, at, dir, Pcolor::White, 10, 5.0);
                     if !dud {
-                        fx::burst(&mut commands, pa, at, dir, Pcolor::Gold, (10.0 + 20.0 * reach.t.min(1.5)) as usize, 7.0 + 5.0 * reach.t);
+                        fx::burst(&mut commands, pa, at, dir, Pcolor::Gold, (10.0 + 20.0 * reach.t) as usize, 7.0 + 5.0 * reach.t);
                     }
                 }
                 if local_pid == Some(owner) {
-                    shake.add(SLAM_SHAKE_MIN + (SLAM_SHAKE_MAX - SLAM_SHAKE_MIN) * reach.t.min(1.0));
+                    shake.add(SLAM_SHAKE_MIN + (SLAM_SHAKE_MAX - SLAM_SHAKE_MIN) * reach.t);
                     sfx.write(SfxMsg(Sfx::Slam));
                 }
             }
@@ -800,12 +814,22 @@ pub fn grind_hint(
 
 /// A beep for a blink key pressed while the blink recharges (or with nothing to blink
 /// with) — the dial says how long; this says "not yet" where your eyes are.
+///
+/// The charge it reads is `NetItemVis` (the host's truth on every machine), which on the
+/// host is written by `items::push_net_item_vis` in ANOTHER chain — so on the frame a
+/// press blinks, it may or may not already show the new recharge. A press that blinked
+/// this frame (`antipode_blink` runs first; the body's blink count moved) is never "not
+/// yet". On a joiner the count moves only when the host's blink comes back, so a press
+/// the host will refuse still beeps.
 pub fn blink_denied_feedback(
-    q: Query<(&InputIntent, &PlayerState, &NetItemVis), With<LocalPlayer>>,
+    q: Query<(&InputIntent, &PlayerState, &NetItemVis, &MoveTech), With<LocalPlayer>>,
     mut sfx: MessageWriter<SfxMsg>,
+    mut seen: Local<u32>,
 ) {
-    let Ok((intent, ps, vis)) = q.single() else { return };
-    if intent.blink && ps.has_item(ItemKind::AntipodeBlink) && vis.blink_cd > 0 {
+    let Ok((intent, ps, vis, tech)) = q.single() else { return };
+    let blinked = tech.blinks != *seen;
+    *seen = tech.blinks;
+    if intent.blink && !blinked && ps.has_item(ItemKind::AntipodeBlink) && vis.blink_cd > 0 {
         sfx.write(SfxMsg(Sfx::Click));
     }
 }
@@ -915,8 +939,9 @@ pub fn dev_tech_bot(
 
 /// Headless self-check of the §4 techs on synthetic state: the blink's geometry (exact
 /// antipode, momentum turned with the camera's glide), the Slam's scale, air control's
-/// no-180 rule, the blink recharge, and a Grind-Line network on every world whose rails sit
-/// on crests and can be caught where they run. Returns the first violated rule.
+/// no-180 and no-free-speed rules, the blink recharge, and a Grind-Line network on every
+/// world whose rails sit on crests and can be caught where they run. Returns the first
+/// violated rule.
 pub fn self_check() -> Result<(), String> {
     use crate::content::planets::PlanetKind;
     // Blink: exact antipode; momentum and facing turned about the view axis, still tangent;
@@ -955,22 +980,57 @@ pub fn self_check() -> Result<(), String> {
     {
         return Err("the blink recharge ladder is wrong".into());
     }
-    // Slam: a plain running hop is a dud; a redline is the full bomb; bigger is wider.
-    let (dud, full) = (slam_reach(1.0), slam_reach(SPEED_HARD_CAP));
-    if dud.t != 0.0 || (full.t - 1.0).abs() > 1e-4 || (full.radius - SLAM_RADIUS_MAX).abs() > 1e-4 || slam_reach(1.5).radius <= dud.radius {
+    // Slam: a flat-ground slide-jump is a dud ("whiff the ramp, whiff the bomb") — for a
+    // speed build too, measured against its own run; a redline is the full bomb; more
+    // banked speed is a wider one.
+    let (dud, full) = (slam_reach(SLIDE_BOOST), slam_reach(SPEED_HARD_CAP));
+    if dud.t != 0.0
+        || (full.t - 1.0).abs() > 1e-4
+        || (full.radius - SLAM_RADIUS_MAX).abs() > 1e-4
+        || slam_reach(1.95).radius <= dud.radius
+        || slam_reach(slam_power(PLAYER_RUN_SPEED * 1.5 * SLIDE_BOOST, 1.5)).t != 0.0
+    {
         return Err(format!("slam scaling wrong: dud {dud:?} full {full:?}"));
     }
-    // Air control: a run-speed hop steered straight back must not reverse before landing,
-    // and one steered sideways must curve.
+    // Air control (`player::steer`, the frames `player_input` runs): a run-speed hop steered
+    // straight back must not reverse before landing, and one steered sideways must curve.
+    // And no wish ever ADDS speed past a run: a hop held forward, a bhop chain landing
+    // after landing held forward, a hop from standstill all come down at run speed — so a
+    // Slam from any of them is a dud — while a slide's hop keeps its speed (§4 "preserve
+    // momentum").
     let hang = 2.0 * PLAYER_JUMP_VEL / PLAYER_GRAVITY;
-    let (mut back, mut side) = (Vec3::X * PLAYER_RUN_SPEED, Vec3::X * PLAYER_RUN_SPEED);
     let steps = 60;
+    let dt = hang / steps as f32;
+    let run = PLAYER_RUN_SPEED;
+    let slide = run * SLIDE_BOOST;
+    let (mut back, mut side, mut fwd, mut still) = (Vec3::X * run, Vec3::X * run, Vec3::X * run, Vec3::ZERO);
+    let mut slid = Vec3::X * slide;
     for _ in 0..steps {
-        back += crate::player::wish_accel(back, -Vec3::X, false) * hang / steps as f32;
-        side += crate::player::wish_accel(side, Vec3::Z, false) * hang / steps as f32;
+        back = crate::player::steer(back, -Vec3::X, false, run, dt);
+        side = crate::player::steer(side, Vec3::Z, false, run, dt);
+        fwd = crate::player::steer(fwd, Vec3::X, false, run, dt);
+        still = crate::player::steer(still, Vec3::X, false, run, dt);
+        slid = crate::player::steer(slid, (Vec3::X + Vec3::Z * 0.3).normalize(), false, slide, dt);
     }
-    if back.x <= 0.0 || side.z < PLAYER_RUN_SPEED * 0.5 {
+    if back.x <= 0.0 || side.z < run * 0.5 {
         return Err(format!("air control: braked to {:.2} m/s (must stay > 0), curved to {:.2} m/s sideways", back.x, side.z));
+    }
+    // six bhops, each jumped 0.1 s into its landing window (grounded, under the hard cap)
+    let mut chain = Vec3::X * run;
+    for _ in 0..6 {
+        for _ in 0..steps {
+            chain = crate::player::steer(chain, Vec3::X, false, run, dt);
+        }
+        for _ in 0..6 {
+            chain = crate::player::steer(chain, Vec3::X, true, run, 0.1 / 6.0);
+        }
+    }
+    let worst = fwd.length().max(still.length()).max(chain.length()).max(side.length());
+    if worst > run * 1.001 || slam_reach(slam_power(worst, 1.0)).t > 0.0 {
+        return Err(format!("air control added speed: a plain hop came down at {worst:.2} m/s (run {run})"));
+    }
+    if (slid.length() - slide).abs() > 1e-3 {
+        return Err(format!("a slide's hop came down at {:.2} m/s, not its {slide:.2}", slid.length()));
     }
     // Grind-Lines: every world has rails, on crests, catchable along their run, not across.
     for kind in PlanetKind::ALL {

@@ -988,7 +988,7 @@ fn client_stage_transition(
     let stage_seed = run.run_seed.wrapping_add(stage as u64);
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run.planet());
-    let props = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
+    let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
     commands.insert_resource(props);
     crate::player::spawn_player(
         &mut commands,
@@ -1011,8 +1011,10 @@ fn client_stage_transition(
         &run,
         &crate::run::PlayerState::new(run.character, &save),
         &save,
+        &rails,
         Vec3::Y,
     );
+    commands.insert_resource(rails);
     commands.insert_resource(planet);
     *phase = crate::run::RunPhase::Playing;
     banners.write(crate::messages::BannerMsg(format!(

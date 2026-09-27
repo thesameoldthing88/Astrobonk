@@ -66,7 +66,8 @@ pub struct AssistText;
 /// One slot in the off-screen indicator pool (colored squares hugging the screen edge).
 #[derive(Component)]
 pub struct EdgeMarker;
-/// The antipode dial's distance from the screen's bottom edge, in UI units.
+/// The antipode dial's distance from the screen's left and bottom edges, in UI units.
+const ANTIPODE_DIAL_X: f32 = 14.0;
 const ANTIPODE_DIAL_Y: f32 = 44.0;
 /// The antipode dial (§4: the HUD tell for Antipode Blink): who waits on the far side of
 /// the planet, and whether the blink is charged. Shown while the local astronaut carries a
@@ -144,8 +145,9 @@ pub fn spawn_hud(mut commands: Commands) {
                 AntipodeDial,
                 Node {
                     position_type: PositionType::Absolute,
-                    left: Val::Px(14.0),
-                    // above the line the off-screen edge markers run along (34 px in)
+                    left: Val::Px(ANTIPODE_DIAL_X),
+                    // above the bottom line the off-screen edge markers run along (34 px
+                    // in); the left one's markers step round it (`update_edge_markers`)
                     bottom: Val::Px(ANTIPODE_DIAL_Y),
                     flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Center,
@@ -785,6 +787,7 @@ pub fn update_edge_markers(
     q_boss: Query<&Transform, With<crate::enemies::Boss>>,
     q_inter: Query<(&Transform, &crate::interact::Interactable)>,
     q_charge: Query<(&Transform, &crate::interact::ChargeShrine)>,
+    dial: Query<(&ComputedNode, &Visibility), With<AntipodeDial>>,
     mut markers: Query<(&mut Node, &mut BackgroundColor, &mut BorderColor), With<EdgeMarker>>,
 ) {
     use crate::interact::InteractKind;
@@ -792,6 +795,15 @@ pub fn update_edge_markers(
     let Some(size) = cam.logical_viewport_size() else { return };
     let center = size / 2.0;
     let margin = 34.0;
+    let ui = ui_scale.0.max(0.01);
+    // The antipode dial sits on the left edge's marker line: while it shows, a marker that
+    // would land on it steps up the edge to just above it, so neither hides the other.
+    // (UI units, like the markers' own Val::Px; ComputedNode sizes are physical pixels.)
+    let dial_rect = dial.iter().find(|(_, v)| **v != Visibility::Hidden).map(|(c, _)| {
+        let dial = c.size() * c.inverse_scale_factor();
+        let bottom = size.y / ui - ANTIPODE_DIAL_Y;
+        Rect::new(ANTIPODE_DIAL_X, bottom - dial.y, ANTIPODE_DIAL_X + dial.x, bottom)
+    });
 
     // collect targets: (world pos, color, marker px size), priority order
     let mut targets: Vec<(Vec3, Color, f32)> = Vec::new();
@@ -850,7 +862,15 @@ pub fn update_edge_markers(
         let scale_x = if d.x.abs() > 1e-4 { half.x / d.x.abs() } else { f32::MAX };
         let scale_y = if d.y.abs() > 1e-4 { half.y / d.y.abs() } else { f32::MAX };
         // Logical pixels -> UI units: UiScale multiplies every Val::Px.
-        let pos = (center + d * scale_x.min(scale_y)) / ui_scale.0.max(0.01);
+        let mut pos = (center + d * scale_x.min(scale_y)) / ui;
+        if let Some(r) = dial_rect {
+            let h = px / 2.0;
+            // a marker on the bottom edge's line passes under the dial: only the left
+            // column's can land on it
+            if pos.x - h < r.max.x + 2.0 && pos.y + h > r.min.y - 2.0 && pos.y - h < r.max.y {
+                pos.y = r.min.y - 2.0 - h;
+            }
+        }
 
         node.left = Val::Px(pos.x - px / 2.0);
         node.top = Val::Px(pos.y - px / 2.0);

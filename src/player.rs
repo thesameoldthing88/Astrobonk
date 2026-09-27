@@ -544,7 +544,7 @@ pub fn gather_local_input(
     intent.jump = keys.just_pressed(KeyCode::Space);
     intent.jump_held = keys.pressed(KeyCode::Space);
     // §13 control map: Shift/Ctrl (and C, kept for the old muscle memory)
-    const SLIDE_KEYS: [KeyCode; 3] = [KeyCode::ShiftLeft, KeyCode::ControlLeft, KeyCode::KeyC];
+    const SLIDE_KEYS: [KeyCode; 5] = [KeyCode::ShiftLeft, KeyCode::ShiftRight, KeyCode::ControlLeft, KeyCode::ControlRight, KeyCode::KeyC];
     intent.slide = keys.any_just_pressed(SLIDE_KEYS);
     intent.slide_held = keys.any_pressed(SLIDE_KEYS);
     intent.interact = keys.just_pressed(KeyCode::KeyE);
@@ -575,6 +575,22 @@ pub fn wish_accel(vel: Vec3, wish: Vec3, grounded: bool) -> Vec3 {
     a
 }
 
+/// One frame of a movement wish on `vel`. A wish drives you up to `drive` (your run speed,
+/// or a slide's) and steers you above it, but never ADDS to it: §4's bunny-hop "preserves
+/// momentum" and air control "curves", so speed past a run is only ever banked — by a
+/// slide, a slope, a rail — and then kept or spent. Without this, 60% air authority plus
+/// the airborne hard cap redlined every plain hop in a third of a second (and every bhop
+/// landing's window added more), and the Slam was a full bomb off flat ground.
+pub fn steer(vel: Vec3, wish: Vec3, grounded: bool, drive: f32, dt: f32) -> Vec3 {
+    let limit = vel.length().max(drive);
+    let v = vel + wish_accel(vel, wish, grounded) * dt;
+    if v.length() > limit {
+        v.normalize() * limit
+    } else {
+        v
+    }
+}
+
 /// Apply intent -> motion for EVERY astronaut we simulate (all of them on the host;
 /// just the local one on a client, as prediction).
 pub fn player_input(
@@ -594,8 +610,7 @@ pub fn player_input(
     let max_speed = PLAYER_RUN_SPEED * speed_mult * if sliding { SLIDE_BOOST } else { 1.0 };
 
     if wish != Vec3::ZERO {
-        let a = wish_accel(p.vel_t, wish, p.grounded);
-        p.vel_t += a * dt;
+        p.vel_t = steer(p.vel_t, wish, p.grounded, max_speed, dt);
     } else if p.grounded && !sliding && p.land_timer > BHOP_WINDOW {
         // friction
         let v = p.vel_t;

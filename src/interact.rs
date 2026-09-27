@@ -12,6 +12,7 @@ use crate::player::Player;
 use crate::run::{roll_item, ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
+use crate::techs::GrindLines;
 use bevy::prelude::*;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -249,11 +250,16 @@ fn price(grade: Rarity, discount: f32) -> u64 {
     (base * (1.0 - discount)).round().max(1.0) as u64
 }
 
-/// A random direction at least `min_arc` meters (great-circle) from `avoid`.
-fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, avoid: Vec3, min_arc: f32) -> Vec3 {
+/// A random direction at least `min_arc` meters (great-circle) from `avoid`, and off the
+/// Grind-Lines — a chest or a shrine standing on a rail would be ridden straight through.
+/// The rails are the terrain's and the props' (the same on every machine), so the retries
+/// they cost keep the layout stream machine-independent.
+fn place_dir(rng: &mut impl Rng, planet: &CurrentPlanet, rails: &GrindLines, avoid: Vec3, min_arc: f32) -> Vec3 {
     for _ in 0..40 {
         let d = random_dir(rng);
-        if sphere::arc_dist(d, avoid, planet.radius) > min_arc {
+        if sphere::arc_dist(d, avoid, planet.radius) > min_arc
+            && rails.closest(d).is_none_or(|(arc, ..)| arc > GRIND_INTERACT_CLEARANCE)
+        {
             return d;
         }
     }
@@ -269,6 +275,7 @@ pub fn spawn_interactables(
     run: &RunState,
     ps: &PlayerState,
     save: &MetaSave,
+    rails: &GrindLines,
     player_dir: Vec3,
 ) {
     let def = planet.kind.def();
@@ -288,7 +295,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..def.pots {
-        let dir = place_dir(&mut rng, planet, player_dir, 8.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 8.0);
         let silverish = rng.gen_bool(0.1);
         commands.spawn((
             Pot { broken: false },
@@ -363,7 +370,7 @@ pub fn spawn_interactables(
 
     // Chests
     for _ in 0..7 {
-        let dir = place_dir(&mut rng, planet, player_dir, 12.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 12.0);
         spawn_simple(commands, InteractKind::Chest, dir, Vec::new(), None);
     }
     // Shady guys with pre-rolled stock (fixed at stage entry, luck applies now)
@@ -373,21 +380,21 @@ pub fn spawn_interactables(
             let (item, grade) = roll_item(ps, ps.stats.luck, &mut rng);
             stock.push((item, grade, price(grade, ps.stats.chest_discount), false));
         }
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
         spawn_simple(commands, InteractKind::ShadyGuy, dir, stock, None);
     }
     // Shrines
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
         spawn_simple(commands, InteractKind::GreedShrine, dir, Vec::new(), None);
     }
     for _ in 0..2 {
-        let dir = place_dir(&mut rng, planet, player_dir, 15.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 15.0);
         spawn_simple(commands, InteractKind::MagnetShrine, dir, Vec::new(), None);
     }
-    let dir = place_dir(&mut rng, planet, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, rails, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Moai, dir, Vec::new(), None);
-    let dir = place_dir(&mut rng, planet, player_dir, 20.0);
+    let dir = place_dir(&mut rng, planet, rails, player_dir, 20.0);
     spawn_simple(commands, InteractKind::Microwave, dir, Vec::new(), None);
     // The draw happens UNCONDITIONALLY even though the cage itself is conditional.
     // `place_dir` consumes a variable number of rng draws (it retries up to 40 times), so
@@ -395,7 +402,7 @@ pub fn spawn_interactables(
     // whose saves disagree about `chimp_freed` would then stand in DIFFERENT rings, and
     // "converge on the shrine together" silently cannot work. The cage stays per-machine
     // (it is a per-machine unlock); only the rng stream is made machine-independent.
-    let cage_dir = place_dir(&mut rng, planet, player_dir, 25.0);
+    let cage_dir = place_dir(&mut rng, planet, rails, player_dir, 25.0);
     if planet.kind == crate::content::planets::PlanetKind::Moon && !save.counters.chimp_freed {
         spawn_simple(commands, InteractKind::Cage, cage_dir, Vec::new(), None);
     }
@@ -410,7 +417,7 @@ pub fn spawn_interactables(
         ..default()
     });
     for _ in 0..5 {
-        let dir = place_dir(&mut rng, planet, player_dir, 18.0);
+        let dir = place_dir(&mut rng, planet, rails, player_dir, 18.0);
         let pos = planet.surface_point(dir);
         commands.spawn((
             ChargeShrine { progress: 0.0, done: false },
