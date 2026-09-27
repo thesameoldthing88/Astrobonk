@@ -57,7 +57,15 @@ pub fn playing(phase: Res<run::RunPhase>) -> bool {
 /// `--dev` is passed with it, so a shipped binary can't be talked into it (CLAUDE.md rule
 /// 10). P28 routes the older harness flags (`--bossnow`, `--stagenow`, …) through here too.
 pub fn dev_flag(name: &str) -> bool {
-    std::env::args().any(|a| a == "--dev") && std::env::args().any(|a| a == name)
+    dev_mode() && std::env::args().any(|a| a == name)
+}
+
+/// `--dev` was passed: the dev KEYS (B summons the stage boss, T replays the tutorial) and
+/// the `dev_flag` harness flags are live. Read once — it is a run condition, checked every
+/// frame.
+pub fn dev_mode() -> bool {
+    static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEV.get_or_init(|| std::env::args().any(|a| a == "--dev"))
 }
 
 fn main() {
@@ -318,7 +326,8 @@ fn main() {
                 // adopts them from RunSnapMsg instead of running a second, drifting copy.
                 director::run_clock.run_if(net::is_simulating),
                 director::levelup_trigger,
-                enemies::debug_spawn_boss.run_if(net::is_simulating),
+                // M14: a dev key, not a shipped one (B is also the level-up Banish key)
+                enemies::debug_spawn_boss.run_if(net::is_simulating).run_if(dev_mode),
             )
                 .chain()
                 .run_if(in_state(AppState::InRun).and(playing)),
@@ -446,7 +455,8 @@ fn main() {
                 pickups::kill_drops.run_if(net::is_simulating),
                 combat::fader_update,
                 enemies::enemy_flash,
-                player::player_physics,
+                // after this frame's jump/slide presses are applied, never before (L3)
+                player::player_physics.after(player::player_input),
                 player::refit_astronaut_rigs,
                 player::animate_player,
                 // Regen, i-frames, shield recharge and powerup decay are all host-owned

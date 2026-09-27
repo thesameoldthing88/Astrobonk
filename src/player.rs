@@ -23,6 +23,9 @@ pub struct Player {
     pub slide_timer: f32,
     pub slide_cd: f32,
     pub land_timer: f32, // time since landing (for bhop window)
+    /// Grace after leaving footing without jumping, in which a jump still counts as from the
+    /// ground. Height is terrain-relative, so walking never leaves the ground; running off
+    /// the end of a Grind-Line (which rides GRIND_RAIL_LIFT above it) is what uses this.
     pub coyote: f32,
     // --- animation state (see the code-art-animation skill) ---
     pub stride: f32,     // gait phase, advanced by DISTANCE so feet don't skate
@@ -72,10 +75,15 @@ pub fn nearest_astronaut(from_dir: Vec3, list: &[AstronautSnap], radius: f32) ->
 #[derive(Component, Clone, Copy, Debug)]
 pub struct InputIntent {
     pub wish: Vec3,       // desired move dir, world-space tangent, normalized
-    pub forward: Vec3,    // camera forward (tangent) — drives facing/aim
+    /// Camera forward (tangent). Aim is auto-target / `Player.facing`, not this; it is the
+    /// axis an Antipode Blink turns momentum about (`techs::blink_body`).
+    pub forward: Vec3,
     pub jump: bool,       // edge-triggered (true only on the frame pressed)
     pub slide: bool,      // edge-triggered
-    pub interact: bool,   // edge-triggered
+    /// Edge-triggered. Carried to the host for a joiner; the local E press is still read
+    /// straight from the keyboard by `interact::interact_system` until P14 routes the
+    /// interactables through this.
+    pub interact: bool,
     pub jump_held: bool,  // level: jump is down this frame (Anti-Grav Boots hover)
     pub slide_held: bool, // level: slide is down (a hold in the air commits the Slam)
     pub blink: bool,      // edge-triggered: Antipode Blink
@@ -516,8 +524,9 @@ fn backpack_mesh() -> Mesh {
 }
 
 /// WASD + jump + slide, in the camera's tangent frame.
-/// Read keyboard/mouse into the LOCAL astronaut's intent. This is the only place
-/// hardware input is read; everything downstream consumes `InputIntent`.
+/// Read the keyboard into the LOCAL astronaut's movement intent; movement, the techs and
+/// the joiner's input packet all consume `InputIntent`. (Panels, E at an interactable, the
+/// camera's mouse look and the `--dev` keys still read the hardware themselves.)
 pub fn gather_local_input(
     keys: Res<ButtonInput<KeyCode>>,
     rig: Res<CamRig>,

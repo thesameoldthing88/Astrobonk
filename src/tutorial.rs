@@ -39,8 +39,9 @@ pub fn tutorial_system(
     mut q_text: Query<(&mut Text, &mut TextColor), With<TutorialText>>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
-    // DEV: press T to replay the first-run tutorial (veterans have it marked done).
-    if keys.just_pressed(KeyCode::KeyT) {
+    // DEV (`--dev` only): press T to replay the first-run tutorial (veterans have it marked
+    // done).
+    if crate::dev_mode() && keys.just_pressed(KeyCode::KeyT) {
         *tut = Tutorial { active: true, step: 0, timer: 0.0 };
     }
     let Ok((mut text, mut color)) = q_text.single_mut() else { return };

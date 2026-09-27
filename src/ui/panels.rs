@@ -764,6 +764,13 @@ pub fn pause_panel(
                 }
             }
         }
-        _ => {}
+        // Any other phase — above all Dead after ABANDON RUN, which holds for the death beat
+        // before Results — has no pause menu (M19: it used to linger, buttons dead, over the
+        // run's last moments).
+        _ => {
+            for e in &q_root {
+                commands.entity(e).despawn();
+            }
+        }
     }
 }

@@ -1141,10 +1141,9 @@ pub fn spawn_anubot_beam_vis(commands: &mut Commands, assets: &EnemyAssets, boss
     ));
 }
 
-/// DEV: press B during play to summon the current planet's stage boss immediately
-/// (so the Craterpillar is testable without surviving 8+ minutes). Host/solo only — a
-/// client summoning a boss would spawn one its host never simulates. P28 moves it behind
-/// `--dev`.
+/// DEV (`--dev` only): press B during play to summon the current planet's stage boss
+/// immediately (so the Craterpillar is testable without surviving 8+ minutes). Host/solo
+/// only — a client summoning a boss would spawn one its host never simulates.
 pub fn debug_spawn_boss(
     mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
