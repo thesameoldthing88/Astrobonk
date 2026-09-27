@@ -44,6 +44,16 @@ pub const BOSS_MARK: f32 = 90.0;
 // ── Difficulty scaling (GDD §3 "Difficulty scaling model") ────────────────────
 // t = run minutes (whole chain), d = chain depth (stage index), T = planet threat,
 // Δ = Difficulty points. See `run::scaling` for the formulas these feed.
+/// HP_base / DMG_base anchors: multipliers on every `EnemyDef` number, which the §15 ledger
+/// says to anchor on ("from code"). Pinned at 1 by the cold open ("I have room"): the
+/// trickle is one Shambler (14 HP) a second, which the Wrench (14), Boomerang (15) and
+/// Rocket Pod (26) starters one-shot; any anchor above 1 doubles the swings a level-1 hero
+/// needs per Shambler. The price: late T1 is softer than the retired ad-hoc curve (×2.7 at
+/// 10:00 vs ×8). But `t` runs across the whole chain, so a T3 finale reaches about ×11 where
+/// the old curve reset to ×1 at every teleporter. `--headless N --balance` prints the horde's
+/// live numbers against the party's kill rate.
+pub const SCALE_HP_BASE: f32 = 1.0;
+pub const SCALE_DMG_BASE: f32 = 1.0;
 pub const SCALE_HP_T: f32 = 0.11;
 pub const SCALE_HP_EXP: f32 = 1.35;
 pub const SCALE_HP_D: f32 = 0.20;

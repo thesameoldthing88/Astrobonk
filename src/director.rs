@@ -436,10 +436,11 @@ pub fn silver_payout(run: &RunState, victory: bool, golden_tome: u32, cursed_roc
     SilverPayout { lines, total: performance + run.silver_run }
 }
 
-/// `--minibossnow` (test harness, like `--bossnow`): wind the clock to just before the 7:00
-/// mark, then — once miniboss #1 has stood a few seconds — finish it through the REAL
-/// HitMsg → apply_hits path, so the guaranteed-cache pipeline (kill → RunState →
-/// sync_reward_cache → RunSnapMsg) runs end to end without a 3-minute fight. Host/solo only.
+/// `--minibossnow` (test harness; the windowed game also needs `--dev`): wind the clock to
+/// just before the 7:00 mark, then — once miniboss #1 has stood a few seconds — finish it
+/// through the REAL HitMsg → apply_hits path, so the guaranteed-cache pipeline (kill →
+/// RunState → sync_reward_cache → RunSnapMsg) runs end to end without a 3-minute fight.
+/// Host/solo only.
 pub fn dev_miniboss_now(
     time: Res<Time>,
     mut run: ResMut<RunState>,

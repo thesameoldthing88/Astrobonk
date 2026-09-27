@@ -7,6 +7,9 @@
 //! EliteChance(t) = min(0.35, 0.02·t + 0.05·d + 0.03·Δ)
 //! ```
 //!
+//! `HP_base` / `DMG_base` are each `EnemyDef`'s own numbers times the `SCALE_HP_BASE` /
+//! `SCALE_DMG_BASE` anchors in config.rs (which say why the anchor sits where it does).
+//!
 //! Every system that sizes an enemy, a boss or the spawn budget reads a [`Scaling`] built
 //! here instead of doing its own arithmetic. Later layers (Ascension Depth — P23, weekly
 //! mutators — P23, co-op per-enemy and boss HP — P18, Farside's elite bump — P07) multiply
@@ -87,8 +90,8 @@ impl Scaling {
         let delta_dmg = 1.0 + SCALE_DMG_DELTA * delta;
         let party_spawn = PARTY_SPAWN_SCALE[i.party.clamp(1, PARTY_SPAWN_SCALE.len()) - 1];
         Self {
-            hp: (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp,
-            dmg: (1.0 + SCALE_DMG_T * t) * depth_dmg * i.planet * delta_dmg,
+            hp: SCALE_HP_BASE * (1.0 + SCALE_HP_T * t).powf(SCALE_HP_EXP) * depth_hp * i.planet * delta_hp,
+            dmg: SCALE_DMG_BASE * (1.0 + SCALE_DMG_T * t) * depth_dmg * i.planet * delta_dmg,
             spawn: (1.0 + SCALE_RATE_T * t)
                 * (1.0 + SCALE_RATE_D * d)
                 * (1.0 + SCALE_RATE_DELTA * delta)
@@ -142,16 +145,19 @@ pub fn beat_modifier(miniboss_alive: bool, exhale_left: f32) -> f32 {
 pub fn self_check() -> Result<(), String> {
     let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1 };
     let s0 = Scaling::new(base);
-    if (s0.hp - 1.0).abs() > 1e-4 || (s0.dmg - 1.0).abs() > 1e-4 || (s0.spawn - 1.0).abs() > 1e-4 {
-        return Err(format!("scaling at t=0 must be identity, got {s0:?}"));
+    if (s0.hp - SCALE_HP_BASE).abs() > 1e-4
+        || (s0.dmg - SCALE_DMG_BASE).abs() > 1e-4
+        || (s0.spawn - 1.0).abs() > 1e-4
+    {
+        return Err(format!("scaling at t=0 must be the HP/DMG_base anchors, got {s0:?}"));
     }
     if s0.elite_chance != 0.0 {
         return Err("elite chance must start at 0".into());
     }
     // exact formula at a probe point: t=10, d=2, T=1.25, Δ=5
     let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, party: 1 });
-    let want_hp = 2.1f32.powf(1.35) * 1.4 * 1.25 * 1.3;
-    let want_dmg = 1.8 * 1.3 * 1.25 * 1.25;
+    let want_hp = SCALE_HP_BASE * 2.1f32.powf(1.35) * 1.4 * 1.25 * 1.3;
+    let want_dmg = SCALE_DMG_BASE * 1.8 * 1.3 * 1.25 * 1.25;
     let want_spawn = 2.4 * 1.2 * 1.2;
     let want_elite = (0.2f32 + 0.1 + 0.15).min(0.35);
     for (name, got, want) in [("hp", p.hp, want_hp), ("dmg", p.dmg, want_dmg), ("spawn", p.spawn, want_spawn), ("elite", p.elite_chance, want_elite)] {

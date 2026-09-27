@@ -153,6 +153,7 @@ pub fn sync_reward_cache(
     mut materials: ResMut<Assets<StandardMaterial>>,
     q: Query<(Entity, &Transform, &RewardCache)>,
     particles: Option<Res<ParticleAssets>>,
+    role: Option<Res<crate::net::NetRole>>,
     mut banners: MessageWriter<BannerMsg>,
 ) {
     let existing = q.iter().next();
@@ -160,7 +161,11 @@ pub fn sync_reward_cache(
         (Some(dir), None) => {
             spawn_reward_cache(&mut commands, &mut meshes, &mut materials, &planet, dir, run.stage);
             info!("REWARD miniboss cache up at {:.2?}", dir);
-            banners.write(BannerMsg("MINIBOSS CACHE DROPPED: FREE PICK".into()));
+            // Only the host's astronaut can open it until peers get interact requests (P14),
+            // so a client's banner must not promise a pick it can't take.
+            let client = role.is_some_and(|r| matches!(*r, crate::net::NetRole::Client));
+            let banner = if client { "MINIBOSS CACHE DROPPED" } else { "MINIBOSS CACHE DROPPED: FREE PICK" };
+            banners.write(BannerMsg(banner.into()));
         }
         (None, Some((e, tf, cache))) => {
             // A client learns of a stage change in the same snapshot that clears the field;

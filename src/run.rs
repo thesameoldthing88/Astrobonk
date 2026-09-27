@@ -603,7 +603,7 @@ impl UpgradeOption {
                 let d = i.def();
                 let stats: Vec<String> =
                     d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                format!("{}\n{}{}", d.desc, stats.join(", "), catalyst_line(*i))
+                format!("{}\n{}{}", d.desc, stats.join(", "), catalyst_line(*i, run))
             }
             UpgradeOption::ItemUp(i) => {
                 let d = i.def();
@@ -615,7 +615,7 @@ impl UpgradeOption {
                     run.item_count(*i),
                     d.max_stacks,
                     stats.join(", "),
-                    catalyst_line(*i)
+                    catalyst_line(*i, run)
                 )
             }
             UpgradeOption::GoldPile(_) => "Cold hard currency".into(),
@@ -629,11 +629,15 @@ fn evo_slots_full(run: &PlayerState) -> String {
     format!("Evolution slots full ({}/{})", run.evolutions_used(), run.evo_cap())
 }
 
-/// "Evo catalyst: Wrench" line for item cards (empty if the item evolves nothing).
-pub fn catalyst_line(item: ItemKind) -> String {
+/// "Evo catalyst: Wrench" line for item cards (empty if the item evolves nothing). Once
+/// every evolution slot is taken it says so instead: a catalyst hint would sell the player
+/// an evolution the cap will refuse.
+pub fn catalyst_line(item: ItemKind, run: &PlayerState) -> String {
     let weapons = WeaponKind::catalyst_for(item);
     if weapons.is_empty() {
         String::new()
+    } else if run.evolutions_used() >= run.evo_cap() {
+        format!("\n{}", evo_slots_full(run))
     } else {
         let names: Vec<&str> = weapons.iter().map(|w| w.def().name).collect();
         format!("\nEvo catalyst: {}", names.join(", "))
@@ -880,9 +884,16 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
     if roll_upgrades(&ps, save, &mut rng).iter().any(|o| matches!(o, UpgradeOption::Evolve(_))) {
         return Err("an evolution card was dealt past the cap".into());
     }
+    let catalyst_card = UpgradeOption::ItemUp(pairs[1].1).body(&ps);
+    if catalyst_card.contains("Evo catalyst") || !catalyst_card.contains("Evolution slots full") {
+        return Err("an item card still advertised an evolution past the cap".into());
+    }
     ps.evo_slots_bonus = 1; // what Tome of Ascension grants
     if ps.evolvable() != vec![pairs[1].0] {
         return Err("an extra evolution slot did not reopen the second evolution".into());
+    }
+    if !UpgradeOption::ItemUp(pairs[1].1).body(&ps).contains("Evo catalyst") {
+        return Err("a free evolution slot hid the catalyst hint".into());
     }
     Ok(())
 }

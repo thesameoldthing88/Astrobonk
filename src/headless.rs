@@ -46,12 +46,18 @@ fn scripted_choice(
         panic!("SMOKE FAIL: a banished card was dealt again ({:?})", panel.options);
     }
     script.levelups += 1;
-    // Refresh until the free ones are gone, then once more at a price.
-    loop {
+    // Refresh until the free ones are gone, then once more at a price. Bounded, because
+    // Lady Fortuna's refreshes stay free forever and "once it costs Gold" never comes.
+    for _ in 0..=FREE_REFRESHES {
         let (gold, price) = (ps.gold, ps.refresh_price());
         let ok = ps.spend_refresh();
         match (price, ok) {
-            (RefreshPrice::Free, true) => script.free_refreshes += 1,
+            (RefreshPrice::Free, true) => {
+                if ps.gold != gold {
+                    panic!("SMOKE FAIL: a free refresh charged {}g", gold - ps.gold);
+                }
+                script.free_refreshes += 1;
+            }
             (RefreshPrice::Gold(c), true) => {
                 if ps.gold != gold - c {
                     panic!("SMOKE FAIL: paid refresh charged {} not {c}", gold - ps.gold);
@@ -292,6 +298,66 @@ fn enemy_distance_probe(
     );
 }
 
+/// `--balance`: what the §3 horde asks of a real build across a WHOLE stage and into The
+/// Static. The bot is kept alive (it is too dumb to dodge past ~4 min, so survival says
+/// nothing about the late stage) and every 30 s prints the horde's inflow — spawns/s and
+/// crowd HP/s at the current `Scaling` — against the party's kills/s and live count. Kills
+/// keeping pace with spawns means the build clears the horde; a live count climbing to the
+/// cap means it is drowning. This is the number to tune `SCALE_*` against, not bot deaths.
+#[derive(Default)]
+struct BalanceWindow {
+    secs: f32,
+    spawned: u32,
+    spawned_hp: f32,
+    kills: u32,
+}
+
+fn balance_probe(
+    time: Res<Time>,
+    run: Res<RunState>,
+    mut q_ps: Query<&mut PlayerState>,
+    q_new: Query<&Enemy, (Added<Enemy>, Without<crate::enemies::Boss>)>,
+    q_alive: Query<&Enemy>,
+    mut kills: MessageReader<crate::messages::KillMsg>,
+    mut win: Local<BalanceWindow>,
+) {
+    // Runs between apply_player_hits and downed_watch, so a lethal hit never ends the run.
+    for mut ps in &mut q_ps {
+        ps.hp = ps.stats.max_hp;
+        ps.dead = false;
+    }
+    // speed 0 = pots, which share the Enemy component but are scenery
+    for e in q_new.iter().filter(|e| e.speed > 0.0) {
+        win.spawned += 1;
+        win.spawned_hp += e.max_hp;
+    }
+    win.kills += kills.read().filter(|k| !k.is_pot).count() as u32;
+    win.secs += time.delta_secs();
+    if win.secs < 30.0 {
+        return;
+    }
+    let w = win.secs;
+    let sc = crate::run::scaling::Scaling::for_run(&run, q_ps.iter().count());
+    let lead = q_ps.iter().next();
+    let weapons: Vec<String> = lead
+        .map(|p| p.weapons.iter().map(|w| format!("{}:{}", w.kind.def().name, w.level)).collect())
+        .unwrap_or_default();
+    println!(
+        "  BALANCE t={:>4.0}s stage={} lvl={:<3} horde[hp x{:.2} dmg x{:.2}] spawns/s={:>5.1} crowdHP/s={:>6.0} kills/s={:>5.1} alive={:>4} weapons=[{}]",
+        run.total_elapsed,
+        run.stage,
+        lead.map(|p| p.level).unwrap_or(1),
+        sc.hp,
+        sc.dmg,
+        win.spawned as f32 / w,
+        win.spawned_hp / w,
+        win.kills as f32 / w,
+        q_alive.iter().filter(|e| e.speed > 0.0).count(),
+        weapons.join(", ")
+    );
+    *win = BalanceWindow::default();
+}
+
 fn bot_watchdog(run: Res<RunState>, q_ps: Query<&PlayerState, With<crate::player::LocalPlayer>>, q_enemies: Query<(), With<Enemy>>, mut ticks: Local<u64>) {
     *ticks += 1;
     let alive = q_enemies.iter().count();
@@ -445,6 +511,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::director::stage_transition,
                 crate::interact::sync_reward_cache.before(crate::director::stage_transition),
                 bot_watchdog,
+                balance_probe
+                    .after(crate::combat::apply_player_hits)
+                    .before(crate::director::downed_watch)
+                    .run_if(|| std::env::args().any(|a| a == "--balance")),
             ),
         )
         .add_systems(
@@ -518,7 +588,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: bot killed nothing");
         ok = false;
     }
-    if p_level < 2 && run.kills > 50 {
+    // Not on --fast-boss: its ~12 s life can end right after a Comet cash-out pops 100 bodies
+    // across the planet, before the kiting bot walks over a single gem (failed ~1 run in 4,
+    // base build included). The plain runs keep the XP pipeline honest.
+    if p_level < 2 && run.kills > 50 && !fast_boss {
         println!("FAIL: XP pipeline dead (kills but no levels)");
         ok = false;
     }

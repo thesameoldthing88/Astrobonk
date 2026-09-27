@@ -273,6 +273,9 @@ pub fn choice_input(
 }
 
 fn finish_choice(run: &mut PlayerState, panel: &mut ChoicePanel, phase: &mut RunPhase, save: &MetaSave) {
+    // Banish mode belongs to the hand it was armed on. Carried into the next queued hand
+    // (B, then Skip) it would turn the player's first click there into a spent charge.
+    panel.banishing = false;
     if panel.is_levelup {
         run.pending_levelups = run.pending_levelups.saturating_sub(1);
         if run.pending_levelups > 0 {
@@ -313,6 +316,7 @@ pub fn chest_panel(
         let Some(item) = chest.item else { return };
         let d = item.def();
         let cost = chest.cost;
+        let cat = crate::run::catalyst_line(item, &run);
         commands
             .spawn((ChestRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
             .with_children(|root| {
@@ -336,7 +340,6 @@ pub fn chest_panel(
                     card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
                     let stats: Vec<String> = d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
                     card.spawn(txt(stats.join(", "), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
-                    let cat = crate::run::catalyst_line(item);
                     if !cat.is_empty() {
                         card.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
                     }
@@ -432,6 +435,8 @@ pub fn shop_panel(
         }
         let offers = shop.offers.clone();
         let gold = run.gold;
+        let cats: Vec<String> =
+            offers.iter().map(|(item, _, _)| crate::run::catalyst_line(*item, &run)).collect();
         commands
             .spawn((ShopRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
             .with_children(|root| {
@@ -458,7 +463,7 @@ pub fn shop_panel(
                                 c.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
                                 c.spawn(txt(d.name, FONT_MED, Color::WHITE));
                                 c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                                let cat = crate::run::catalyst_line(*item);
+                                let cat = &cats[i];
                                 if !cat.is_empty() {
                                     c.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
                                 }

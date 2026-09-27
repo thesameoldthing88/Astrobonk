@@ -48,6 +48,13 @@ pub fn playing(phase: Res<run::RunPhase>) -> bool {
     *phase == run::RunPhase::Playing
 }
 
+/// A test-harness flag that bends a run (winds the clock, hands out loot) counts only when
+/// `--dev` is passed with it, so a shipped binary can't be talked into it (CLAUDE.md rule
+/// 10). P28 routes the older harness flags (`--bossnow`, `--stagenow`, …) through here too.
+pub fn dev_flag(name: &str) -> bool {
+    std::env::args().any(|a| a == "--dev") && std::env::args().any(|a| a == name)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--headless") {
@@ -161,7 +168,7 @@ fn main() {
             Update,
             dev_levelup_now
                 .run_if(in_state(AppState::InRun))
-                .run_if(|| std::env::args().any(|a| a == "--levelupnow")),
+                .run_if(|| dev_flag("--levelupnow")),
         )
         .add_systems(
             Update,
@@ -174,7 +181,7 @@ fn main() {
             director::dev_miniboss_now
                 .run_if(net::is_simulating)
                 .run_if(in_state(AppState::InRun).and(playing))
-                .run_if(|| std::env::args().any(|a| a == "--minibossnow")),
+                .run_if(|| dev_flag("--minibossnow")),
         )
         .add_systems(
             Update,
@@ -535,9 +542,9 @@ fn dev_fast_boss(
     *done = true;
 }
 
-/// `--levelupnow`: queue three level-ups and 60 Gold on the local astronaut a few seconds
-/// in, so the level-up panel's Refresh (free, then paid) / Banish / Skip row can be driven
-/// and screenshot in a windowed test without farming gems first.
+/// `--dev --levelupnow`: queue three level-ups and 60 Gold on the local astronaut a few
+/// seconds in, so the level-up panel's Refresh (free, then paid) / Banish / Skip row can be
+/// driven and screenshot in a windowed test without farming gems first.
 fn dev_levelup_now(
     time: Res<Time>,
     mut q: Query<&mut run::PlayerState, With<player::LocalPlayer>>,
