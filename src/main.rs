@@ -26,6 +26,7 @@ mod sphere;
 mod stats;
 mod techs;
 mod tomes;
+mod toon;
 mod tutorial;
 mod ui;
 
@@ -97,12 +98,17 @@ fn main() {
             }),
             ..default()
         }))
-        // dim enough that the night side is dark and the flashlight earns its keep
+        // dim enough that the night side is dark and the flashlight earns its keep (each
+        // world re-grades it from its `ToonLook`, `toon::apply_world_look`)
         .insert_resource(GlobalAmbientLight {
             color: Color::srgb(0.65, 0.7, 0.9),
             brightness: 80.0,
             ..default()
         })
+        // space, not Bevy's default mid-gray, behind the menus too (each world then sets its
+        // own sky)
+        .insert_resource(ClearColor(content::planets::PlanetKind::Moon.def().sky))
+        .add_plugins(toon::ToonPlugin)
         .add_plugins(net::NetPlugin)
         .add_plugins(remote::RemoteVisualsPlugin)
         .add_plugins(netenemy::EnemyStreamPlugin)
@@ -383,6 +389,15 @@ fn main() {
                 .run_if(in_state(AppState::InRun))
                 .run_if(|| dev_flag("--items")),
         )
+        // `--dev --warp noon|dusk|night`: the toon look's windowed checks (P36) — every run
+        // lands on the night side, so the lit side needs a walk the bot takes minutes over.
+        .add_systems(
+            Update,
+            dev_warp
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing))
+                .run_if(|| dev_flag("--warp")),
+        )
         // ------------- §4 movement techs: the moves themselves are player_input/physics on
         // every body a machine moves; what they do to the WORLD (a blink, the Slam's
         // shockwave, the slide's plow, the antipode read) is the host's, for every
@@ -561,8 +576,17 @@ fn setup_camera(mut commands: Commands) {
     commands.spawn((
         Camera3d::default(),
         Hdr,
-        Bloom::NATURAL,
+        Bloom {
+            intensity: config::BLOOM_INTENSITY,
+            prefilter: bevy::post_process::bloom::BloomPrefilter {
+                threshold: config::BLOOM_THRESHOLD,
+                threshold_softness: config::BLOOM_THRESHOLD_SOFTNESS,
+            },
+            ..Bloom::NATURAL
+        },
         bevy::core_pipeline::tonemapping::Tonemapping::AcesFitted,
+        // the toon look: prepasses for the ink, cel shadows, the per-world grade
+        toon::camera_bundle(),
         Transform::from_xyz(0.0, 140.0, 220.0).looking_at(Vec3::ZERO, Vec3::Y),
         player::PlayerRig,
     ));
@@ -880,6 +904,45 @@ fn dev_grant_items(
     let granted = items::grant_items(&mut ps, &items::items_from_args(), &save, run.greed_stacks);
     info!("DEV --items: granted {granted:?}");
     *done = true;
+}
+
+/// `--dev --warp noon|dusk|night`: a second in, set the local astronaut down where the sun
+/// stands high, just on the lit side of the terminator, or deep in the night, facing away
+/// from the sun (lit faces toward the camera; at dusk, the terminator ahead). Host/solo only
+/// — a joiner's body is the host's to move.
+fn dev_warp(
+    time: Res<Time>,
+    mut q: Query<(&mut player::Player, &mut techs::MoveTech), With<player::LocalPlayer>>,
+    mut waited: Local<f32>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    *waited += time.delta_secs();
+    if *waited < 1.0 {
+        return;
+    }
+    let Ok((mut p, mut tech)) = q.single_mut() else { return };
+    let args: Vec<String> = std::env::args().collect();
+    let want = args.iter().position(|a| a == "--warp").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
+    // how high the sun stands over the spot (sun · up)
+    let sun_up = match want.as_str() {
+        "noon" => 0.85,
+        "dusk" => 0.12,
+        _ => -0.8,
+    };
+    let sun = planet::sunward();
+    let across = sphere::tangent_frame(sun).0;
+    let dir = (sun * sun_up + across * (1.0 - sun_up * sun_up).sqrt()).normalize();
+    tech.cancel_moves();
+    p.dir = dir;
+    p.vel_t = Vec3::ZERO;
+    p.vel_r = 0.0;
+    p.height = 0.0;
+    p.facing = (dir * sun.dot(dir) - sun).normalize_or_zero();
+    *done = true;
+    info!("DEV --warp {want}: sun·up {sun_up:.2}");
 }
 
 /// `--dev --give deathray,stormcore`: hand the local astronaut these weapons (names as the

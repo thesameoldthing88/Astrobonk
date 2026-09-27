@@ -128,8 +128,9 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
         let h = terrain.height(dir);
         let r = def.radius * (1.0 + def.hill_amp * h);
         positions.push([dir.x * r, dir.y * r, dir.z * r]);
-        // color by height band: crater floors dark, peaks bright
-        let t = (h * 0.38 + 0.5).clamp(0.0, 1.0);
+        // color by height band: crater floors dark, peaks bright — in flat painted steps
+        // (the toon look's contour bands), not a smooth ramp
+        let t = toon_height_band((h * 0.38 + 0.5).clamp(0.0, 1.0));
         let c = if t < 0.5 {
             mix(low, mid, t * 2.0)
         } else {
@@ -143,7 +144,34 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(faces));
     mesh.compute_smooth_normals();
+    toon_terrain_normals(&mut mesh);
     mesh
+}
+
+/// Snap a 0..1 terrain height to one of TOON_TERRAIN_BANDS flat color steps, each blending
+/// into the next over a sliver of height — a vertex apart, so the steps read as painted
+/// contour lines rather than as a staircase of triangles.
+fn toon_height_band(t: f32) -> f32 {
+    let n = crate::config::TOON_TERRAIN_BANDS as f32;
+    let x = t * n;
+    let step = x.floor().min(n - 1.0);
+    let edge = ((x - step - (1.0 - 0.15)) / 0.15).clamp(0.0, 1.0);
+    ((step + edge) / (n - 1.0)).clamp(0.0, 1.0)
+}
+
+/// Cel bands quantize N·L, so every small bump in a noisy normal field turns into a speckle
+/// of triangles flipping between bands. Lean the shading normals toward the planet's own
+/// radial normal: the terminator becomes one clean line across the world and only the big
+/// hills and crater walls step into their own bands. Visual only — collision stays analytic.
+fn toon_terrain_normals(mesh: &mut Mesh) {
+    let Some(pos) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else { return };
+    let radial: Vec<Vec3> = pos.iter().map(|p| Vec3::from(*p).normalize_or_zero()).collect();
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(nrm)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+        for (n, up) in nrm.iter_mut().zip(radial) {
+            let lean = up.lerp(Vec3::from(*n), crate::config::TOON_TERRAIN_NORMAL_DETAIL).normalize_or_zero();
+            *n = lean.to_array();
+        }
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
@@ -172,9 +200,8 @@ pub fn spawn_stage(
     // solid props collected as we place them
     let mut colliders: Vec<PropCollider> = Vec::new();
 
-    // The space behind the world: the planet's own near-black sky, not the renderer's
-    // default mid-grey clear colour (L6). Every machine builds its stage through here.
-    commands.insert_resource(ClearColor(def.sky));
+    // The space behind the world (L6) is set with the rest of the planet's look by
+    // `toon::apply_world_look`, whenever CurrentPlanet changes.
 
     // Terrain: 163,842 vertices of pure function of the planet's constants, so it is built
     // once per world per session and re-used on every later visit (L8: rebuilding it on
@@ -230,6 +257,9 @@ pub fn spawn_stage(
         );
         let dir = (dir + jitter).normalize();
         let scale = rng.gen_range(0.4..2.4) * Vec3::new(rng.gen_range(0.8..1.3), rng.gen_range(0.6..1.1), rng.gen_range(0.8..1.3));
+        if !clear_of_start(dir, planet) {
+            continue; // after the draws, so the rest of the layout is unchanged by the skip
+        }
         let pos = planet.surface_point(dir) - dir * scale.y * 0.25;
         let fwd = sphere::tangent_frame(dir).0;
         commands.spawn((
@@ -251,7 +281,7 @@ pub fn spawn_stage(
         .map(|i| make_rock(meshes, 400 + i * 17 + planet.terrain.seed, 0.6, 1))
         .collect();
     for _ in 0..(def.rocks / 20).max(4) {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let scale = rng.gen_range(3.0..6.0);
         let pos = planet.surface_point(dir) - dir * scale * 0.3;
         let fwd = sphere::tangent_frame(dir).0;
@@ -276,7 +306,7 @@ pub fn spawn_stage(
     });
     let crystal_mesh = meshes.add(Mesh::from(Cone::new(0.35, 1.6)));
     for _ in 0..def.crystals {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let pos = planet.surface_point(dir);
         let fwd = sphere::tangent_frame(dir).0;
         let scale = rng.gen_range(0.6..1.5);
@@ -309,7 +339,7 @@ pub fn spawn_stage(
         w.add_box(Vec3::new(0.9, 0.05, 0.7), at(Vec3::new(0.3, 0.75, -0.2)), Color::srgb(0.4, 0.4, 0.45)); // torn panel
         let wreck_mesh = meshes.add(w.build());
         for _ in 0..def.rocks / 45 + 3 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let scale = rng.gen_range(1.4..2.4);
             let pos = planet.surface_point(dir) - dir * scale * 0.4; // half-sunk
             let fwd = sphere::tangent_frame(dir).0;
@@ -347,7 +377,7 @@ pub fn spawn_stage(
         let beacon_mesh = meshes.add(b.build());
         let light_mesh = meshes.add(Mesh::from(Sphere::new(0.09)));
         for _ in 0..def.crystals / 8 + 4 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let rot = sphere::frame_quat(dir, fwd);
@@ -417,7 +447,7 @@ pub fn spawn_stage(
                 ),
             };
         for _ in 0..def.flora {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let scale = rng.gen_range(0.7..1.6);
@@ -641,6 +671,22 @@ pub fn is_night(dir: Vec3, sun_shrink: f32) -> bool {
     sun_shrink >= 1.0 || dir.dot(sunward()) < sun_shrink.max(0.0)
 }
 
+/// Outside the drop zone every stage starts in (see `START_CLEAR_ARC`). A pure function of
+/// the direction, so it never makes two machines' layouts diverge.
+fn clear_of_start(dir: Vec3, planet: &CurrentPlanet) -> bool {
+    sphere::arc_dist(dir, Vec3::Y, planet.radius) > crate::config::START_CLEAR_ARC
+}
+
+/// A random placement for a prop: uniform over the sphere, re-drawn inside the drop zone.
+fn prop_dir(rng: &mut impl Rng, planet: &CurrentPlanet) -> Vec3 {
+    loop {
+        let d = random_dir(rng);
+        if clear_of_start(d, planet) {
+            return d;
+        }
+    }
+}
+
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
     loop {
         let v = Vec3::new(
@@ -654,3 +700,24 @@ pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// The painted height steps: flat plateaus, climbing monotonically from floor to peak.
+    #[test]
+    fn toon_height_band_is_monotonic_and_stepped() {
+        let n = crate::config::TOON_TERRAIN_BANDS;
+        let mut last = -1.0;
+        let mut levels = Vec::new();
+        for i in 0..=1000 {
+            let b = super::toon_height_band(i as f32 / 1000.0);
+            assert!((0.0..=1.0).contains(&b) && b >= last - 1e-6, "not monotonic at {i}");
+            if levels.last().is_none_or(|l: &f32| (b - l).abs() > 1e-4) && (b * (n - 1) as f32).fract() < 1e-4 {
+                levels.push(b);
+            }
+            last = b;
+        }
+        assert_eq!(levels.len(), n, "want {n} flat levels, got {levels:?}");
+    }
+}
+

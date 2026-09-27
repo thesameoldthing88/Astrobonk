@@ -47,6 +47,22 @@ pub struct PlanetDef {
     pub threat: f32,
 }
 
+/// A world's toon grade (locked direction #7), applied by `toon::apply_world_look` whenever
+/// the stage's planet changes. Its sky, sun and ground colors stay on `PlanetDef`.
+pub struct ToonLook {
+    /// Ink outline color: a deep shade of the world, never pure black, never danger red.
+    pub ink: Color,
+    /// The night side's only light (the global ambient): tint and brightness. Dark enough
+    /// that the flashlight cone is THE read at night, cold enough to feel like dread.
+    pub night: Color,
+    pub night_brightness: f32,
+    /// Color grading: post-tonemap saturation, so the flat cel colors pop...
+    pub saturation: f32,
+    /// ...and exposure (EV): cel bands light a face fully or not at all, so a bright world
+    /// (the pale Moon) needs stopping down to keep its lit side from bleaching to white.
+    pub exposure: f32,
+}
+
 impl PlanetKind {
     pub const ALL: [PlanetKind; 3] = [PlanetKind::Moon, PlanetKind::Mars, PlanetKind::DarkMoon];
 
@@ -63,10 +79,10 @@ impl PlanetKind {
                 craters: 10,
                 crater_depth: 0.8,
                 seed: 7,
-                ground: Color::srgb(0.62, 0.62, 0.66),
-                ground_low: Color::srgb(0.40, 0.40, 0.46),
-                ground_high: Color::srgb(0.82, 0.82, 0.86),
-                sky: Color::srgb(0.008, 0.008, 0.015),
+                ground: Color::srgb(0.54, 0.55, 0.63),
+                ground_low: Color::srgb(0.3, 0.31, 0.43),
+                ground_high: Color::srgb(0.78, 0.79, 0.88),
+                sky: Color::srgb(0.016, 0.022, 0.06),
                 sun: Color::srgb(1.0, 0.98, 0.92),
                 enemy_tint: Color::srgb(0.5, 0.9, 0.6),
                 rocks: 200,
@@ -88,10 +104,10 @@ impl PlanetKind {
                 craters: 6,
                 crater_depth: 0.5,
                 seed: 23,
-                ground: Color::srgb(0.72, 0.42, 0.26),
-                ground_low: Color::srgb(0.48, 0.24, 0.15),
-                ground_high: Color::srgb(0.88, 0.60, 0.40),
-                sky: Color::srgb(0.03, 0.012, 0.008),
+                ground: Color::srgb(0.74, 0.46, 0.30),
+                ground_low: Color::srgb(0.44, 0.27, 0.21),
+                ground_high: Color::srgb(0.88, 0.66, 0.46),
+                sky: Color::srgb(0.04, 0.02, 0.045),
                 sun: Color::srgb(1.0, 0.85, 0.7),
                 enemy_tint: Color::srgb(0.95, 0.55, 0.35),
                 rocks: 250,
@@ -116,8 +132,8 @@ impl PlanetKind {
                 ground: Color::srgb(0.20, 0.16, 0.28),
                 ground_low: Color::srgb(0.09, 0.07, 0.15),
                 ground_high: Color::srgb(0.36, 0.28, 0.46),
-                sky: Color::srgb(0.010, 0.002, 0.018),
-                sun: Color::srgb(0.75, 0.55, 1.0),
+                sky: Color::srgb(0.03, 0.008, 0.055),
+                sun: Color::srgb(0.74, 0.6, 0.95),
                 enemy_tint: Color::srgb(0.8, 0.5, 1.0),
                 rocks: 120,
                 crystals: 85,
@@ -127,6 +143,34 @@ impl PlanetKind {
                 has_earthrise: false,
                 meteor_showers: false,
                 threat: 1.25,
+            },
+        }
+    }
+
+    /// The toon grade (see `ToonLook`). Exhaustive on purpose: a new world must pick one.
+    pub fn look(&self) -> ToonLook {
+        use PlanetKind::*;
+        match self {
+            Moon => ToonLook {
+                ink: Color::srgb(0.05, 0.06, 0.15),
+                night: Color::srgb(0.55, 0.64, 1.0),
+                night_brightness: 70.0,
+                saturation: 1.1,
+                exposure: -0.7,
+            },
+            Mars => ToonLook {
+                ink: Color::srgb(0.13, 0.05, 0.05),
+                night: Color::srgb(0.72, 0.55, 0.9),
+                night_brightness: 70.0,
+                saturation: 1.0,
+                exposure: -0.25,
+            },
+            DarkMoon => ToonLook {
+                ink: Color::srgb(0.06, 0.02, 0.1),
+                night: Color::srgb(0.5, 0.45, 1.0),
+                night_brightness: 60.0,
+                saturation: 1.05,
+                exposure: -0.15,
             },
         }
     }
