@@ -248,10 +248,10 @@ cargo build --release          # produces target/release/astrobonk.exe (~69 MB),
 | 1-4 | Pick a level-up card. On the chest panel, 1 takes and 2 leaves; in the shop, 1-3 buy | src/ui/panels.rs:160, 328-334, 450 |
 | R / B / S | Refresh / Banish / Skip on the level-up panel. **S is also move-back** | src/ui/panels.rs:171-183 |
 | Esc | Pause and resume (Settings and Abandon Run are in the pause menu); also closes panels | src/ui/panels.rs:525-526, 568 |
-| **B (DEV)** | **Summons the current planet's stage boss** during play. It shares the key with Banish. This ships ungated (M14) | src/enemies.rs:913-936 |
-| **T (DEV)** | Replays the tutorial | src/tutorial.rs:42-45 |
+| **B (DEV, `--dev` only)** | **Summons the current planet's stage boss** during play (gated since P30, M14) | src/enemies.rs `debug_spawn_boss` |
+| **T (DEV, `--dev` only)** | Replays the tutorial | src/tutorial.rs |
 
-**Known text error:** tutorial line 4 says "Shift to slide" (src/tutorial.rs:24). Slide is actually Ctrl or C.
+Slide is Shift, Ctrl or C since P06, so the tutorial's "Shift to slide" is true.
 
 ### 4.3 Headless smoke tests (no window)
 
