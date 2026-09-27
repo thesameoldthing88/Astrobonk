@@ -736,7 +736,6 @@ fn enter_run(
     game_rng.reseed(stage_seed);
     let planet = planet::CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, my_slot, run_state.character, true, None);
     interact::spawn_interactables(
         &mut commands,
@@ -747,8 +746,10 @@ fn enter_run(
         &run::PlayerState::new(run_state.character, &save),
         &save,
         &rails,
+        &props,
         Vec3::Y,
     );
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
     *director_res = enemies::Director::default();

@@ -247,7 +247,6 @@ pub fn stage_transition(
 
     let planet = CurrentPlanet::from_kind(run.planet());
     let (props, rails) = planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     let ps_snapshot = carried
         .iter()
         .find(|(_, _, local)| *local)
@@ -263,7 +262,8 @@ pub fn stage_transition(
             );
         }
     }
-    interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &ps_snapshot, &save, &rails, Vec3::Y);
+    interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run, &ps_snapshot, &save, &rails, &props, Vec3::Y);
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
 

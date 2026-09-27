@@ -2608,14 +2608,14 @@ fn headless_enter(
     game_rng.reseed(stage_seed);
     let planet = CurrentPlanet::from_kind(run_state.planet());
     let (props, rails) = crate::planet::spawn_stage(&mut commands, &mut meshes, &mut materials, &planet, stage_seed);
-    commands.insert_resource(props);
     crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 0, run_state.character, true, None);
     // `--coop2` reproduces a 2-player HOST headlessly. Without it none of the multi-player
     // work is testable without launching two windows by hand.
     if std::env::args().any(|a| a == "--coop2") {
         crate::player::spawn_player(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &save, 1, run_state.character, false, None);
     }
-    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, Vec3::Y);
+    crate::interact::spawn_interactables(&mut commands, &mut meshes, &mut materials, &planet, &run_state, &PlayerState::new(run_state.character, &save), &save, &rails, &props, Vec3::Y);
+    commands.insert_resource(props);
     commands.insert_resource(rails);
     commands.insert_resource(planet);
 }
