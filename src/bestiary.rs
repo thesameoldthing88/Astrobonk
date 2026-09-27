@@ -1561,7 +1561,7 @@ pub fn dev_spawn_enemies(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    me: Query<&Player, With<LocalPlayer>>,
+    mut me: Query<&mut Player, With<LocalPlayer>>,
     q_party: Query<(), With<Player>>,
     mut next: Local<f32>,
     mut kinds: Local<Option<Vec<EnemyKind>>>,
@@ -1571,7 +1571,8 @@ pub fn dev_spawn_enemies(
     if kinds.is_empty() || now < *next {
         return;
     }
-    let Ok(p) = me.single() else { return };
+    let Ok(mut p) = me.single_mut() else { return };
+    if *next == 0.0 { p.dir = (crate::planet::sunward() + Vec3::Y * 0.3).normalize(); } // TEMP daylight
     *next = now + 12.0;
     let sc = Scaling::for_run(&run, q_party.iter().count());
     let mut rng = rand::thread_rng();
