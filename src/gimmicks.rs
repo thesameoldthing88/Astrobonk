@@ -368,7 +368,8 @@ const CRAWL_END: f32 = 1.0 + CRAWL_ERUPT_SECS / CRAWL_MASS_SECS;
 
 impl CrawlSite {
     pub fn erupting(&self) -> bool {
-        self.mass >= 1.0
+        // a hair early: massing in frame steps must not miss the frame The Static rises on
+        self.mass >= 1.0 - 1e-3
     }
     /// Seconds of its life (massing and erupting) left.
     pub fn secs_left(&self) -> f32 {
