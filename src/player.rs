@@ -233,7 +233,6 @@ pub fn spawn_player(
     // starts a fresh sheet. Without this, every player's build is wiped on teleport.
     carried: Option<PlayerState>,
 ) -> Entity {
-    let def = character.def();
     // fan players out around the drop point so they don't spawn inside each other
     let dir = if id == 0 {
         Vec3::Y
@@ -303,17 +302,17 @@ pub fn spawn_player(
         ))
         .insert_if(LocalPlayer, || is_local)
         .id();
-    build_astronaut_rig(commands, root, meshes, materials, def.suit, def.visor, is_local);
+    build_astronaut_rig(commands, root, meshes, materials, character.look(), is_local);
     root
 }
 
-/// Which hero's suit an astronaut's rig was built in. Compared against the sheet by
+/// Which suit an astronaut's rig was built in. Compared against the sheet by
 /// `refit_astronaut_rigs`, because on a co-op host a peer is seated before its first build
 /// heartbeat says which hero it plays.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct RigHero(pub crate::content::characters::AstronautKind);
 
-/// Rebuild an astronaut's rig in its hero's suit whenever the sheet's hero and the rig
+/// Rebuild an astronaut's rig in its suit whenever the sheet's suit and the rig
 /// disagree. Every child of an astronaut is rig, so the swap is clear-and-rebuild.
 pub fn refit_astronaut_rigs(
     mut commands: Commands,
@@ -326,14 +325,15 @@ pub fn refit_astronaut_rigs(
             continue;
         }
         rig.0 = ps.character;
-        let def = ps.character.def();
         commands.entity(e).despawn_related::<Children>();
-        build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, local);
+        build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, ps.character.look(), local);
     }
 }
 
 /// Build the astronaut's VISUAL rig as children of `root`: torso, helmet, four animated
-/// limbs, tool and flashlight. Deliberately separate from `spawn_player` so a networked
+/// limbs, tool and flashlight. It is always Milo (locked direction #3): his body, backpack
+/// and turtle-shell patch never change; `look` is the suit he wears over them, its palette,
+/// trim and helmet (`suits::helmet_meshes`). Deliberately separate from `spawn_player` so a networked
 /// remote player can wear the same look WITHOUT inheriting `Player`, `PlayerState` or
 /// `StageScoped` — a replicated entity is owned by the server, and giving it a `Player`
 /// would both stomp its network-driven transform in `player_physics` and break the many
@@ -350,10 +350,10 @@ pub fn build_astronaut_rig(
     root: Entity,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    suit_color: Color,
-    visor_color: Color,
+    look: crate::content::characters::SuitLook,
     local: bool,
 ) {
+    let (suit_color, visor_color, trim_color) = (look.suit, look.visor, look.trim);
     let suit = rig_material(materials, RigMat::Suit, suit_color, || StandardMaterial {
         base_color: suit_color,
         perceptual_roughness: 0.7,
@@ -370,10 +370,34 @@ pub fn build_astronaut_rig(
         perceptual_roughness: 0.9,
         ..default()
     });
+    let trim = rig_material(materials, RigMat::Trim, trim_color, || StandardMaterial {
+        base_color: trim_color,
+        perceptual_roughness: 0.45,
+        metallic: 0.2,
+        ..default()
+    });
+    // the turtle patch's colours are in its vertices
+    let patch_mat = rig_material(materials, RigMat::Patch, Color::WHITE, || StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.6,
+        ..default()
+    });
     let torso_mesh = rig_mesh(meshes, RigMesh::Torso, astronaut_torso_mesh);
     let backpack = rig_mesh(meshes, RigMesh::Backpack, backpack_mesh);
-    let helmet = rig_mesh(meshes, RigMesh::Helmet, || Mesh::from(Sphere::new(0.3)));
-    let visor_mesh = rig_mesh(meshes, RigMesh::Visor, || Mesh::from(Sphere::new(0.24)));
+    let style = look.helmet;
+    // the helmet's three parts are built together; each handle is cached on its own
+    let mut parts: Option<[Mesh; 3]> = None;
+    let mut part = |i: usize| {
+        let parts = parts.get_or_insert_with(|| crate::suits::helmet_meshes(style));
+        std::mem::replace(&mut parts[i], Mesh::new(bevy::mesh::PrimitiveTopology::TriangleList, default()))
+    };
+    let helmet = rig_mesh(meshes, RigMesh::HelmetShell(style), || part(0));
+    let helmet_trim = rig_mesh(meshes, RigMesh::HelmetTrim(style), || part(1));
+    let helmet_glow = rig_mesh(meshes, RigMesh::HelmetGlow(style), || part(2));
+    let body_trim = rig_mesh(meshes, RigMesh::BodyTrim, crate::suits::body_trim_mesh);
+    let arm_cuff = rig_mesh(meshes, RigMesh::ArmCuff, crate::suits::arm_cuff_mesh);
+    let leg_cuff = rig_mesh(meshes, RigMesh::LegCuff, crate::suits::leg_cuff_mesh);
+    let patch = rig_mesh(meshes, RigMesh::TurtlePatch, crate::suits::turtle_patch_mesh);
     let arm_mesh = rig_mesh(meshes, RigMesh::Arm, astronaut_arm_mesh);
     let leg_mesh = rig_mesh(meshes, RigMesh::Leg, astronaut_leg_mesh);
     let tool_mesh = rig_mesh(meshes, RigMesh::Tool, || Mesh::from(Cuboid::new(0.14, 0.16, 0.68)));
@@ -404,6 +428,9 @@ pub fn build_astronaut_rig(
                     MeshMaterial3d(pack),
                     Transform::from_xyz(0.0, 0.18, 0.0),
                 ));
+                b.spawn((RigPart::Trim, Mesh3d(body_trim), MeshMaterial3d(trim.clone()), Transform::IDENTITY));
+                // Milo's mark, the same in every suit: his turtle, strapped to his back
+                b.spawn((RigPart::TurtlePatch, Mesh3d(patch), MeshMaterial3d(patch_mat), Transform::from_xyz(0.0, 0.18, 0.0)));
             });
 
             // ---- HEAD joint: helmet + visor (gets the drag/scan layer) ----
@@ -414,24 +441,18 @@ pub fn build_astronaut_rig(
                 Visibility::default(),
             ))
             .with_children(|h| {
-                h.spawn((
-                    Mesh3d(helmet),
-                    MeshMaterial3d(suit.clone()),
-                    Transform::IDENTITY,
-                ));
-                h.spawn((
-                    Mesh3d(visor_mesh),
-                    MeshMaterial3d(visor),
-                    Transform::from_xyz(0.0, 0.02, -0.16).with_scale(Vec3::new(1.05, 0.85, 0.7)),
-                ));
+                h.spawn((RigPart::Helmet(style), Mesh3d(helmet), MeshMaterial3d(suit.clone()), Transform::IDENTITY));
+                h.spawn((Mesh3d(helmet_trim), MeshMaterial3d(trim.clone()), Transform::IDENTITY));
+                // the visor, and whatever else on this helmet glows
+                h.spawn((Mesh3d(helmet_glow), MeshMaterial3d(visor), Transform::IDENTITY));
             });
 
             // ---- LIMB joints: arms pivot at shoulders, legs at hips ----
-            for (limb, x, y, mesh) in [
-                (Limb::ArmL, -0.34, 0.42, arm_mesh.clone()),
-                (Limb::ArmR, 0.34, 0.42, arm_mesh),
-                (Limb::LegL, -0.15, -0.3, leg_mesh.clone()),
-                (Limb::LegR, 0.15, -0.3, leg_mesh),
+            for (limb, x, y, mesh, cuff) in [
+                (Limb::ArmL, -0.34, 0.42, arm_mesh.clone(), arm_cuff.clone()),
+                (Limb::ArmR, 0.34, 0.42, arm_mesh, arm_cuff),
+                (Limb::LegL, -0.15, -0.3, leg_mesh.clone(), leg_cuff.clone()),
+                (Limb::LegR, 0.15, -0.3, leg_mesh, leg_cuff),
             ] {
                 // arms rest with a slight outward splay (asymmetry sells life)
                 let rest = Transform::from_xyz(x, y, 0.0).with_rotation(
@@ -446,7 +467,8 @@ pub fn build_astronaut_rig(
                     Mesh3d(mesh),
                     MeshMaterial3d(suit.clone()),
                     rest,
-                ));
+                ))
+                .with_child((Mesh3d(cuff), MeshMaterial3d(trim.clone()), Transform::IDENTITY));
             }
             // hand tool (whatever weapon is equipped, this is its silhouette)
             p.spawn((
@@ -489,17 +511,55 @@ pub fn build_astronaut_rig(
         });
 }
 
+/// The parts of a rig that say which suit it wears (read by the headless `--suits` probe).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub enum RigPart {
+    /// The helmet's shell, in this style.
+    Helmet(crate::content::characters::Helmet),
+    /// The torso's trim (its material carries the suit's trim colour).
+    Trim,
+    /// The turtle-shell patch every suit keeps.
+    TurtlePatch,
+}
+
 /// The rig's shared meshes, one stable handle each (see `build_astronaut_rig`).
 #[derive(Clone, Copy)]
 enum RigMesh {
     Torso,
     Backpack,
-    Helmet,
-    Visor,
     Arm,
     Leg,
     Tool,
     Lens,
+    BodyTrim,
+    ArmCuff,
+    LegCuff,
+    TurtlePatch,
+    /// Each suit's helmet, in three parts (`suits::helmet_meshes`).
+    HelmetShell(crate::content::characters::Helmet),
+    HelmetTrim(crate::content::characters::Helmet),
+    HelmetGlow(crate::content::characters::Helmet),
+}
+
+impl RigMesh {
+    /// Its asset id's low half: a small integer per part (clear of the material keys).
+    fn id(self) -> u64 {
+        match self {
+            RigMesh::Torso => 0,
+            RigMesh::Backpack => 1,
+            RigMesh::Arm => 4,
+            RigMesh::Leg => 5,
+            RigMesh::Tool => 6,
+            RigMesh::Lens => 7,
+            RigMesh::BodyTrim => 8,
+            RigMesh::ArmCuff => 9,
+            RigMesh::LegCuff => 10,
+            RigMesh::TurtlePatch => 11,
+            RigMesh::HelmetShell(h) => 100 + h as u64,
+            RigMesh::HelmetTrim(h) => 200 + h as u64,
+            RigMesh::HelmetGlow(h) => 300 + h as u64,
+        }
+    }
 }
 
 /// Which slot of the rig a shared material fills (half of its cache key; the colour is the
@@ -510,13 +570,15 @@ enum RigMat {
     Visor,
     Pack,
     Tool,
+    Trim,
+    Patch,
 }
 
 /// The high half of the rig's shared-asset UUIDs.
 const RIG_ASSET_UUID_HI: u64 = 0xA570_B0_7E_2169_0001;
 
 fn rig_mesh(meshes: &mut Assets<Mesh>, which: RigMesh, build: impl FnOnce() -> Mesh) -> Handle<Mesh> {
-    let h = Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(RIG_ASSET_UUID_HI, which as u64), default());
+    let h = Handle::Uuid(bevy::asset::uuid::Uuid::from_u64_pair(RIG_ASSET_UUID_HI, which.id()), default());
     let _ = meshes.get_or_insert_with(&h, build);
     h
 }

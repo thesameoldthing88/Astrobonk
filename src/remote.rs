@@ -3,7 +3,7 @@
 //! The host simulates every astronaut and replicates a compact `NetTransform` per player.
 //! A client receives those as bare entities — `PlayerId`, `NetTransform`, `PlayerVitals`,
 //! `NetHero`, `NetComet` and nothing else — so by default nothing is drawn. This module
-//! gives each one the astronaut rig in its own hero's suit and drives it from the
+//! gives each one the astronaut rig in its own suit and drives it from the
 //! replicated pose (tucking through slides like the local astronaut does).
 //!
 //! THE CENTRAL RULE: a remote astronaut never gets a `Player` or `PlayerState` component.
@@ -40,7 +40,7 @@ pub struct RemoteAstronaut {
     pub grounded: bool,
     /// Mid-slide on the host — the rig tucks exactly as the local astronaut's does.
     pub sliding: bool,
-    /// The hero whose suit this rig wears; rebuilt if the replicated NetHero changes.
+    /// The suit this rig wears; rebuilt if the replicated NetHero changes.
     pub hero: AstronautKind,
     pub anim: RigAnim,
 }
@@ -84,7 +84,7 @@ fn spawn_remote_rigs(
         if pid.0 == my_id {
             continue; // the server's copy of us — we already draw our own predicted body
         }
-        // The teammate's own hero, from the replicated NetHero (it rides in with the
+        // The teammate's own suit, from the replicated NetHero (it rides in with the
         // entity, so the fallback only covers a pre-hero host).
         let hero = hero.map(|h| crate::net::hero_from_code(h.0)).unwrap_or(AstronautKind::Buzz);
         let def = hero.def();
@@ -114,13 +114,13 @@ fn spawn_remote_rigs(
         // No StageScoped: this entity belongs to the server. Letting despawn_stage reap it
         // would pull a replicated entity out from under replicon.
         // a teammate's flashlight lights the ground but casts no shadow (L9)
-        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.look(), false);
         info!("NET remote visual: built rig for player {}", pid.0);
     }
 }
 
-/// Re-suit a teammate whose hero changed. On a fresh join the host seats a peer before
-/// its first build heartbeat says who it plays, so the NetHero a client first sees can be
+/// Re-suit a teammate whose suit changed. On a fresh join the host seats a peer before
+/// its first build heartbeat says which suit it wears, so the NetHero a client first sees can be
 /// the host's pick for half a second; this is what makes the suit follow.
 fn refit_remote_rigs(
     mut commands: Commands,
@@ -137,8 +137,8 @@ fn refit_remote_rigs(
         let def = want.def();
         commands.entity(e).despawn_related::<Children>();
         // a teammate's flashlight lights the ground but casts no shadow (L9)
-        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.suit, def.visor, false);
-        info!("NET remote visual: re-suited a teammate as {}", def.name);
+        crate::player::build_astronaut_rig(&mut commands, e, &mut meshes, &mut materials, def.look(), false);
+        info!("NET remote visual: re-suited a teammate in the {} suit", def.name);
     }
 }
 

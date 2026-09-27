@@ -2099,13 +2099,8 @@ pub fn apply_cli_net(mut commands: Commands, channels: Res<RepliconChannels>) {
             .and_then(|i| args.get(i + 1))
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_PORT);
-        // The same `--hero` that `boot` builds this instance's RunState from.
-        let hero = args
-            .iter()
-            .position(|a| a == "--hero")
-            .and_then(|i| args.get(i + 1))
-            .and_then(|s| crate::content::characters::AstronautKind::from_name(s))
-            .unwrap_or(crate::content::characters::AstronautKind::Buzz);
+        // The same `--suit` that `boot` builds this instance's RunState from.
+        let hero = crate::content::characters::SuitKind::from_args(&args).unwrap_or(crate::content::characters::SuitKind::Buzz);
         if let Err(e) = start_join(&mut commands, &channels, ip, port, hero) {
             error!("join failed: {e}");
         }

@@ -32,7 +32,11 @@ pub struct ResultsData {
     /// so "the next unlock always feels close" is something the player can read.
     pub silver_lines: Vec<(String, String)>,
     pub time: f32,
+    /// The suit the local astronaut wore this run.
+    pub suit: crate::content::characters::SuitKind,
     pub quests_completed: Vec<String>,
+    /// Suits this run's quests put in the wardrobe.
+    pub new_suits: Vec<crate::content::characters::SuitKind>,
     pub daily: Option<(String, u64, bool)>, // (world name, best score, is-new-best)
     /// The run used §13 assists: what was on when it ended. Shown on results, and the daily
     /// score went to the separate assisted board.
@@ -412,7 +416,15 @@ pub fn bank_results(
         .iter()
         .map(|q| {
             let d = q.def();
-            format!("{} — {}", d.name, d.desc)
+            format!("{} - {}", d.name, d.desc)
+        })
+        .collect();
+    let new_suits = newly
+        .iter()
+        .flat_map(|q| q.def().rewards.iter())
+        .filter_map(|r| match r {
+            crate::content::quests::Reward::UnlockSuit(k) => Some(*k),
+            _ => None,
         })
         .collect();
 
@@ -426,7 +438,9 @@ pub fn bank_results(
         silver_earned: payout,
         silver_lines,
         time: run.total_elapsed,
+        suit: run.character,
         quests_completed,
+        new_suits,
         daily,
         assisted: run.assisted.then(|| {
             let now = run.assist.summary();

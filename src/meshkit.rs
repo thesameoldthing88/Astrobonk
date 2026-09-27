@@ -195,6 +195,34 @@ impl MeshData {
         self.push(&verts, &norms, &tris, tf, color);
     }
 
+    /// Torus lying in the XZ plane round +Y: ring radius `major`, tube radius `minor`.
+    pub fn add_torus(&mut self, major: f32, minor: f32, seg: usize, tube_seg: usize, tf: Transform, color: Color) {
+        let (seg, tube_seg) = (seg.max(3), tube_seg.max(3));
+        let mut verts = Vec::with_capacity(seg * tube_seg);
+        let mut norms = Vec::with_capacity(seg * tube_seg);
+        for i in 0..seg {
+            let u = i as f32 / seg as f32 * std::f32::consts::TAU;
+            let (cu, su) = (u.cos(), u.sin());
+            for j in 0..tube_seg {
+                let v = j as f32 / tube_seg as f32 * std::f32::consts::TAU;
+                let n = Vec3::new(v.cos() * cu, v.sin(), v.cos() * su);
+                verts.push(Vec3::new(cu * major, 0.0, su * major) + n * minor);
+                norms.push(n);
+            }
+        }
+        let mut tris = Vec::with_capacity(seg * tube_seg * 6);
+        let id = |i: usize, j: usize| ((i % seg) * tube_seg + (j % tube_seg)) as u32;
+        for i in 0..seg {
+            for j in 0..tube_seg {
+                // round the ring (u) runs toward +Z, round the tube (v) toward +Y: (a, d, b)
+                // is counter-clockwise seen from outside
+                let (a, b, c, d) = (id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1));
+                tris.extend([a, d, b, b, d, c]);
+            }
+        }
+        self.push(&verts, &norms, &tris, tf, color);
+    }
+
     /// Capsule along +Y (cylinder body + two hemispherical-ish caps).
     pub fn add_capsule(&mut self, r: f32, body_h: f32, tf: Transform, color: Color) {
         self.add_cylinder(r, body_h, 10, tf, color);
@@ -272,13 +300,14 @@ pub fn icosphere(subdiv: u32) -> (Vec<Vec3>, Vec<u32>) {
 pub fn winding_self_check() -> Result<(), String> {
     let tf = Transform::from_translation(Vec3::new(0.3, -1.2, 2.0))
         .with_rotation(Quat::from_euler(EulerRot::XYZ, 0.7, -1.1, 0.4));
-    let shapes: [(&str, fn(&mut MeshData, Transform)); 6] = [
+    let shapes: [(&str, fn(&mut MeshData, Transform)); 7] = [
         ("box", |m, tf| m.add_box(Vec3::new(0.8, 1.3, 0.5), tf, Color::WHITE)),
         ("cylinder", |m, tf| m.add_cylinder(0.4, 1.1, 9, tf, Color::WHITE)),
         ("cone", |m, tf| m.add_cone(0.5, 0.9, 7, tf, Color::WHITE)),
         ("sphere", |m, tf| m.add_sphere(0.6, 1, tf, Color::WHITE)),
         ("ellipsoid", |m, tf| m.add_ellipsoid(Vec3::new(0.7, 0.3, 0.5), 1, tf, Color::WHITE)),
         ("capsule", |m, tf| m.add_capsule(0.3, 0.8, tf, Color::WHITE)),
+        ("torus", |m, tf| m.add_torus(0.5, 0.12, 16, 6, tf, Color::WHITE)),
     ];
     for (name, add) in shapes {
         let mut m = MeshData::new();

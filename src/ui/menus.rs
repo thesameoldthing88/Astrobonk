@@ -1,8 +1,8 @@
-//! Out-of-run screens: main menu (with the quest log), the tome library, astronaut select,
+//! Out-of-run screens: main menu (with the quest log), the tome library, the suit wardrobe,
 //! planet/tier select, and the results screen.
 
 use super::*;
-use crate::content::characters::AstronautKind;
+use crate::content::characters::{SuitKind, PROTAGONIST};
 use crate::content::planets::PlanetKind;
 use crate::content::quests::QuestKind;
 use crate::content::tomes::TomeKind;
@@ -10,24 +10,26 @@ use crate::director::ResultsData;
 use crate::messages::{Sfx, SfxMsg};
 use crate::run::RunState;
 use crate::save::MetaSave;
+use crate::suits::WardrobeFocus;
 use crate::AppState;
 use bevy::app::AppExit;
 use bevy::prelude::*;
 
 #[derive(Resource, Clone, Copy)]
 pub struct Selected {
-    pub character: AstronautKind,
+    /// The suit picked in the wardrobe.
+    pub character: SuitKind,
     pub planet: PlanetKind,
     pub tier: u32,
     pub daily: bool,
-    /// Picking a hero to JOIN someone's run with: the pick returns to the address entry
+    /// Picking a suit to JOIN someone's run in: the pick returns to the address entry
     /// instead of going on to the planet select (the host picks the world).
     pub joining: bool,
 }
 
 impl Default for Selected {
     fn default() -> Self {
-        Self { character: AstronautKind::Buzz, planet: PlanetKind::Moon, tier: 1, daily: false, joining: false }
+        Self { character: SuitKind::Buzz, planet: PlanetKind::Moon, tier: 1, daily: false, joining: false }
     }
 }
 
@@ -103,8 +105,9 @@ pub enum MenuTab {
     Quests,
 }
 
+/// A suit in the wardrobe grid, and whether it is unlocked (wearable).
 #[derive(Component)]
-pub struct CharCard(pub AstronautKind);
+pub struct SuitCard(pub SuitKind, pub bool);
 #[derive(Component)]
 pub struct PlanetCard(pub PlanetKind, pub u32);
 #[derive(Component)]
@@ -121,7 +124,7 @@ pub fn spawn_main_menu(mut commands: Commands, save: Res<MetaSave>) {
             overlay.spawn(menu_column()).with_children(|root| {
                 root.spawn(txt("ASTROBONK", 72.0, Color::srgb(1.0, 0.8, 0.2)));
                 root.spawn(txt(
-                    "tiny planets. big swarms. one wrench.",
+                    "tiny planets. big swarms. one astronaut, twelve suits, a turtle waiting at home.",
                     FONT_MED,
                     Color::srgb(0.6, 0.65, 0.8),
                 ));
@@ -262,7 +265,7 @@ pub fn main_menu_input(
         }
         match btn {
             // The same button again stops what it started: a host that backed out of the
-            // hero pick stops listening, a joiner still waiting for a world gives up.
+            // suit pick stops listening, a joiner still waiting for a world gives up.
             MenuBtn::HostCoop if **role == crate::net::NetRole::Host => {
                 leave.write(crate::net::LeaveSession);
             }
@@ -295,8 +298,8 @@ pub fn main_menu_input(
                 }
             }
             MenuBtn::JoinCoop => {
-                // Hero first, like the host: the joiner plays whoever it picks, and the host
-                // seats (and every client draws) that hero. The pick comes back here with
+                // Suit first, like the host: the joiner wears whichever it picks, and the host
+                // seats (and every client draws) that suit. The pick comes back here with
                 // the address entry open.
                 selected.joining = true;
                 selected.daily = false;
@@ -320,7 +323,7 @@ pub fn main_menu_input(
                 return;
             }
             MenuBtn::Daily => {
-                // daily = fixed Moon T1 on today's shared seed; player still picks a hero
+                // daily = fixed Moon T1 on today's shared seed; player still picks a suit
                 selected.daily = true;
                 selected.joining = false;
                 selected.planet = crate::content::planets::PlanetKind::Moon;
@@ -373,8 +376,16 @@ pub fn main_menu_input(
                         .quest_progress(q)
                         .map(|(a, b)| format!(" ({a}/{b})"))
                         .unwrap_or_default();
+                    // what it pays: the suit, weapon or world it unlocks (Silver is on every quest)
+                    let unlocks: Vec<String> = d
+                        .rewards
+                        .iter()
+                        .filter(|r| !matches!(r, crate::content::quests::Reward::Silver(_)))
+                        .map(|r| r.label())
+                        .collect();
+                    let unlocks = if unlocks.is_empty() { String::new() } else { format!("  > {}", unlocks.join(", ")) };
                     c.spawn(txt(
-                        format!("{} {} — {}{}", if done { "[DONE]" } else { "[    ]" }, d.name, d.desc, progress),
+                        format!("{} {} - {}{}{}", if done { "[DONE]" } else { "[    ]" }, d.name, d.desc, progress, unlocks),
                         FONT_SMALL,
                         if done { Color::srgb(0.45, 0.9, 0.5) } else { Color::srgb(0.75, 0.78, 0.9) },
                     ));
@@ -692,7 +703,7 @@ pub fn refresh_tome_library(
     }
 }
 
-// ------------------------------------------------------------- char select
+// ------------------------------------------------------------- suit wardrobe
 
 /// The "HOSTING: tell the other player to join <ip>" line, for the screens a host walks
 /// through after pressing HOST CO-OP. The note used to live only under the main menu's
@@ -704,96 +715,151 @@ fn hosting_line(root: &mut ChildSpawnerCommands, role: &crate::net::NetRole, not
     }
 }
 
+/// A text in the wardrobe's detail panel, rewritten for whichever suit is in focus.
+#[derive(Component, Clone, Copy)]
+pub enum WardrobeText {
+    Name,
+    Origin,
+    Desc,
+    Weapon,
+    Passive,
+}
+
+/// The frame round the mannequin's viewport (it takes the focused suit's trim).
+#[derive(Component)]
+pub struct WardrobeFrame;
+
+const WARDROBE_DIM: Color = Color::srgb(0.6, 0.65, 0.8);
+const WARDROBE_LOCKED: Color = Color::srgb(0.55, 0.55, 0.65);
+
+/// A wardrobe detail line for `focus`, and its colour.
+fn wardrobe_text(which: WardrobeText, focus: WardrobeFocus) -> (String, Color) {
+    let d = focus.suit.def();
+    if !focus.unlocked {
+        return match which {
+            WardrobeText::Name => ("???".into(), Color::srgb(0.4, 0.4, 0.5)),
+            WardrobeText::Origin => ("A suit still in the dark".into(), WARDROBE_DIM),
+            WardrobeText::Desc => (format!("To unlock: {}", d.unlock_desc), WARDROBE_LOCKED),
+            WardrobeText::Weapon | WardrobeText::Passive => (String::new(), WARDROBE_DIM),
+        };
+    }
+    match which {
+        WardrobeText::Name => (format!("{} SUIT", d.name), d.visor),
+        WardrobeText::Origin => (d.origin.into(), WARDROBE_DIM),
+        WardrobeText::Desc => (d.desc.into(), Color::srgb(0.8, 0.82, 0.9)),
+        WardrobeText::Weapon => (format!("Weapon: {}", d.weapon.def().name), d.weapon.def().color),
+        WardrobeText::Passive => (d.passive_desc.into(), Color::srgb(0.5, 1.0, 0.7)),
+    }
+}
+
+/// The Suit Wardrobe (locked direction #4): Milo on the left in the suit under the pointer,
+/// the twelve suits on the right. Clicking a suit in the wardrobe wears it into the run
+/// (or into a co-op join); a locked one shows its silhouette and how to earn it.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_char_select(
     mut commands: Commands,
     save: Res<MetaSave>,
     selected: Res<Selected>,
     role: Res<crate::net::NetRole>,
     note: Res<CoopNote>,
+    mut focus: ResMut<WardrobeFocus>,
+    mut images: ResMut<Assets<Image>>,
 ) {
+    *focus = WardrobeFocus { suit: selected.character, unlocked: save.unlocked_suits.contains(&selected.character) };
+    let cam = crate::suits::spawn_wardrobe_scene(&mut commands, &mut images);
     commands
         .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
         .with_children(|overlay| {
             overlay.spawn(menu_column()).with_children(|root| {
                 root.spawn(txt(
-                    if selected.joining { "CHOOSE YOUR ASTRONAUT (JOINING CO-OP)" } else { "CHOOSE YOUR ASTRONAUT" },
+                    if selected.joining { "SUIT WARDROBE (JOINING CO-OP)" } else { "SUIT WARDROBE" },
                     FONT_BIG,
                     Color::WHITE,
                 ));
+                root.spawn(txt(
+                    format!("{PROTAGONIST} is a long way from home, and his turtle is waiting. Pick a suit."),
+                    FONT_SMALL,
+                    WARDROBE_DIM,
+                ));
                 hosting_line(root, &role, &note);
-                // The roster scrolls under the mouse wheel when a large UI scale leaves it
-                // more than fits, while the title and BACK stay on screen. The list asks for
-                // the whole screen height and shrinks to what the title and BACK leave (a
-                // wrapping grid's own height would be measured as one unwrapped row); the
-                // grid's auto margins center it in there, and collapse once it overflows.
-                let list = root
-                    .spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            flex_basis: Val::Vh(100.0),
-                            min_height: Val::Px(150.0),
-                            flex_shrink: 1.0,
-                            flex_direction: FlexDirection::Column,
-                            overflow: Overflow::scroll_y(),
-                            ..default()
-                        },
-                        wheel_scroll_list(),
-                    ))
-                    .with_children(|list| {
-                        list.spawn((Node {
-                            width: Val::Percent(100.0),
-                            margin: UiRect::vertical(Val::Auto),
-                            column_gap: Val::Px(12.0),
-                            flex_wrap: FlexWrap::Wrap,
-                            justify_content: JustifyContent::Center,
-                            row_gap: Val::Px(12.0),
-                            flex_shrink: 0.0,
-                            ..default()
-                        },))
-                            .with_children(|row| {
-                                for c in AstronautKind::ALL {
-                                    let d = c.def();
-                                    let unlocked = save.unlocked_chars.contains(&c);
-                                    let is_sel = selected.character == c;
-                                    let mut card = row.spawn((
-                                        Node {
-                                            width: Val::Px(190.0),
-                                            padding: UiRect::all(Val::Px(12.0)),
-                                            flex_direction: FlexDirection::Column,
-                                            row_gap: Val::Px(6.0),
-                                            border: UiRect::all(Val::Px(3.0)),
-                                            border_radius: BorderRadius::all(Val::Px(8.0)),
-                                            ..default()
-                                        },
-                                        BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
-                                        BorderColor::all(if is_sel {
-                                            Color::srgb(0.4, 1.0, 0.6)
-                                        } else if unlocked {
-                                            d.suit
-                                        } else {
-                                            Color::srgb(0.25, 0.25, 0.3)
-                                        }),
-                                    ));
-                                    if unlocked {
-                                        card.insert((Button, CharCard(c)));
-                                        card.with_children(|cc| {
-                                            cc.spawn(txt(d.name, FONT_MED, d.visor));
-                                            cc.spawn(txt(d.agency, FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)));
-                                            cc.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                                            cc.spawn(txt(format!("Weapon: {}", d.weapon.def().name), FONT_SMALL, d.weapon.def().color));
-                                            cc.spawn(txt(d.passive_desc, FONT_SMALL, Color::srgb(0.5, 1.0, 0.7)));
-                                        });
-                                    } else {
-                                        card.with_children(|cc| {
-                                            cc.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
-                                            cc.spawn(txt(d.unlock_desc, FONT_SMALL, Color::srgb(0.55, 0.55, 0.65)));
-                                        });
-                                    }
-                                }
-                            });
+                // The mannequin and his details on the left, the suits on the right. The
+                // suit grid scrolls under the mouse wheel when a large UI scale leaves it
+                // more than fits, while the title and BACK stay on screen: the row asks for
+                // the whole screen height and shrinks to what the title and BACK leave.
+                let mut list = Entity::PLACEHOLDER;
+                root.spawn(Node {
+                    width: Val::Percent(100.0),
+                    flex_basis: Val::Vh(100.0),
+                    min_height: Val::Px(150.0),
+                    flex_shrink: 1.0,
+                    column_gap: Val::Px(18.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                })
+                .with_children(|row| {
+                    row.spawn(Node {
+                        width: Val::Px(290.0),
+                        flex_shrink: 0.0,
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(5.0),
+                        margin: UiRect::vertical(Val::Auto),
+                        ..default()
                     })
-                    .id();
-                root.spawn((ScrollHint(list), txt("scroll for more astronauts", FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)), Visibility::Hidden));
+                    .with_children(|panel| {
+                        panel.spawn((
+                            WardrobeFrame,
+                            Node {
+                                width: Val::Px(290.0),
+                                height: Val::Px(320.0),
+                                border: UiRect::all(Val::Px(3.0)),
+                                border_radius: BorderRadius::all(Val::Px(8.0)),
+                                ..default()
+                            },
+                            BorderColor::all(Color::srgb(0.3, 0.3, 0.4)),
+                            bevy::ui::widget::ViewportNode::new(cam),
+                        ));
+                        for (which, size) in [
+                            (WardrobeText::Name, FONT_MED),
+                            (WardrobeText::Origin, FONT_SMALL),
+                            (WardrobeText::Desc, FONT_SMALL),
+                            (WardrobeText::Weapon, FONT_SMALL),
+                            (WardrobeText::Passive, FONT_SMALL),
+                        ] {
+                            let (s, c) = wardrobe_text(which, *focus);
+                            panel.spawn((which, txt(s, size, c)));
+                        }
+                    });
+                    list = row
+                        .spawn((
+                            Node {
+                                max_width: Val::Px(850.0),
+                                flex_shrink: 1.0,
+                                flex_direction: FlexDirection::Column,
+                                overflow: Overflow::scroll_y(),
+                                ..default()
+                            },
+                            wheel_scroll_list(),
+                        ))
+                        .with_children(|list| {
+                            list.spawn((Node {
+                                width: Val::Percent(100.0),
+                                margin: UiRect::vertical(Val::Auto),
+                                column_gap: Val::Px(10.0),
+                                row_gap: Val::Px(10.0),
+                                flex_wrap: FlexWrap::Wrap,
+                                justify_content: JustifyContent::Center,
+                                flex_shrink: 0.0,
+                                ..default()
+                            },))
+                                .with_children(|grid| {
+                                    for k in SuitKind::ALL {
+                                        suit_card(grid, k, save.unlocked_suits.contains(&k), selected.character == k);
+                                    }
+                                });
+                        })
+                        .id();
+                });
+                root.spawn((ScrollHint(list), txt("scroll for more suits", FONT_SMALL, WARDROBE_DIM), Visibility::Hidden));
                 root.spawn((BackBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
                     .with_children(|b| {
                         b.spawn(txt("BACK", FONT_MED, Color::WHITE));
@@ -802,9 +868,85 @@ pub fn spawn_char_select(
         });
 }
 
+/// One suit in the wardrobe grid: its name, its three colours, its weapon — or, locked,
+/// "???" and how to earn it. Every card is hoverable (the mannequin tries it on); only an
+/// unlocked one can be worn.
+fn suit_card(grid: &mut ChildSpawnerCommands, k: SuitKind, unlocked: bool, is_sel: bool) {
+    let d = k.def();
+    let border = if is_sel {
+        Color::srgb(0.4, 1.0, 0.6)
+    } else if unlocked {
+        d.trim
+    } else {
+        Color::srgb(0.25, 0.25, 0.3)
+    };
+    grid.spawn((
+        SuitCard(k, unlocked),
+        Button,
+        Node {
+            width: Val::Px(196.0),
+            padding: UiRect::all(Val::Px(10.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
+            border: UiRect::all(Val::Px(3.0)),
+            border_radius: BorderRadius::all(Val::Px(8.0)),
+            ..default()
+        },
+        BackgroundColor(if unlocked { CARD_BG } else { Color::srgba(0.04, 0.04, 0.05, 0.95) }),
+        BorderColor::all(border),
+    ))
+    .with_children(|cc| {
+        if !unlocked {
+            cc.spawn(txt("???", FONT_MED, Color::srgb(0.4, 0.4, 0.5)));
+            cc.spawn(txt(d.unlock_desc, FONT_SMALL, WARDROBE_LOCKED));
+            return;
+        }
+        cc.spawn(txt(d.name, FONT_MED, d.visor));
+        // the suit's palette at a glance: shell, trim, visor
+        cc.spawn(Node { column_gap: Val::Px(4.0), ..default() }).with_children(|sw| {
+            for c in [d.suit, d.trim, d.visor] {
+                sw.spawn((
+                    Node { width: Val::Px(22.0), height: Val::Px(10.0), border_radius: BorderRadius::all(Val::Px(3.0)), ..default() },
+                    BackgroundColor(c),
+                ));
+            }
+        });
+        cc.spawn(txt(d.weapon.def().name, FONT_SMALL, d.weapon.def().color));
+    });
+}
+
+/// Point the mannequin (and the detail panel) at the card under the pointer, else at the
+/// suit picked last.
+pub fn wardrobe_focus(
+    cards: Query<(&Interaction, &SuitCard)>,
+    selected: Res<Selected>,
+    save: Res<MetaSave>,
+    mut focus: ResMut<WardrobeFocus>,
+    mut texts: Query<(&WardrobeText, &mut Text, &mut TextColor)>,
+    mut frame: Query<&mut BorderColor, With<WardrobeFrame>>,
+) {
+    let want = cards
+        .iter()
+        .find(|(i, _)| **i != Interaction::None)
+        .map(|(_, c)| WardrobeFocus { suit: c.0, unlocked: c.1 })
+        .unwrap_or(WardrobeFocus { suit: selected.character, unlocked: save.unlocked_suits.contains(&selected.character) });
+    if *focus == want {
+        return;
+    }
+    *focus = want;
+    for (which, mut text, mut color) in &mut texts {
+        let (s, c) = wardrobe_text(*which, want);
+        text.0 = s;
+        color.0 = c;
+    }
+    for mut border in &mut frame {
+        *border = BorderColor::all(if want.unlocked { want.suit.def().trim } else { Color::srgb(0.3, 0.3, 0.4) });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn char_select_input(
-    cards: Query<(&Interaction, &CharCard), Changed<Interaction>>,
+    cards: Query<(&Interaction, &SuitCard), Changed<Interaction>>,
     back: Query<&Interaction, (Changed<Interaction>, With<BackBtn>)>,
     mut selected: ResMut<Selected>,
     save: Res<MetaSave>,
@@ -815,15 +957,16 @@ pub fn char_select_input(
     role: Res<crate::net::NetRole>,
 ) {
     for (i, c) in &cards {
-        if *i == Interaction::Pressed {
+        // a locked suit is only tried on (the mannequin shows its silhouette)
+        if *i == Interaction::Pressed && c.1 {
             selected.character = c.0;
             if *role == crate::net::NetRole::Client {
                 // Backstop for main_menu_input's LAUNCH/DAILY guard: a connected joiner
                 // plays the host's run and never starts one of its own.
                 next.set(AppState::MainMenu);
             } else if selected.joining {
-                // A fresh sheet in the picked hero; the seed, world and clock all arrive
-                // from the host's snapshots once connected, but the hero is ours.
+                // A fresh sheet in the picked suit; the seed, world and clock all arrive
+                // from the host's snapshots once connected, but the suit is ours.
                 *run = RunState::new(c.0, crate::content::planets::PlanetKind::Moon, 1, &save);
                 join_open.0 = true;
                 next.set(AppState::MainMenu);
@@ -980,6 +1123,8 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                     FONT_MED,
                     Color::srgb(0.85, 0.87, 0.95),
                 ));
+                let suit = data.suit.def();
+                root.spawn(txt(format!("{PROTAGONIST}, in the {} suit", suit.name), FONT_SMALL, suit.visor.mix(&Color::WHITE, 0.3)));
                 root.spawn(txt(format!("SILVER EARNED: +{}", data.silver_earned), FONT_BIG, Color::srgb(0.75, 0.85, 1.0)));
                 // The §10 formula, term by term.
                 if !data.silver_lines.is_empty() {
@@ -1027,6 +1172,10 @@ pub fn spawn_results(mut commands: Commands, data: Res<ResultsData>) {
                 }
                 for q in &data.quests_completed {
                     root.spawn(txt(format!("QUEST COMPLETE: {q}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.4)));
+                }
+                for k in &data.new_suits {
+                    let d = k.def();
+                    root.spawn(txt(format!("NEW SUIT IN THE WARDROBE: {}", d.name), FONT_MED, d.visor));
                 }
                 root.spawn((ContinueBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.4, 1.0, 0.6))))
                     .with_children(|b| {
@@ -1083,8 +1232,8 @@ pub fn join_panel_sync(
             .with_children(|overlay| {
                 overlay.spawn(menu_column()).with_children(|root| {
                     root.spawn(txt("JOIN CO-OP", FONT_BIG, Color::srgb(0.4, 0.9, 1.0)));
-                    let hero = selected.character.def();
-                    root.spawn(txt(format!("joining as {}", hero.name), FONT_MED, hero.visor));
+                    let suit = selected.character.def();
+                    root.spawn(txt(format!("joining in the {} suit", suit.name), FONT_MED, suit.visor));
                     root.spawn(txt(
                         "type the host's IP address, then ENTER",
                         FONT_MED,
@@ -1140,8 +1289,8 @@ pub fn try_join(
     commands: &mut Commands,
     channels: &bevy_replicon::prelude::RepliconChannels,
     addr: &str,
-    // the hero picked for this join: the connect token names it, and the host seats it
-    hero: AstronautKind,
+    // the suit picked for this join: the connect token names it, and the host seats it
+    hero: SuitKind,
     note: &mut CoopNote,
     open: &mut JoinOpen,
     role: crate::net::NetRole,

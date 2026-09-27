@@ -30,6 +30,7 @@ mod run;
 mod save;
 mod sphere;
 mod stats;
+mod suits;
 mod techs;
 mod tomes;
 mod toon;
@@ -80,12 +81,7 @@ fn main() {
     if let Some(pos) = args.iter().position(|a| a == "--headless") {
         let ticks: u64 = args.get(pos + 1).and_then(|s| s.parse().ok()).unwrap_or(1500);
         let fast_boss = args.iter().any(|a| a == "--fast-boss");
-        let hero = args
-            .iter()
-            .position(|a| a == "--hero")
-            .and_then(|p| args.get(p + 1))
-            .and_then(|s| content::characters::AstronautKind::from_name(s))
-            .unwrap_or(content::characters::AstronautKind::Buzz);
+        let hero = content::characters::SuitKind::from_args(&args).unwrap_or(content::characters::SuitKind::Buzz);
         let planet = match args.iter().position(|a| a == "--planet").and_then(|p| args.get(p + 1)).map(|s| s.as_str()) {
             Some("mars") => content::planets::PlanetKind::Mars,
             Some("darkmoon") => content::planets::PlanetKind::DarkMoon,
@@ -202,7 +198,7 @@ fn main() {
         .add_systems(OnEnter(AppState::Tomes), ui::menus::spawn_tome_library)
         .add_systems(OnExit(AppState::Tomes), ui::menus::despawn_menu)
         .add_systems(OnEnter(AppState::CharSelect), ui::menus::spawn_char_select)
-        .add_systems(OnExit(AppState::CharSelect), ui::menus::despawn_menu)
+        .add_systems(OnExit(AppState::CharSelect), (ui::menus::despawn_menu, suits::despawn_wardrobe_scene))
         .add_systems(OnEnter(AppState::PlanetSelect), ui::menus::spawn_planet_select)
         .add_systems(OnExit(AppState::PlanetSelect), ui::menus::despawn_menu)
         .add_systems(
@@ -275,6 +271,7 @@ fn main() {
         .init_resource::<ui::menus::JoinAddr>()
         .init_resource::<ui::menus::JoinOpen>()
         .init_resource::<ui::menus::CoopNote>()
+        .init_resource::<suits::WardrobeFocus>()
         .add_systems(Update, ui::menus::main_menu_input.run_if(in_state(AppState::MainMenu)))
         .add_systems(
             Update,
@@ -287,7 +284,12 @@ fn main() {
                 .chain()
                 .run_if(in_state(AppState::Tomes)),
         )
-        .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
+        .add_systems(
+            Update,
+            (ui::menus::char_select_input, ui::menus::wardrobe_focus, suits::dress_mannequin)
+                .chain()
+                .run_if(in_state(AppState::CharSelect)),
+        )
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
         .add_systems(Update, ui::menus::results_input.run_if(in_state(AppState::Results)))
         // ------------- live simulation (only while actually playing)
@@ -854,9 +856,7 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
     // an --autodrop run lands on.
     let args: Vec<String> = std::env::args().collect();
     let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-    let hero = arg("--hero")
-        .and_then(|s| content::characters::AstronautKind::from_name(&s))
-        .unwrap_or(content::characters::AstronautKind::Buzz);
+    let hero = content::characters::SuitKind::from_args(&args).unwrap_or(content::characters::SuitKind::Buzz);
     let planet = match arg("--planet").as_deref() {
         Some("mars") => content::planets::PlanetKind::Mars,
         Some("darkmoon") => content::planets::PlanetKind::DarkMoon,

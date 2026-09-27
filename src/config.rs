@@ -1051,3 +1051,12 @@ pub const DUO_FX_MIN_INTERVAL: f32 = 0.25;
 pub const SWEEP_INNER: f32 = 0.45;
 pub const SWEEP_ALPHA: f32 = 0.42;
 pub const SWEEP_LIFT: f32 = 0.35;
+
+/// The Suit Wardrobe's mannequin (suits.rs): where its camera stands relative to Milo (in
+/// front: he faces -Z) and the height it aims at, its key and rim lights (lumens), and how
+/// fast he turns (rad/s) so the helmet, the trim and the turtle patch on his back all show.
+pub const WARDROBE_CAM_OFFSET: bevy::math::Vec3 = bevy::math::Vec3::new(0.0, 0.55, -3.3);
+pub const WARDROBE_CAM_AIM_Y: f32 = 0.2;
+pub const WARDROBE_KEY_LUMENS: f32 = 120_000.0;
+pub const WARDROBE_RIM_LUMENS: f32 = 60_000.0;
+pub const WARDROBE_SPIN: f32 = 0.7;

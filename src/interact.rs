@@ -728,7 +728,8 @@ pub fn interact_system(
         InteractKind::Cage => {
             inter.used = true;
             save.counters.chimp_freed = true;
-            banners.write(BannerMsg("THE CAGE IS OPEN. HE REMEMBERS.".into()));
+            // the suit inside joins the wardrobe when the run is banked (quest Cold Case)
+            banners.write(BannerMsg("THE CAGE IS OPEN. INSIDE: AN EMPTY SUIT, STILL WARM.".into()));
             sfx.write(SfxMsg(Sfx::LevelUp));
             if let Some(pa) = &particles {
                 fx::burst(&mut commands, pa, tf.translation, tf.translation.normalize_or_zero(), Pcolor::Gold, 24, 8.0);

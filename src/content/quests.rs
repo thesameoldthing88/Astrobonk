@@ -1,4 +1,4 @@
-use super::characters::AstronautKind;
+use super::characters::SuitKind;
 use super::planets::PlanetKind;
 use super::weapons::WeaponKind;
 use serde::{Deserialize, Serialize};
@@ -26,10 +26,24 @@ pub enum QuestKind {
 #[derive(Clone, Copy, Debug)]
 pub enum Reward {
     Silver(u64),
-    UnlockChar(AstronautKind),
+    /// A suit joins the wardrobe (quests unlock suits, not heroes: locked direction #4).
+    UnlockSuit(SuitKind),
     UnlockWeapon(WeaponKind),
     UnlockPlanet(PlanetKind),
     TomeSlot,
+}
+
+impl Reward {
+    /// What the reward is, for the quest log and the results screen.
+    pub fn label(&self) -> String {
+        match self {
+            Reward::Silver(s) => format!("+{s} silver"),
+            Reward::UnlockSuit(k) => format!("{} suit", k.def().name),
+            Reward::UnlockWeapon(w) => w.def().name.to_uppercase(),
+            Reward::UnlockPlanet(p) => format!("world: {}", p.def().name),
+            Reward::TomeSlot => "+1 tome slot".into(),
+        }
+    }
 }
 
 pub struct QuestDef {
@@ -65,7 +79,7 @@ impl QuestKind {
         match self {
             Kill100 => QuestDef { kind: *self, name: "First Contact", desc: "Bonk 100 invaders", rewards: &[Silver(20)] },
             Kill1000 => QuestDef { kind: *self, name: "Pest Control", desc: "Bonk 1,000 invaders", rewards: &[Silver(60), UnlockWeapon(WeaponKind::Tesla)] },
-            Kill2500 => QuestDef { kind: *self, name: "Exterminator", desc: "Bonk 2,500 invaders", rewards: &[Silver(90), UnlockChar(AstronautKind::Doug)] },
+            Kill2500 => QuestDef { kind: *self, name: "Exterminator", desc: "Bonk 2,500 invaders", rewards: &[Silver(90), UnlockSuit(SuitKind::Doug)] },
             Kill10000 => QuestDef { kind: *self, name: "Solar Defender", desc: "Bonk 10,000 invaders", rewards: &[Silver(250), TomeSlot] },
             Pots50 => QuestDef { kind: *self, name: "Pottery Critic", desc: "Break 50 pots", rewards: &[Silver(40), UnlockWeapon(WeaponKind::Drones)] },
             Chests10 => QuestDef { kind: *self, name: "Cache Money", desc: "Open 10 chests", rewards: &[Silver(50), UnlockWeapon(WeaponKind::RocketPod)] },
@@ -73,12 +87,12 @@ impl QuestKind {
             Gold5000 => QuestDef { kind: *self, name: "Space Capitalist", desc: "Collect 5,000 gold (lifetime)", rewards: &[Silver(80)] },
             Level20 => QuestDef { kind: *self, name: "Overachiever", desc: "Reach level 20 in one run", rewards: &[Silver(60)] },
             EvolveWeapon => QuestDef { kind: *self, name: "Ascension", desc: "Evolve any weapon", rewards: &[Silver(100)] },
-            FreeChimp => QuestDef { kind: *self, name: "Cold Case", desc: "Free the cage on the Moon", rewards: &[Silver(40), UnlockChar(AstronautKind::ChimpO)] },
+            FreeChimp => QuestDef { kind: *self, name: "Cold Case", desc: "Open the cage on the Moon", rewards: &[Silver(40), UnlockSuit(SuitKind::ChimpO)] },
             SurviveStatic2Min => QuestDef { kind: *self, name: "Signal In The Noise", desc: "Survive THE STATIC for 2:00", rewards: &[Silver(150), TomeSlot] },
-            ClearMoonT1 => QuestDef { kind: *self, name: "One Small Bonk", desc: "Clear MOON Tier 1", rewards: &[Silver(50), UnlockChar(AstronautKind::B0nk)] },
+            ClearMoonT1 => QuestDef { kind: *self, name: "One Small Bonk", desc: "Clear MOON Tier 1", rewards: &[Silver(50), UnlockSuit(SuitKind::B0nk)] },
             ClearMoonT2 => QuestDef { kind: *self, name: "One Giant Bonk", desc: "Clear MOON Tier 2", rewards: &[Silver(120), UnlockPlanet(PlanetKind::Mars)] },
             ClearMoonT3 => QuestDef { kind: *self, name: "The Full Tour", desc: "Clear MOON Tier 3", rewards: &[Silver(300)] },
-            ClearMarsT1 => QuestDef { kind: *self, name: "Red Planet Standing", desc: "Clear MARS Tier 1", rewards: &[Silver(120), UnlockChar(AstronautKind::Yuki)] },
+            ClearMarsT1 => QuestDef { kind: *self, name: "Red Planet Standing", desc: "Clear MARS Tier 1", rewards: &[Silver(120), UnlockSuit(SuitKind::Yuki)] },
         }
     }
 }

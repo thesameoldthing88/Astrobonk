@@ -1,7 +1,7 @@
 //! Persistent meta progression: silver, unlocks, tome levels, quest counters.
 
 use crate::config;
-use crate::content::characters::AstronautKind;
+use crate::content::characters::SuitKind;
 use crate::content::palettes::Palette;
 use crate::content::planets::PlanetKind;
 use crate::content::quests::{QuestKind, Reward};
@@ -34,7 +34,7 @@ pub struct Counters {
     pub cleared: HashSet<(PlanetKind, u32)>,
 }
 
-/// Tolerant loading for the save's content-keyed fields (M13). Heroes, weapons, planets,
+/// Tolerant loading for the save's content-keyed fields (M13). Suits, weapons, planets,
 /// tomes, quests and palettes are stored by NAME; one renamed or removed in a later build
 /// used to fail the whole parse. Now the entry this build cannot read is dropped on its own
 /// and everything around it loads.
@@ -193,7 +193,8 @@ impl AssistOptions {
 /// Save-format generation `migrate()` brings every save up to. 1: tomes went from 20 levels
 /// to 10 ranks (P05). Bump when a stored value's MEANING changes; a new field alone needs no
 /// bump (`#[serde(default)]` covers it).
-pub const SAVE_VERSION: u32 = 1;
+/// 2 (P32): the hero roster became the Suit Wardrobe, `unlocked_chars` -> `unlocked_suits`.
+pub const SAVE_VERSION: u32 = 2;
 
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)] // missing fields (e.g. from older saves) fall back to Default — never wipe progress
@@ -210,8 +211,13 @@ pub struct MetaSave {
     pub tome_loadout: Vec<TomeKind>,
     /// Loadout slots: TOME_BASE_SLOTS plus quest rewards (P21 adds more of those).
     pub tome_slots: u32,
+    /// The suits in the wardrobe.
     #[serde(deserialize_with = "lenient::set")]
-    pub unlocked_chars: HashSet<AstronautKind>,
+    pub unlocked_suits: HashSet<SuitKind>,
+    /// What saves before P32 called `unlocked_suits` (the twelve were heroes then). Read,
+    /// never written: `migrate` folds it into the wardrobe.
+    #[serde(rename = "unlocked_chars", deserialize_with = "lenient::set", skip_serializing)]
+    pub(crate) legacy_unlocked_chars: HashSet<SuitKind>,
     #[serde(deserialize_with = "lenient::set")]
     pub unlocked_weapons: HashSet<WeaponKind>,
     #[serde(deserialize_with = "lenient::set")]
@@ -237,12 +243,7 @@ pub struct MetaSave {
 
 impl Default for MetaSave {
     fn default() -> Self {
-        let mut unlocked_chars = HashSet::new();
-        for c in AstronautKind::ALL {
-            if c.starts_unlocked() {
-                unlocked_chars.insert(c);
-            }
-        }
+        let unlocked_suits: HashSet<SuitKind> = SuitKind::ALL.into_iter().filter(|k| k.starts_unlocked()).collect();
         let mut unlocked_weapons = HashSet::new();
         // Signature weapons of the starting roster + a couple of drops.
         for w in [
@@ -273,7 +274,8 @@ impl Default for MetaSave {
             // (`buy_tome`) — never three unowned rank-0 tomes squatting in the slots
             tome_loadout: Vec::new(),
             tome_slots: config::TOME_BASE_SLOTS,
-            unlocked_chars,
+            unlocked_suits,
+            legacy_unlocked_chars: HashSet::new(),
             unlocked_weapons,
             unlocked_planets,
             quests_done: HashSet::new(),
@@ -330,12 +332,10 @@ impl MetaSave {
     }
 
     /// Fold in content that ships unlocked-by-default so existing saves gain
-    /// newly added starter heroes/weapons without wiping progress.
+    /// newly added starter suits/weapons without wiping progress.
     pub(crate) fn migrate(&mut self) {
         let fresh = Self::default();
-        for c in &fresh.unlocked_chars {
-            self.unlocked_chars.insert(*c);
-        }
+        self.migrate_suits(&fresh);
         for w in &fresh.unlocked_weapons {
             self.unlocked_weapons.insert(*w);
         }
@@ -359,6 +359,25 @@ impl MetaSave {
         self.assist = self.assist.clamped();
         self.migrate_tomes();
         self.version = SAVE_VERSION;
+    }
+
+    /// The wardrobe keeps every suit this profile ever had: the pre-P32 hero unlocks, the
+    /// starters, and every suit a completed quest grants (re-derived, like tome slots, so
+    /// a suit can never be lost to a save written between a quest and its unlock).
+    fn migrate_suits(&mut self, fresh: &Self) {
+        let legacy = std::mem::take(&mut self.legacy_unlocked_chars);
+        self.unlocked_suits.extend(legacy);
+        self.unlocked_suits.extend(fresh.unlocked_suits.iter().copied());
+        let earned: Vec<SuitKind> = self
+            .quests_done
+            .iter()
+            .flat_map(|q| q.def().rewards.iter())
+            .filter_map(|r| match r {
+                Reward::UnlockSuit(k) => Some(*k),
+                _ => None,
+            })
+            .collect();
+        self.unlocked_suits.extend(earned);
     }
 
     /// Tomes: 20 levels became 10 ranks worth two levels each (P05), so an old level L is
@@ -498,8 +517,8 @@ impl MetaSave {
     fn apply_reward(&mut self, r: Reward) {
         match r {
             Reward::Silver(s) => self.silver += s,
-            Reward::UnlockChar(c) => {
-                self.unlocked_chars.insert(c);
+            Reward::UnlockSuit(k) => {
+                self.unlocked_suits.insert(k);
             }
             Reward::UnlockWeapon(w) => {
                 self.unlocked_weapons.insert(w);
@@ -593,7 +612,7 @@ pub fn format_self_check() -> Result<(), String> {
         "counters": {"kills": 9, "cleared": [["Moon", 1], ["Pluto", 1]], "some_future_counter": 3}}"#;
     let f: MetaSave = serde_json::from_str(future).map_err(|e| format!("a save with unknown content was rejected: {e}"))?;
     if f.silver != 5
-        || !f.unlocked_chars.contains(&AstronautKind::Buzz)
+        || !f.legacy_unlocked_chars.contains(&SuitKind::Buzz)
         || !f.unlocked_weapons.contains(&WeaponKind::Wrench)
         || !f.unlocked_planets.contains(&PlanetKind::Moon)
         || !f.quests_done.contains(&QuestKind::Kill100)
@@ -640,4 +659,45 @@ pub fn format_self_check() -> Result<(), String> {
     })();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// Headless self-check of the P32 wardrobe migration: a pre-P32 save's hero unlocks come
+/// through as suits (nothing lost, nothing locked handed out), quest-granted suits are
+/// re-derived, and the file is written back under the new name only.
+pub fn suits_self_check() -> Result<(), String> {
+    let old = r#"{"version": 1, "silver": 12,
+        "unlocked_chars": ["Buzz", "Valentina", "B0nk", "ChimpO", "Reticle"],
+        "quests_done": ["Kill2500"]}"#;
+    let mut s: MetaSave = serde_json::from_str(old).map_err(|e| format!("a pre-P32 save was rejected: {e}"))?;
+    s.migrate();
+    let want = [SuitKind::Buzz, SuitKind::Valentina, SuitKind::B0nk, SuitKind::ChimpO, SuitKind::Reticle, SuitKind::Doug];
+    if let Some(k) = want.iter().find(|k| !s.unlocked_suits.contains(k)) {
+        return Err(format!("a pre-P32 save lost (or never re-derived) the {} suit", k.def().name));
+    }
+    if s.unlocked_suits.contains(&SuitKind::Yuki) || s.silver != 12 || s.version != SAVE_VERSION {
+        return Err(format!("the wardrobe migration unlocked too much or lost progress: {:?}", s.unlocked_suits));
+    }
+    let text = serde_json::to_string(&s).map_err(|e| e.to_string())?;
+    if text.contains("unlocked_chars") || !text.contains("unlocked_suits") {
+        return Err("the migrated save still writes the old hero field".into());
+    }
+    let mut back: MetaSave = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    back.migrate();
+    if back.unlocked_suits != s.unlocked_suits {
+        return Err("the wardrobe did not survive a save/load round trip".into());
+    }
+    // a file holding both names (a hand edit, or an older build writing over a newer
+    // save) loads as the union
+    let both = r#"{"unlocked_suits": ["Yuki"], "unlocked_chars": ["B0nk"]}"#;
+    let mut b: MetaSave = serde_json::from_str(both).map_err(|e| format!("a save with both wardrobe fields was rejected: {e}"))?;
+    b.migrate();
+    if !b.unlocked_suits.contains(&SuitKind::Yuki) || !b.unlocked_suits.contains(&SuitKind::B0nk) {
+        return Err("a save with both wardrobe fields lost one of them".into());
+    }
+    // a fresh profile: the starters, and none of the quest suits
+    let fresh = MetaSave::default();
+    if SuitKind::ALL.iter().any(|k| fresh.unlocked_suits.contains(k) != k.starts_unlocked()) {
+        return Err("a fresh wardrobe disagrees with starts_unlocked".into());
+    }
+    Ok(())
 }

@@ -2569,9 +2569,12 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::gimmicks::self_check())
         .and_then(|_| crate::bestiary::self_check())
         .and_then(|_| crate::netenemy::state_lane_self_check())
-        .and_then(|_| crate::coop::self_check(&MetaSave::default()));
+        .and_then(|_| crate::coop::self_check(&MetaSave::default()))
+        .and_then(|_| crate::content::characters::self_check())
+        .and_then(|_| crate::suits::self_check())
+        .and_then(|_| crate::save::suits_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks, spawn tables, new enemies, enemy-state lane, co-op rules)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks, spawn tables, new enemies, enemy-state lane, co-op rules, suit wardrobe + migration)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -2636,7 +2639,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         storm_peer: coop2 && planet_kind == PlanetKind::Mars && args.iter().any(|a| a == "--storm-peer"),
         peer_hero: args
             .iter()
-            .position(|a| a == "--peer-hero")
+            .position(|a| a == "--peer-suit" || a == "--peer-hero")
             .and_then(|i| args.get(i + 1))
             .and_then(|s| AstronautKind::from_name(s))
             .filter(|_| coop2),
@@ -2677,6 +2680,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::net::NetRole>()
         .init_resource::<crate::net::MyPlayerId>()
         .insert_resource(probe)
+        .insert_resource(crate::suits::SuitsProbe::new(args.iter().any(|a| a == "--suits")))
         .init_resource::<XpTally>()
         .init_resource::<crate::items::ItemTelemetry>()
         .insert_resource(ItemProbe {
@@ -2994,6 +2998,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             (
                 comet_peer_stage.run_if(|p: Res<CoopProbe>| p.comet_peer),
                 peer_hero_swap.run_if(|p: Res<CoopProbe>| p.peer_hero.is_some()),
+                crate::suits::suits_probe
+                    .before(crate::player::refit_astronaut_rigs)
+                    .run_if(|p: Res<crate::suits::SuitsProbe>| p.on),
             )
                 .run_if(crate::playing),
         )
@@ -3285,6 +3292,14 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         } else {
             println!("PEERHERO OK: player 1 re-suited as {} (NetHero {})", hero.def().name, crate::net::hero_code(hero));
         }
+    }
+    match crate::suits::probe_report(world.resource::<crate::suits::SuitsProbe>()) {
+        Some(Ok(line)) => println!("SUITS OK: {line}"),
+        Some(Err(e)) => {
+            println!("FAIL: --suits: {e}");
+            ok = false;
+        }
+        None => {}
     }
     if probe.comet_peer {
         match probe.comet_paid {
