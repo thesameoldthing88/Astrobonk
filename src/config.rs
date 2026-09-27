@@ -599,6 +599,10 @@ pub const BEACON_BODY_RADIUS: f32 = 0.45;
 /// The distress flare: a column this many planet radii tall, so its top clears the horizon
 /// from most of the planet (the HUD's beacon markers cover the far side).
 pub const BEACON_FLARE_RADII: f32 = 1.1;
+/// Within this far of the column (the camera's distance from its axis, m) it is not drawn,
+/// fading in by BEACON_FLARE_FADE_FAR: up close it would be a wall of light.
+pub const BEACON_FLARE_FADE_NEAR: f32 = 7.0;
+pub const BEACON_FLARE_FADE_FAR: f32 = 16.0;
 /// A teammate standing within this arc of a Beacon for REVIVE_SECS brings it back up. Out
 /// of the ring, progress drains over REVIVE_DECAY_SECS instead of resetting — a dodge out
 /// and back in is not a restart.

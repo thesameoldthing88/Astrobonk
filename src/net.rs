@@ -2485,6 +2485,25 @@ fn reset_after_session(
 //    Repro: headless `--techs [--coop2] [--planet …]`; windowed
 //        coop.sh 80 /tmp/x --dev --techbot --items antipodeblink,boomeranginsurance
 //    and compare both sides' TECHFX lines (a joiner's `wire=` counts events from the host).
+// 2i. CO-OP RULES (P18, see coop.rs / duos.rs) — the §11 Tumbling Beacon, drop-in, friendly
+//    physics and the co-op set-pieces are simulated by the host for every astronaut. What a
+//    joiner must see: PlayerVitals carries down / claimed / Static Meter / revive progress /
+//    Hero's Adrenaline / friendly chill / drop-in grace and level (its own are adopted into its
+//    sheet, so its prediction rolls a Beacon, runs with the adrenaline and slows in a chill
+//    like the host's copy); RunSnapMsg carries STATIC CASCADE's charge and the squad tally;
+//    the hazard lane carries the one-shots (HazardEvent::Revived / Shove / Cascade / Duo /
+//    DropIn -> coop::CoopFxMsg, one presentation path). A Shove names its target, and that
+//    joiner applies the same impulse to its predicted body. A drop-in is decided on the seat
+//    (`coop::drop_in_level`), rides the peer's first vitals, and the joiner levels its own
+//    sheet up to it (its cards, its screen); while its player is idle the joiner's machine
+//    steers it (`coop::autopilot_local`) and, behind a panel, the host does
+//    (`coop::autopilot_peers`). Repro:
+//        headless: --revive --coop2 | --cascade --coop2 | --duos --coop2 | --dropin | --coop4
+//        windowed: HOST_ARGS="--dev --downpeer" coop.sh 100 /tmp/x            (revive over the wire)
+//                  CLIENTS=3 coop.sh 90 /tmp/x                                  (a squad of four)
+//                  JOIN_DELAY=40 CLIENT_BOT=0 coop.sh 100 /tmp/x                (drop-in + autopilot)
+//                  HOST_ARGS="--splitsquad" coop.sh 80 /tmp/x --dev --give stormcore (STATIC CASCADE)
+//    and compare both sides' COOP lines (a joiner's `fx_seen` counts the one-shots it got).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with
@@ -2493,6 +2512,6 @@ fn reset_after_session(
 //    gift here: the far horizon is naturally low-detail. Prototype this with two local
 //    instances BEFORE building any lobby UI, because it decides whether the design holds.
 //
-// 4. CO-OP RULES: shared XP grant on gem pickup, per-player gold, revives (the Tumbling
-//    Beacon), enemy scaling by player count.
+// 4. CO-OP RULES: shared XP grant on gem pickup, per-player gold — and (P18, 2i) revives
+//    (the Tumbling Beacon), enemy scaling by player count, drop-in, friendly physics.
 // ─────────────────────────────────────────────────────────────────────────────

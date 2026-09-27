@@ -363,7 +363,9 @@ const RING_READY: Color = Color::srgb(0.35, 1.0, 0.6);
 
 /// EVERY machine, presentation: each Beacon's distress flare (a column of light a planet
 /// radius high, a shell climbing it — seen over the horizon from most of the world; the
-/// HUD marks the rest), and the revive ring at its foot. The flare burns amber and sours
+/// HUD marks the rest), and the revive ring at its foot. Up close the column fades out
+/// (the ring and the shell say where to stand, and a camera beside a pillar of light would
+/// see nothing else — your own Beacon's included). The flare burns amber and sours
 /// toward The Static's violet as the meter fills, flickering near the end (never faster
 /// than 2.5 Hz, and not at all in photosensitivity mode); the ring brightens toward green
 /// as a teammate revives. Drawn only in a squad — solo there is nobody to call.
@@ -380,8 +382,10 @@ pub fn beacon_flares(
         (Or<(With<Player>, With<RemoteAstronaut>)>, Without<BeaconFlare>),
     >,
     mut flares: Query<(Entity, &BeaconFlare, &mut Transform)>,
+    camera: Query<&GlobalTransform, With<crate::player::PlayerRig>>,
 ) {
     let t = time.elapsed_secs();
+    let eye = camera.single().ok().map(|c| c.translation());
     let in_squad = squad(bodies.iter().count());
     let beacons: HashMap<Entity, (Vec3, BeaconState)> = bodies
         .iter()
@@ -410,9 +414,14 @@ pub fn beacon_flares(
                 tf.translation = ground + dir * (height * 0.5);
                 tf.rotation = stand;
                 tf.scale = Vec3::new(w, height, w);
+                // how far the camera stands from the column's axis
+                let near = eye.map_or(1.0, |e| {
+                    let off = (e - dir * e.dot(dir)).length();
+                    ((off - BEACON_FLARE_FADE_NEAR) / (BEACON_FLARE_FADE_FAR - BEACON_FLARE_FADE_NEAR)).clamp(0.0, 1.0)
+                });
                 if let Some(m) = materials.get_mut(&flare.mat) {
-                    m.base_color = sour.with_alpha(0.35 * flicker);
-                    m.emissive = sour.to_linear() * (3.0 * flicker);
+                    m.base_color = sour.with_alpha(0.35 * flicker * near);
+                    m.emissive = sour.to_linear() * (3.0 * flicker * near);
                 }
             }
             FlarePart::Shell => {
