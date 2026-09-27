@@ -20,6 +20,12 @@ else grep -vE "^\s+(Compiling|Checking|Downloaded|Downloading)" "$LOG" | grep -v
 echo "(warnings: $(grep -c ': warning: ' "$LOG"))"
 grep -q "wayland-client\|alsa\|libudev" "$LOG" && [ "$rc" != 0 ] && echo "HINT: system libraries missing — run tools/dev/setup.sh"
 rm -f "$LOG"
+# Each worktree's recompile leaves its own ~1.5 GB root-crate binary in deps/; keep only the newest.
+KEEP=$(ls -t "$CARGO_TARGET_DIR"/debug/deps/astrobonk-???????????????? 2>/dev/null | grep -v '\.' | head -1)
+if [ -n "$KEEP" ]; then
+  H=${KEEP##*/astrobonk-}
+  for f in "$CARGO_TARGET_DIR"/debug/deps/astrobonk-*; do case "$f" in *"$H"*) ;; *) rm -f "$f" ;; esac; done
+fi
 if [ "$rc" = "0" ]; then objcopy --strip-debug "$CARGO_TARGET_DIR/debug/astrobonk" ./.astrobonk-bin.tmp && mv -f ./.astrobonk-bin.tmp ./.astrobonk-bin
   echo "BUILD OK -> ./.astrobonk-bin (built from $PWD; debug info stripped; panics still report file:line)"
 else echo "BUILD FAILED (rc=$rc)"; fi
