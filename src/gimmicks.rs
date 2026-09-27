@@ -365,10 +365,13 @@ pub struct CrawlSite {
 
 /// `mass` at which an erupting site closes.
 const CRAWL_END: f32 = 1.0 + CRAWL_ERUPT_SECS / CRAWL_MASS_SECS;
+/// Seconds a successor's eruption overlaps the close of the site it replaces.
+const CRAWL_OVERLAP: f32 = 1.0;
 
 impl CrawlSite {
     pub fn erupting(&self) -> bool {
-        self.mass >= 1.0
+        // a hair early: massing in frame steps must not miss the frame The Static rises on
+        self.mass >= 1.0 - 1e-3
     }
     /// Seconds of its life (massing and erupting) left.
     pub fn secs_left(&self) -> f32 {
@@ -394,14 +397,17 @@ impl Crawl {
         self.sites.retain(|s| s.mass < CRAWL_END);
     }
 
-    /// Where the next ghost of The Static erupts: near a random erupting site, or `None`
-    /// while none has broken the surface (the ring spawns as on any world).
+    /// Where the next ghost of The Static erupts: near a random erupting site — or, in the
+    /// frame The Static rises before its sites have quite massed, the heaviest one (it breaks
+    /// through where it was seen massing) — and `None` with no sites at all (the ring spawns
+    /// as on any world).
     pub fn ghost_dir(&self, rng: &mut impl Rng, planet_r: f32) -> Option<Vec3> {
         let n = self.sites.iter().filter(|s| s.erupting()).count();
-        if n == 0 {
-            return None;
-        }
-        let site = self.sites.iter().filter(|s| s.erupting()).nth(rng.gen_range(0..n))?;
+        let site = if n == 0 {
+            self.sites.iter().max_by(|a, b| a.mass.total_cmp(&b.mass))?
+        } else {
+            self.sites.iter().filter(|s| s.erupting()).nth(rng.gen_range(0..n))?
+        };
         let (t, b) = sphere::tangent_frame(site.dir);
         let a = rng.gen_range(0.0..std::f32::consts::TAU);
         Some(sphere::offset_dir(site.dir, t * a.cos() + b * a.sin(), rng.gen_range(0.0..CRAWL_SPREAD), planet_r))
@@ -445,7 +451,8 @@ pub fn crawl_sim(
         return;
     }
     let want = CRAWL_SITES + anchors.len() - 1;
-    let showing = crawl.sites.iter().filter(|s| s.secs_left() > CRAWL_MASS_SECS).count();
+    // a successor a beat early, so the eruptions overlap rather than gap for a frame
+    let showing = crawl.sites.iter().filter(|s| s.secs_left() > CRAWL_MASS_SECS + CRAWL_OVERLAP).count();
     for _ in showing..want {
         let anchor = anchors[crawl.next % anchors.len()];
         crawl.next = crawl.next.wrapping_add(1);
@@ -563,8 +570,11 @@ pub fn self_check() -> Result<(), String> {
     for _ in 0..steps - 1 {
         crawl.tick(0.1);
     }
-    if crawl.ghost_dir(&mut rng, 100.0).is_some() {
+    if crawl.sites[0].erupting() {
         return Err("a Crawl site erupted before it had massed".into());
+    }
+    if Crawl::default().ghost_dir(&mut rng, 100.0).is_some() {
+        return Err("The Static erupted from a Crawl with no sites".into());
     }
     crawl.tick(0.2);
     let Some(g) = crawl.ghost_dir(&mut rng, 100.0) else { return Err("a massed Crawl site never erupted".into()) };

@@ -101,7 +101,7 @@ impl PlanetKind {
                 threat: 1.0,
                 // hard white sun, crisp shadows; the night is blue-black under Earthlight
                 light: SkyDef {
-                    sun_lux: 9_000.0,
+                    sun_lux: 6_500.0,
                     ambient_day: 80.0,
                     ambient_night: 34.0,
                     ambient_day_color: Color::srgb(0.65, 0.7, 0.9),
@@ -136,7 +136,7 @@ impl PlanetKind {
                 threat: 1.1,
                 // a dim amber haze by day, muddy brown by night
                 light: SkyDef {
-                    sun_lux: 7_000.0,
+                    sun_lux: 5_500.0,
                     ambient_day: 90.0,
                     ambient_night: 30.0,
                     ambient_day_color: Color::srgb(0.95, 0.72, 0.58),
@@ -171,7 +171,7 @@ impl PlanetKind {
                 threat: 1.25,
                 // almost no key light, and a near-black night: the fungus IS the light
                 light: SkyDef {
-                    sun_lux: 4_000.0,
+                    sun_lux: 3_200.0,
                     ambient_day: 60.0,
                     ambient_night: 18.0,
                     ambient_day_color: Color::srgb(0.62, 0.52, 0.9),
