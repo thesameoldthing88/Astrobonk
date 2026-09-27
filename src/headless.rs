@@ -586,6 +586,17 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         println!("FAIL: XP pipeline dead ({xp_grants} gems collected, no XP, no levels)");
         ok = false;
     }
+    // The collection link and the level curve, judged where the bot lives long enough for
+    // them to be certain: outside fast-boss it walks the planet for the whole run, so fifty
+    // kills with not one gem collected, or not one level gained, is a broken link.
+    if !fast_boss && run.kills > 50 && xp_grants == 0 {
+        println!("FAIL: XP pipeline dead ({gems_left} gems on the ground, none ever collected)");
+        ok = false;
+    }
+    if !fast_boss && run.kills > 50 && best_level < 2 {
+        println!("FAIL: XP pipeline dead ({xp_grants} gems collected, still level 1)");
+        ok = false;
+    }
     // Every astronaut's replicated mirrors must agree with its simulated state — this is
     // exactly what a joiner's HUD and rigs are drawn from.
     for (id, hero, rig, net_hero, fires, nc) in &peers {

@@ -139,7 +139,10 @@ fn advance(
                     });
                 }
             }
-            // Silver is banked into the shared run pot, whoever cashed out.
+            // Silver goes into the squad's shared run pot, whoever cashed out — the same
+            // pot every Silver pickup feeds (pickups.rs), banked at the run's end by the
+            // host. A joiner's own meta save is never written (a client must not bank a
+            // run it did not simulate), so there is no per-player Silver to credit yet.
             run.silver_run += peak as u64;
             let fires = comet.fires + 1;
             *comet = CometState { fires, last_peak: peak, ..Default::default() };
@@ -244,11 +247,12 @@ pub fn comet_presentation(
                 if role.simulates() {
                     hitstop.timer = 0.22;
                 }
-                banners.write(BannerMsg(format!("\u{2604} COMET x{}!", nc.peak)));
+                // ASCII only: the game font has no comet glyph (see update_comet_hud)
+                banners.write(BannerMsg(format!("COMET x{}!", nc.peak)));
                 sfx.write(SfxMsg(Sfx::Comet));
             }
         } else if cashed {
-            banners.write(BannerMsg(format!("\u{2604} PLAYER {}: COMET x{}!", pid.0 + 1, nc.peak)));
+            banners.write(BannerMsg(format!("PLAYER {}: COMET x{}!", pid.0 + 1, nc.peak)));
         }
 
         let Some(pa) = &particles else { continue };

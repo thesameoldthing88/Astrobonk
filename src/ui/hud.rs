@@ -142,12 +142,13 @@ pub fn spawn_hud(mut commands: Commands) {
                     c.spawn((CometText, txt("", FONT_MED, Color::srgb(1.0, 0.8, 0.3))));
                 });
 
-            // boss bar under the timer
+            // boss bar under the timer — and under the comet readout (52 px + a 20 px line),
+            // which it used to overprint: a boss fight is exactly when a comet tail forms
             root.spawn((
                 BossBarWrap,
                 Node {
                     position_type: PositionType::Absolute,
-                    top: Val::Px(64.0),
+                    top: Val::Px(80.0),
                     left: Val::Percent(25.0),
                     width: Val::Percent(50.0),
                     flex_direction: FlexDirection::Column,
@@ -544,18 +545,21 @@ pub fn update_dust_overlay(
 }
 
 /// Comet combo indicator: a growing tail counter + a charge meter drawn in text bars.
+/// Plain ASCII on purpose: the game font (Bevy's built-in FiraMono subset) has only the 95
+/// printable ASCII glyphs, so block characters drew a row of identical missing-glyph boxes
+/// and the meter never visibly filled.
 pub fn update_comet_hud(
     comet: Res<crate::comet::Comet>,
     mut q: Query<(&mut Text, &mut TextColor), With<CometText>>,
 ) {
     let Ok((mut text, mut color)) = q.single_mut() else { return };
     if comet.flash > 0.0 {
-        text.0 = "\u{2604} COMET!".into();
+        text.0 = "COMET!".into();
         color.0 = Color::srgb(1.0, 0.9, 0.4);
     } else if comet.active {
         let filled = (comet.progress * 12.0).round() as usize;
-        let bar: String = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(12 - filled);
-        text.0 = format!("\u{2604} x{}  {bar}", comet.count);
+        let bar: String = "#".repeat(filled) + &"-".repeat(12 - filled);
+        text.0 = format!("COMET x{}  [{bar}]", comet.count);
         // warm up from amber to white-hot as the charge fills
         let t = comet.progress;
         color.0 = Color::srgb(1.0, 0.8 + 0.2 * t, 0.3 + 0.5 * t);

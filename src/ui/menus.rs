@@ -269,6 +269,15 @@ pub fn main_menu_input(
             MenuBtn::HostCoop | MenuBtn::JoinCoop if role.is_networked() => {
                 coop_note.0 = "already in a co-op session: stop it first with the same button".into();
             }
+            // A joiner plays the HOST'S run, entered when its seed arrives. Starting one of
+            // our own here would build a world from a local seed while still connected, and
+            // the host's run would never replace it.
+            MenuBtn::Launch | MenuBtn::Daily if **role == crate::net::NetRole::Client => {
+                coop_note.0 = "You are in the host's co-op session: the host picks the world.\n\
+                               JOIN CO-OP again leaves the session, then LAUNCH plays solo."
+                    .into();
+                sfx.write(SfxMsg(Sfx::Click));
+            }
             MenuBtn::HostCoop => {
                 selected.joining = false;
                 selected.daily = false;
@@ -276,13 +285,7 @@ pub fn main_menu_input(
                 // character and planet as usual and joiners arrive once it is in a run.
                 match crate::net::start_host(&mut commands, &channels, crate::net::DEFAULT_PORT) {
                     Ok(()) => {
-                        // Show the address a machine on the SAME NETWORK must type.
-                        // Without this the other player has to go find ipconfig.
-                        coop_note.0 = format!(
-                            "HOSTING: tell the other player to join  {}   (port {})   HOST CO-OP again stops",
-                            crate::net::local_ip(),
-                            crate::net::DEFAULT_PORT
-                        );
+                        coop_note.0 = crate::net::hosting_note(crate::net::DEFAULT_PORT);
                         next.set(AppState::CharSelect);
                     }
                     Err(e) => coop_note.0 = format!("HOST FAILED: {e}"),
@@ -304,7 +307,7 @@ pub fn main_menu_input(
             }
             MenuBtn::JoinConfirm => {
                 let a = addr.0.clone();
-                try_join(&mut commands, channels, &a, coop_note, join_open, **role);
+                try_join(&mut commands, channels, &a, selected.character, coop_note, join_open, **role);
             }
             MenuBtn::Launch => {
                 selected.daily = false;
@@ -510,11 +513,16 @@ pub fn char_select_input(
     mut next: ResMut<NextState<AppState>>,
     mut sfx: MessageWriter<SfxMsg>,
     mut join_open: ResMut<JoinOpen>,
+    role: Res<crate::net::NetRole>,
 ) {
     for (i, c) in &cards {
         if *i == Interaction::Pressed {
             selected.character = c.0;
-            if selected.joining {
+            if *role == crate::net::NetRole::Client {
+                // Backstop for main_menu_input's LAUNCH/DAILY guard: a connected joiner
+                // plays the host's run and never starts one of its own.
+                next.set(AppState::MainMenu);
+            } else if selected.joining {
                 // A fresh sheet in the picked hero; the seed, world and clock all arrive
                 // from the host's snapshots once connected, but the hero is ours.
                 *run = RunState::new(c.0, crate::content::planets::PlanetKind::Moon, 1, &save);
@@ -624,9 +632,15 @@ pub fn planet_select_input(
     mut run: ResMut<RunState>,
     mut next: ResMut<NextState<AppState>>,
     mut sfx: MessageWriter<SfxMsg>,
+    role: Res<crate::net::NetRole>,
 ) {
     for (i, c) in &cards {
         if *i == Interaction::Pressed {
+            if *role == crate::net::NetRole::Client {
+                // Same backstop as char_select_input: the host picks a joiner's world.
+                next.set(AppState::MainMenu);
+                continue;
+            }
             selected.planet = c.0;
             selected.tier = c.1;
             *run = RunState::new(selected.character, selected.planet, selected.tier, &save);
@@ -784,6 +798,8 @@ pub fn try_join(
     commands: &mut Commands,
     channels: &bevy_replicon::prelude::RepliconChannels,
     addr: &str,
+    // the hero picked for this join: the connect token names it, and the host seats it
+    hero: AstronautKind,
     note: &mut CoopNote,
     open: &mut JoinOpen,
     role: crate::net::NetRole,
@@ -794,7 +810,7 @@ pub fn try_join(
         return;
     }
     match addr.trim().parse::<std::net::IpAddr>() {
-        Ok(ip) => match crate::net::start_join(commands, channels, ip, crate::net::DEFAULT_PORT) {
+        Ok(ip) => match crate::net::start_join(commands, channels, ip, crate::net::DEFAULT_PORT, hero) {
             Ok(()) => {
                 // Deliberately NO state change: a client must not build a world from its own
                 // seed. `client_follow_host_run` enters the run once the host's snapshot lands.
@@ -829,7 +845,7 @@ pub fn join_addr_input(
     }
     if keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::NumpadEnter) {
         let a = addr.0.clone();
-        try_join(&mut commands, &channels, &a, &mut note, &mut open, *role);
+        try_join(&mut commands, &channels, &a, selected.character, &mut note, &mut open, *role);
         return;
     }
     for k in keys.get_just_pressed() {

@@ -73,7 +73,7 @@ pub fn dust_storm_sim(
         storm.primed = false; // the next Mars stage gets the full first-storm delay again
         for (e, _, hidden) in &q_astronauts {
             if hidden {
-                commands.entity(e).remove::<InStorm>();
+                commands.entity(e).try_remove::<InStorm>();
             }
         }
         return;
@@ -108,10 +108,11 @@ pub fn dust_storm_sim(
     // invisible to the Beamers as the host would be.
     for (e, p, hidden) in &q_astronauts {
         let inside = storm.active && sphere::arc_dist(p.dir, storm.dir, planet.radius) < storm.radius;
+        // `try_`: a stage change queued this same frame may already be sweeping this body.
         if inside && !hidden {
-            commands.entity(e).insert(InStorm);
+            commands.entity(e).try_insert(InStorm);
         } else if !inside && hidden {
-            commands.entity(e).remove::<InStorm>();
+            commands.entity(e).try_remove::<InStorm>();
         }
     }
 }

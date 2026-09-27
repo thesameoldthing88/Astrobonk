@@ -257,8 +257,12 @@ fn assign_net_ids(
     }
     *known = live;
 
+    // `try_insert`: an enemy spawned last frame can be swept by a stage change queued this
+    // same frame (the teleporter despawns everything StageScoped), and a plain insert on it
+    // panics the host the moment the despawn lands first. Its id is simply never recorded;
+    // the wrapping counter hands the value out again in time.
     for e in &fresh {
-        commands.entity(e).insert(NetId(ids.claim()));
+        commands.entity(e).try_insert(NetId(ids.claim()));
     }
 }
 
@@ -710,7 +714,8 @@ fn stream_pickups(
     for (e, p) in &fresh {
         ids.next = ids.next.wrapping_add(1).max(1);
         let id = ids.next;
-        commands.entity(e).insert(PickupNetId(id));
+        // try_insert: the same stage-change race as `assign_net_ids`
+        commands.entity(e).try_insert(PickupNetId(id));
         let (kind, value) = match p.kind {
             PickupKind::Xp(v) => (0u8, v.to_bits()),
             PickupKind::Gold(g) => (1, g as u32),
@@ -864,7 +869,8 @@ fn animate_net_pickups(
 /// `director::stage_transition` is unreachable on a client — its only trigger is the
 /// teleporter interaction, which is host-only — so without this the joiner keeps the entire
 /// previous planet (terrain, rocks, chests, shrines) while its HUD describes the new one,
-/// and every streamed enemy decodes against the wrong planet radius.
+/// and every streamed enemy decodes against the wrong planet radius. The same rebuild
+/// covers a world built from any seed other than the host's (see `RunSync::built_for`).
 ///
 /// This deliberately mirrors only the TEARDOWN+REBUILD half of stage_transition. The victory
 /// branch and the `save.counters.cleared` writes stay host-only: a client must never bank
@@ -887,8 +893,12 @@ fn client_stage_transition(
 ) {
     let Some(stage) = sync.pending_stage.take() else { return };
 
-    // Carry our build across, exactly as the host carries every player's.
-    let carried = mine.single().ok().cloned();
+    // Carry our build across, exactly as the host carries every player's — but only into
+    // the next stage of the SAME run. A world from another seed means another run, and a
+    // sheet from it (levels, gold, items) must not come along.
+    let same_run = sync.built_for.map(|(seed, _)| seed) == Some(run.run_seed);
+    let carried = if same_run { mine.single().ok().cloned() } else { None };
+    sync.built_for = Some((run.run_seed, stage));
 
     // Tear the old stage down. This eats our astronaut and every streamed proxy too —
     // they are all StageScoped — so the id maps must be cleared or `receive_*` would

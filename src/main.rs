@@ -460,6 +460,7 @@ fn enter_run(
         timer: 0.0,
     };
     sync.world_built = true;
+    sync.built_for = Some((run_state.run_seed, run_state.stage));
     // A joiner stands in its OWN slot (client_follow_host_run waits for the id), which is
     // where the host seats its server-side body.
     let my_slot = if *role == net::NetRole::Client { mine.0.unwrap_or(0) } else { 0 };

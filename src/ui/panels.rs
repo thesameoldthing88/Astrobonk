@@ -584,7 +584,9 @@ pub fn pause_panel(
                             root.spawn((AbandonBtn, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(1.0, 0.4, 0.4))))
                                 .with_children(|b| {
                                     b.spawn(txt(
-                                        if role.is_networked() { "ABANDON RUN (ENDS SESSION)" } else { "ABANDON RUN" },
+                                        // It ends the run for everyone; the session itself
+                                        // stays open, and the squad follows us into the next.
+                                        if role.is_networked() { "ABANDON RUN (WHOLE SQUAD)" } else { "ABANDON RUN" },
                                         FONT_MED,
                                         Color::WHITE,
                                     ));
@@ -623,7 +625,7 @@ pub fn pause_panel(
             }
             for i in &abandon {
                 if *i == Interaction::Pressed {
-                    run.result = Some(RunResult::Death);
+                    run.result = Some(RunResult::Abandoned);
                     *phase = RunPhase::Dead;
                 }
             }

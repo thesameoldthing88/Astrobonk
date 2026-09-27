@@ -94,6 +94,9 @@ pub struct WeaponInstance {
 pub enum RunResult {
     Victory,
     Death,
+    /// Quit from the pause menu. Banks like a death; told apart so a co-op host can tell
+    /// its squad WHY the run is over (a wipe and "the host left" read very differently).
+    Abandoned,
 }
 
 /// Run-GLOBAL state: the clock, the world chain, boss flags, shared counters.
