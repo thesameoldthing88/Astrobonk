@@ -84,6 +84,11 @@ fn style_number(dn: &DamageNumber, size: f32, text: &mut Text, font: &mut TextFo
             font.font_size = 15.0 * size;
             color.0 = Color::srgb(0.7, 0.8, 0.95);
         }
+        NumKind::Immune => {
+            text.0 = "IMMUNE".into();
+            font.font_size = 15.0 * size;
+            color.0 = Color::srgb(0.45, 0.55, 1.0);
+        }
     }
 }
 

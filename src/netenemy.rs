@@ -151,8 +151,9 @@ pub struct NetBossIndex(HashMap<u16, Entity>);
 #[derive(Resource, Default)]
 pub struct NetEnemyStats {
     pub records: u32,
-    /// Enemy-state lane records received (P08).
+    /// Enemy-state lane records received (P08), and its affix-state records (P10).
     pub states: u32,
+    pub affix_states: u32,
     pub chunks: u32,
     pub bytes: u32,
     pub seq_gaps: u32,
@@ -288,7 +289,7 @@ fn stream_enemies(
     slots: Res<PeerSlots>,
     clients: Query<Entity, (With<ConnectedClient>, With<AuthorizedClient>)>,
     astronauts: Query<(&Player, &PlayerId)>,
-    enemies: Query<(&Enemy, &NetId, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>)>,
+    enemies: Query<(&Enemy, &NetId, Option<&crate::interact::Pot>, Option<&crate::enemies::Boss>, Option<&crate::affixes::Affixes>)>,
     mut out: MessageWriter<ToClients<EnemySnapMsg>>,
 ) {
     clock.acc += time.delta_secs();
@@ -317,6 +318,8 @@ fn stream_enemies(
         let resident = residency.0.entry(client).or_default();
 
         let mut spawns: Vec<u8> = Vec::new();
+        // each descriptor's length: 8, or 9 for an elite (its affix byte)
+        let mut spawn_lens: Vec<usize> = Vec::new();
         let mut updates: Vec<u8> = Vec::new();
         let mut n_spawn = 0u16;
         let mut n_update = 0u16;
@@ -324,7 +327,7 @@ fn stream_enemies(
         let mut far: Vec<(u16, f32, f32)> = Vec::new();
         let mut records = 0usize;
 
-        for (e, nid, pot, boss) in &enemies {
+        for (e, nid, pot, boss, affixes) in &enemies {
             // Pots are static scenery derived from the stage seed, and bosses ride their
             // own lane (they must never be culled — the HUD edge marker needs them).
             if pot.is_some() || boss.is_some() {
@@ -354,6 +357,14 @@ fn stream_enemies(
                 spawns.push((((e.scale - 0.70) / 2.55).clamp(0.0, 1.0) * 255.0) as u8);
                 spawns.extend_from_slice(&qu.to_le_bytes());
                 spawns.extend_from_slice(&qv.to_le_bytes());
+                // §9 (P10): an elite's descriptor carries its Glitched affix bits, so the
+                // proxy is built wearing its aura — one byte, on elites only
+                if e.elite {
+                    spawns.push(affixes.map_or(0, |a| a.0 .0));
+                    spawn_lens.push(SPAWN_RECORD_BYTES + 1);
+                } else {
+                    spawn_lens.push(SPAWN_RECORD_BYTES);
+                }
                 n_spawn += 1;
                 records += 1;
                 continue;
@@ -414,12 +425,14 @@ fn stream_enemies(
         // at ~30 enemies (one chunk) and catastrophic at 200+.
         let mut chunks_out: Vec<(u16, u16, u16, Vec<u8>)> = Vec::new();
         let (mut si, mut ui, mut di) = (0usize, 0usize, 0usize);
+        let mut s_off = 0usize;
         let (ns_tot, nu_tot, nd_tot) = (n_spawn as usize, n_update as usize, n_despawn as usize);
         while si < ns_tot || ui < nu_tot || di < nd_tot {
             let mut buf: Vec<u8> = Vec::new();
             let (mut cs, mut cu, mut cd) = (0u16, 0u16, 0u16);
-            while si < ns_tot && buf.len() + 8 <= NET_ENEMY_CHUNK_BYTES {
-                buf.extend_from_slice(&spawns[si * 8..si * 8 + 8]);
+            while si < ns_tot && buf.len() + spawn_lens[si] <= NET_ENEMY_CHUNK_BYTES {
+                buf.extend_from_slice(&spawns[s_off..s_off + spawn_lens[si]]);
+                s_off += spawn_lens[si];
                 si += 1;
                 cs += 1;
             }
@@ -468,8 +481,15 @@ fn stream_enemies(
     }
 }
 
+/// Bytes in one crowd spawn descriptor: id + elite flag (2), kind (1), scale (1), u (2),
+/// v (2). An elite's is followed by one more: its Glitched affix bits (P10).
+pub const SPAWN_RECORD_BYTES: usize = 8;
+
 /// Bytes in one enemy-state record: id (2), state (1), altitude (1), heading (3 × i8).
 pub const STATE_RECORD_BYTES: usize = 7;
+/// Bytes in one affix-state record (P10): id (2), Warden shield (1), Meteoric altitude (1),
+/// shield facing (3 × i8).
+pub const AFFIX_RECORD_BYTES: usize = 7;
 /// Altitude range an enemy-state record can carry (a Sunskimmer's cruise, bob included).
 const STATE_ALT_MAX: f32 = SKIM_ALTITUDE * 1.25;
 
@@ -500,8 +520,39 @@ pub fn decode_state(rec: &[u8]) -> (u16, crate::bestiary::EnemyVis) {
     )
 }
 
+/// Pack one affixed elite's look (`affixes::AffixVis`) onto the enemy-state lane.
+pub fn encode_affix_state(buf: &mut Vec<u8>, id: u16, vis: &crate::affixes::AffixVis) {
+    buf.extend_from_slice(&(id & ID_MASK).to_le_bytes());
+    buf.push((vis.shield.clamp(0.0, 1.0) * 255.0).round() as u8);
+    buf.push(((vis.alt / (METEOR_APEX * 1.1)).clamp(0.0, 1.0) * 255.0).round() as u8);
+    for c in vis.heading.to_array() {
+        buf.push(((c.clamp(-1.0, 1.0) * 127.0).round() as i8) as u8);
+    }
+}
+
+/// Unpack one record (`AFFIX_RECORD_BYTES` long).
+pub fn decode_affix_state(rec: &[u8]) -> (u16, crate::affixes::AffixVis) {
+    let id = u16::from_le_bytes([rec[0], rec[1]]) & ID_MASK;
+    let heading = Vec3::new(rec[4] as i8 as f32, rec[5] as i8 as f32, rec[6] as i8 as f32) / 127.0;
+    (
+        id,
+        crate::affixes::AffixVis {
+            shield: rec[2] as f32 / 255.0,
+            alt: rec[3] as f32 / 255.0 * METEOR_APEX * 1.1,
+            heading: heading.normalize_or_zero(),
+        },
+    )
+}
+
 /// Headless RULES: a record survives the wire.
 pub fn state_lane_self_check() -> Result<(), String> {
+    let av = crate::affixes::AffixVis { shield: 0.4, alt: 6.2, heading: Vec3::new(-0.7, 0.1, 0.7).normalize() };
+    let mut buf = Vec::new();
+    encode_affix_state(&mut buf, 0x1234, &av);
+    let (id, back) = decode_affix_state(&buf);
+    if buf.len() != AFFIX_RECORD_BYTES || id != 0x1234 || (back.shield - 0.4).abs() > 0.01 || (back.alt - 6.2).abs() > 0.1 || back.heading.angle_between(av.heading) > 0.02 {
+        return Err(format!("the affix-state lane garbled a record: {av:?} came back as {back:?} (id {id:X})"));
+    }
     let vis = crate::bestiary::EnemyVis { state: 3, alt: 7.3, heading: Vec3::new(0.3, -0.5, 0.81).normalize() };
     let mut buf = Vec::new();
     encode_state(&mut buf, 0x7ABC, &vis);
@@ -527,6 +578,7 @@ fn stream_enemy_states(
     residency: Res<ClientResidency>,
     clients: Query<Entity, (With<ConnectedClient>, With<AuthorizedClient>)>,
     q: Query<(&NetId, &crate::bestiary::EnemyVis)>,
+    q_affix: Query<(&NetId, &crate::affixes::AffixVis)>,
     mut out: MessageWriter<ToClients<crate::net::EnemyStateMsg>>,
 ) {
     *acc += time.delta_secs();
@@ -535,10 +587,13 @@ fn stream_enemy_states(
     }
     *acc = 0.0;
     let recs: Vec<(u16, &crate::bestiary::EnemyVis)> = q.iter().map(|(n, v)| (n.0, v)).collect();
-    if recs.is_empty() {
+    // §9 Glitched elites (P10): a Warden's shield and a Meteoric's leap, in their own records
+    let affix_recs: Vec<(u16, &crate::affixes::AffixVis)> = q_affix.iter().map(|(n, v)| (n.0, v)).collect();
+    if recs.is_empty() && affix_recs.is_empty() {
         return;
     }
     let per_chunk = NET_ENEMY_CHUNK_BYTES / STATE_RECORD_BYTES;
+    let per_affix_chunk = NET_ENEMY_CHUNK_BYTES / AFFIX_RECORD_BYTES;
     for client in &clients {
         let Some(resident) = residency.0.get(&client) else { continue };
         let mine: Vec<&(u16, &crate::bestiary::EnemyVis)> = recs.iter().filter(|(id, _)| resident.contains(id)).collect();
@@ -549,7 +604,18 @@ fn stream_enemy_states(
             }
             out.write(ToClients {
                 targets: SendTargets::Single(ClientId::Client(client)),
-                message: crate::net::EnemyStateMsg { n: chunk.len() as u16, data },
+                message: crate::net::EnemyStateMsg { n: chunk.len() as u16, n_affix: 0, data },
+            });
+        }
+        let mine: Vec<&(u16, &crate::affixes::AffixVis)> = affix_recs.iter().filter(|(id, _)| resident.contains(id)).collect();
+        for chunk in mine.chunks(per_affix_chunk) {
+            let mut data = Vec::with_capacity(chunk.len() * AFFIX_RECORD_BYTES);
+            for (id, vis) in chunk {
+                encode_affix_state(&mut data, *id, vis);
+            }
+            out.write(ToClients {
+                targets: SendTargets::Single(ClientId::Client(client)),
+                message: crate::net::EnemyStateMsg { n: 0, n_affix: chunk.len() as u16, data },
             });
         }
     }
@@ -562,13 +628,23 @@ fn receive_enemy_states(
     index: Res<NetEnemyIndex>,
     mut stats: ResMut<NetEnemyStats>,
     mut q: Query<&mut crate::bestiary::EnemyVis, With<NetEnemy>>,
+    mut q_affix: Query<&mut crate::affixes::AffixVis, With<NetEnemy>>,
 ) {
     for m in msgs.read() {
-        for rec in m.data.chunks_exact(STATE_RECORD_BYTES).take(m.n as usize) {
+        let kinds = (m.n as usize * STATE_RECORD_BYTES).min(m.data.len());
+        for rec in m.data[..kinds].chunks_exact(STATE_RECORD_BYTES) {
             let (id, vis) = decode_state(rec);
             stats.states += 1;
             let Some(e) = index.0.get(&id).copied() else { continue };
             if let Ok(mut v) = q.get_mut(e) {
+                *v = vis;
+            }
+        }
+        for rec in m.data[kinds..].chunks_exact(AFFIX_RECORD_BYTES).take(m.n_affix as usize) {
+            let (id, vis) = decode_affix_state(rec);
+            stats.affix_states += 1;
+            let Some(e) = index.0.get(&id).copied() else { continue };
+            if let Ok(mut v) = q_affix.get_mut(e) {
                 *v = vis;
             }
         }
@@ -607,12 +683,13 @@ fn stream_hazards(
     // landing, a blink), §6/§12 weapons (an evolution's fanfare, THE ANGELUS's wisps), §9 new
     // enemies (an uppercut, a tracker, a sprung mimic), §11 co-op (a revive, a shove, STATIC
     // CASCADE, a duo, a drop-in landing)
-    (mut item_fx, mut tech_fx, mut weapon_fx, mut bestiary_fx, mut coop_fx): (
+    (mut item_fx, mut tech_fx, mut weapon_fx, mut bestiary_fx, mut coop_fx, mut affix_fx): (
         MessageReader<crate::items::ItemFxMsg>,
         MessageReader<crate::techs::TechFxMsg>,
         MessageReader<crate::arsenal::WeaponFxMsg>,
         MessageReader<crate::bestiary::BestiaryFxMsg>,
         MessageReader<crate::coop::CoopFxMsg>,
+        MessageReader<crate::affixes::AffixFxMsg>,
     ),
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
@@ -662,6 +739,16 @@ fn stream_hazards(
             CoopFx::Cascade { a, b, axis } => HazardEvent::Cascade { a, b, axis: axis.to_array() },
             CoopFx::Duo { feat, a, b, dir, first } => HazardEvent::Duo { feat: feat.code(), a, b, dir: dir.to_array(), first },
             CoopFx::DropIn { owner, level, dir } => HazardEvent::DropIn { owner, level, dir: dir.to_array() },
+        });
+    }
+    for m in affix_fx.read().filter(|m| !m.from_wire) {
+        use crate::affixes::AffixFx;
+        events.push(match m.fx {
+            AffixFx::Well { dir, secs } => HazardEvent::AffixWell { dir: dir.to_array(), secs },
+            AffixFx::Split { dir } => HazardEvent::AffixSplit { dir: dir.to_array() },
+            AffixFx::ShieldBreak { dir } => HazardEvent::AffixShieldBreak { dir: dir.to_array() },
+            AffixFx::Slam { dir } => HazardEvent::AffixSlam { dir: dir.to_array() },
+            AffixFx::Cursed { dir, owner } => HazardEvent::AffixCursed { dir: dir.to_array(), owner },
         });
     }
     // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
@@ -757,6 +844,7 @@ fn receive_hazards(
     flora: Option<Res<crate::gimmicks::WorldFlora>>,
     mut bestiary_fx: MessageWriter<crate::bestiary::BestiaryFxMsg>,
     mut coop_fx: MessageWriter<crate::coop::CoopFxMsg>,
+    mut affix_fx: MessageWriter<crate::affixes::AffixFxMsg>,
 ) {
     use crate::bestiary::{BestiaryFx, BestiaryFxMsg};
     use crate::items::{DeathSave, ItemFx, ItemFxMsg};
@@ -831,6 +919,19 @@ fn receive_hazards(
             };
             if let Some(fx) = fx {
                 coop_fx.write(crate::coop::CoopFxMsg { fx, from_wire: true });
+                continue;
+            }
+            // ...and the Glitched elites' (P10), for `affixes::affix_fx_presentation`
+            let fx = match *ev {
+                HazardEvent::AffixWell { dir, secs } => Some(crate::affixes::AffixFx::Well { dir: Vec3::from(dir), secs }),
+                HazardEvent::AffixSplit { dir } => Some(crate::affixes::AffixFx::Split { dir: Vec3::from(dir) }),
+                HazardEvent::AffixShieldBreak { dir } => Some(crate::affixes::AffixFx::ShieldBreak { dir: Vec3::from(dir) }),
+                HazardEvent::AffixSlam { dir } => Some(crate::affixes::AffixFx::Slam { dir: Vec3::from(dir) }),
+                HazardEvent::AffixCursed { dir, owner } => Some(crate::affixes::AffixFx::Cursed { dir: Vec3::from(dir), owner }),
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                affix_fx.write(crate::affixes::AffixFxMsg { fx, from_wire: true });
                 continue;
             }
             match *ev {
@@ -957,7 +1058,12 @@ fn receive_hazards(
                 | HazardEvent::Shove { .. }
                 | HazardEvent::Cascade { .. }
                 | HazardEvent::Duo { .. }
-                | HazardEvent::DropIn { .. } => {}
+                | HazardEvent::DropIn { .. }
+                | HazardEvent::AffixWell { .. }
+                | HazardEvent::AffixSplit { .. }
+                | HazardEvent::AffixShieldBreak { .. }
+                | HazardEvent::AffixSlam { .. }
+                | HazardEvent::AffixCursed { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
@@ -1682,26 +1788,35 @@ fn receive_enemies(
         let d = &m.data;
 
         for _ in 0..m.n_spawn {
-            if off + 8 > d.len() {
+            if off + SPAWN_RECORD_BYTES > d.len() {
                 break;
             }
             let idw = u16::from_le_bytes([d[off], d[off + 1]]);
             let id = idw & ID_MASK;
             let elite = idw & FLAG_BIT != 0;
+            if elite && off + SPAWN_RECORD_BYTES + 1 > d.len() {
+                break;
+            }
             let kind = kind_from_code(d[off + 2]);
             let scale = 0.70 + (d[off + 3] as f32 / 255.0) * 2.55;
             let dir = decode(
                 u16::from_le_bytes([d[off + 4], d[off + 5]]),
                 u16::from_le_bytes([d[off + 6], d[off + 7]]),
             );
-            off += 8;
+            // an elite's Glitched affixes (P10) trail its descriptor
+            let affixes = if elite { crate::content::enemies::AffixSet(d[off + SPAWN_RECORD_BYTES]) } else { Default::default() };
+            off += SPAWN_RECORD_BYTES + usize::from(elite);
             stats.records += 1;
 
             if index.0.contains_key(&id) {
                 continue;
             }
             let def = kind.def();
-            let mat = if elite { assets.elite_mat.clone() } else { assets.mats[&kind].clone() };
+            let mat = match affixes.primary() {
+                Some(a) => assets.affix_mats[a.index()].clone(),
+                None if elite => assets.elite_mat.clone(),
+                None => assets.mats[&kind].clone(),
+            };
             let e = commands
                 .spawn((
                     Enemy {
@@ -1735,6 +1850,8 @@ fn receive_enemies(
                 // the new kinds' look, filled in by the enemy-state lane
                 commands.entity(e).insert(crate::bestiary::vis_bundle(dir));
             }
+            // its aura from the first frame; a Warden/Meteoric look follows on the state lane
+            crate::affixes::proxy_bundle(&mut commands.entity(e), affixes, dir);
             index.0.insert(id, e);
         }
 
@@ -1969,7 +2086,7 @@ pub fn log_stream_stats(
         NetRole::Client => {
             info!("NETPARITY[Client] {parity_line}");
             info!(
-                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s states={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
+                "NETENEMY[Client] proxies={} local_sim={} bosses={} worm_segs={} worm_len={:.1}m hazards={} pickups={} lvl={} xp={:.0} hp={:.0} gold={} rx_records={}/s states={}/s affix_states={}/s chunks={}/s bytes={}/s ({:.1} KB/s) seq_gaps={} me={:?}",
                 proxies.iter().count(),
                 local_sim.iter().count(),
                 n_boss.iter().count(),
@@ -1993,6 +2110,7 @@ pub fn log_stream_stats(
                 my_ps.iter().next().map(|p| p.gold).unwrap_or(0),
                 stats.records,
                 stats.states,
+                stats.affix_states,
                 stats.chunks,
                 stats.bytes,
                 stats.bytes as f32 / 1024.0,
@@ -2001,6 +2119,7 @@ pub fn log_stream_stats(
             );
             stats.records = 0;
             stats.states = 0;
+            stats.affix_states = 0;
             stats.chunks = 0;
             stats.bytes = 0;
         }

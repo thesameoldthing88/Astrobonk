@@ -546,3 +546,235 @@ impl EliteMods {
     pub const SCALE: f32 = 1.65;
     pub const XP: f32 = 8.0;
 }
+
+// ─── GDD §9 "Glitched" elite affixes (P10) ──────────────────────────────────
+
+/// One stacked elite affix. What each DOES lives in `affixes.rs`, its numbers in config.rs.
+/// The order is the WIRE order (`bit`, the spawn descriptor's affix byte): append only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Affix {
+    Overclocked,
+    Leaden,
+    Warden,
+    Contagious,
+    Magnetar,
+    Nightborne,
+    Meteoric,
+    CursedTouched,
+}
+
+pub struct AffixDef {
+    /// Shown on the callout banner (ASCII: the UI font lacks most glyphs, L66).
+    pub name: &'static str,
+    /// §9's counterplay, the callout's teaching line.
+    pub counterplay: &'static str,
+    /// The aura colour that telegraphs it (§9 table). Never red: red is danger's alone (§13).
+    pub aura: Color,
+    /// Relative odds in the roll (Cursed-Touched also grows with Δ, see `roll_affixes`).
+    pub weight: f32,
+    /// Segments of its aura ring — the affix reads by SHAPE as well as colour (§13).
+    pub ring_segments: u32,
+}
+
+impl Affix {
+    pub const ALL: [Affix; 8] = [
+        Affix::Overclocked,
+        Affix::Leaden,
+        Affix::Warden,
+        Affix::Contagious,
+        Affix::Magnetar,
+        Affix::Nightborne,
+        Affix::Meteoric,
+        Affix::CursedTouched,
+    ];
+
+    pub fn index(self) -> usize {
+        Affix::ALL.iter().position(|a| *a == self).unwrap_or(0)
+    }
+
+    /// Its bit in an [`AffixSet`] (and on the wire).
+    pub fn bit(self) -> u8 {
+        1 << self.index()
+    }
+
+    pub fn def(self) -> AffixDef {
+        use Affix::*;
+        let (name, counterplay, aura, weight, ring_segments) = match self {
+            Overclocked => ("OVERCLOCKED", "KITE, DON'T TRADE", Color::srgb(0.95, 0.97, 1.0), 1.0, 3),
+            Leaden => ("LEADEN", "BAIT THE WELL AWAY", Color::srgb(0.55, 0.36, 0.20), 1.0, 1),
+            Warden => ("WARDEN", "FLANK THE CURVE", Color::srgb(0.25, 0.92, 1.0), 1.0, 4),
+            Contagious => ("CONTAGIOUS", "BURST, DON'T CHIP", Color::srgb(0.35, 0.95, 0.30), 1.0, 8),
+            Magnetar => ("MAGNETAR", "USE SEEKERS AND PIERCERS", Color::srgb(0.68, 0.32, 1.0), 1.0, 6),
+            Nightborne => ("NIGHTBORNE", "FIGHT IT AT DAWN", Color::srgb(0.16, 0.28, 0.95), 1.0, 2),
+            Meteoric => ("METEORIC", "WATCH THE SHADOW", Color::srgb(1.0, 0.55, 0.12), 1.0, 5),
+            CursedTouched => ("CURSED-TOUCHED", "HIGH RISK, HIGH LOOT", Color::srgb(0.95, 0.75, 0.15), AFFIX_CURSED_WEIGHT, 12),
+        };
+        AffixDef { name, counterplay, aura, weight, ring_segments }
+    }
+
+    /// Can an elite of `kind` carry it? An Aegis Drone already has a front shield (and a
+    /// Rollo's ball has no front, and its pace is the slope's, not a stride to overclock);
+    /// the Meteoric leap needs a walker that steers with the crowd — not a roller, a
+    /// burrower, a tunneller or a flier.
+    pub fn allowed_on(self, kind: EnemyKind) -> bool {
+        use EnemyKind::*;
+        match self {
+            Affix::Warden => !matches!(kind, AegisDrone | Rollo),
+            Affix::Overclocked => kind != Rollo,
+            Affix::Meteoric => !matches!(kind, Rollo | Burrower | Trencher) && kind.def().hover <= 0.0,
+            _ => true,
+        }
+    }
+}
+
+/// An elite's stacked affixes, as bits of [`Affix::bit`]. The first set bit in `ALL` order
+/// is its PRIMARY (the body's colour).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct AffixSet(pub u8);
+
+impl AffixSet {
+    pub const EMPTY: AffixSet = AffixSet(0);
+    pub fn has(self, a: Affix) -> bool {
+        self.0 & a.bit() != 0
+    }
+    pub fn with(self, a: Affix) -> AffixSet {
+        AffixSet(self.0 | a.bit())
+    }
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+    pub fn len(self) -> u32 {
+        self.0.count_ones()
+    }
+    pub fn iter(self) -> impl Iterator<Item = Affix> {
+        Affix::ALL.into_iter().filter(move |a| self.has(*a))
+    }
+    pub fn primary(self) -> Option<Affix> {
+        self.iter().next()
+    }
+    /// "OVERCLOCKED METEORIC".
+    pub fn label(self) -> String {
+        self.iter().map(|a| a.def().name).collect::<Vec<_>>().join(" ")
+    }
+    /// §9's named nightmares.
+    pub fn nickname(self) -> Option<&'static str> {
+        use Affix::*;
+        let pair = |a: Affix, b: Affix| self.has(a) && self.has(b);
+        if pair(Overclocked, Meteoric) {
+            Some("THE POGO GOBLIN")
+        } else if pair(Warden, Magnetar) {
+            Some("THE UNHITTABLE TURTLE")
+        } else {
+            None
+        }
+    }
+    /// Parse `--affixes` names ("warden", "cursedtouched" / "cursed").
+    pub fn from_names(list: &str) -> AffixSet {
+        let mut set = AffixSet::EMPTY;
+        for name in list.split(',').map(|s| s.trim().to_ascii_lowercase().replace(['-', '_'], "")) {
+            if name == "all" {
+                return AffixSet(u8::MAX);
+            }
+            if let Some(a) = Affix::ALL.iter().find(|a| {
+                let n = a.def().name.to_ascii_lowercase().replace('-', "");
+                n == name || (name.len() >= 4 && n.starts_with(&name))
+            }) {
+                set = set.with(*a);
+            }
+        }
+        set
+    }
+}
+
+/// Roll an elite's affixes (§9 "1-3 stacked, scaling with Difficulty/Cursed"): one, then a
+/// second at `extra` and a third at `extra × AFFIX_THIRD_SHARE` (`Scaling::affix_extra`
+/// carries the §3 run-time/depth/Δ shape), each drawn by weight from the affixes `kind` may
+/// carry and does not have yet. Cursed-Touched's weight grows with `delta` (Δ points): the
+/// Cursed items are the honeypot. Always exactly `1 + 2 + 2` draws, so the director's
+/// stream never depends on which affixes came up.
+pub fn roll_affixes(kind: EnemyKind, extra: f32, delta: f32, rng: &mut impl Rng) -> AffixSet {
+    let more = rng.gen_range(0.0..1.0f32);
+    let count = 1 + u32::from(more < extra) + u32::from(more < extra * AFFIX_THIRD_SHARE);
+    let mut set = AffixSet::EMPTY;
+    for i in 0..3 {
+        let pick = rng.gen_range(0.0..1.0f32);
+        if i >= count {
+            continue;
+        }
+        let weight = |a: &Affix| {
+            let w = a.def().weight;
+            if *a == Affix::CursedTouched {
+                w + AFFIX_CURSED_WEIGHT_DELTA * delta.max(0.0)
+            } else {
+                w
+            }
+        };
+        let open: Vec<Affix> = Affix::ALL.into_iter().filter(|a| a.allowed_on(kind) && !set.has(*a)).collect();
+        let total: f32 = open.iter().map(weight).sum();
+        let mut at = pick * total;
+        for a in &open {
+            let w = weight(a);
+            if at < w {
+                set = set.with(*a);
+                break;
+            }
+            at -= w;
+        }
+    }
+    set
+}
+
+/// Headless self-check: the affix table and the roll.
+pub fn affix_self_check() -> Result<(), String> {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xAF1);
+    let mut seen = [0u32; 8];
+    let mut counts = [0u32; 4];
+    for i in 0..20_000 {
+        let kind = EnemyKind::ALL[i % EnemyKind::ALL.len()];
+        let set = roll_affixes(kind, 0.5, 0.0, &mut rng);
+        if set.is_empty() || set.len() > 3 {
+            return Err(format!("an elite rolled {} affixes", set.len()));
+        }
+        if let Some(bad) = set.iter().find(|a| !a.allowed_on(kind)) {
+            return Err(format!("a {} rolled {}", kind.def().name, bad.def().name));
+        }
+        counts[set.len() as usize] += 1;
+        for a in set.iter() {
+            seen[a.index()] += 1;
+        }
+    }
+    if let Some(i) = seen.iter().position(|n| *n == 0) {
+        return Err(format!("{} never rolled", Affix::ALL[i].def().name));
+    }
+    if counts[2] == 0 || counts[3] == 0 {
+        return Err(format!("stacks never reached 2 or 3 affixes: {counts:?}"));
+    }
+    // no extra chance: always exactly one; a sure one: always three
+    if (0..500).any(|_| roll_affixes(EnemyKind::Shambler, 0.0, 0.0, &mut rng).len() != 1) {
+        return Err("a zero extra chance still stacked affixes".into());
+    }
+    if (0..500).any(|_| roll_affixes(EnemyKind::Shambler, 1.0 / AFFIX_THIRD_SHARE, 0.0, &mut rng).len() != 3) {
+        return Err("a sure extra chance did not stack three".into());
+    }
+    // the Cursed honeypot: Δ makes Cursed-Touched likelier
+    let cursed = |delta: f32, rng: &mut rand::rngs::StdRng| {
+        (0..6000).filter(|_| roll_affixes(EnemyKind::Shambler, 0.0, delta, rng).has(Affix::CursedTouched)).count()
+    };
+    let (calm, cursed_run) = (cursed(0.0, &mut rng), cursed(6.0, &mut rng));
+    if cursed_run <= calm * 3 / 2 {
+        return Err(format!("Cursed-Touched did not grow with Delta ({calm} -> {cursed_run} of 6000)"));
+    }
+    // wire bits are distinct and the names parse back
+    for a in Affix::ALL {
+        if AffixSet::from_names(&a.def().name.to_ascii_lowercase()) != AffixSet::EMPTY.with(a) {
+            return Err(format!("--affixes cannot name {}", a.def().name));
+        }
+        if a.def().name.bytes().any(|b| !b.is_ascii()) || a.def().counterplay.bytes().any(|b| !b.is_ascii()) {
+            return Err(format!("{}'s text is not ASCII (L66)", a.def().name));
+        }
+    }
+    if AffixSet::EMPTY.with(Affix::Overclocked).with(Affix::Meteoric).nickname() != Some("THE POGO GOBLIN") {
+        return Err("the pogo goblin went unnamed".into());
+    }
+    Ok(())
+}

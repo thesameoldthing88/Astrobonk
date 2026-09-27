@@ -799,6 +799,12 @@ pub fn aegis_turn(
 /// knockback when it has one (a shot's travel), else from where its shooter stands (an
 /// aura, a beam). Environment hits (no shooter, no push) always land.
 pub fn shield_blocks(at: Vec3, facing: Vec3, knock: Vec3, shooter: Option<Vec3>) -> bool {
+    cone_blocks(at, facing, knock, shooter, AEGIS_SHIELD_HALF)
+}
+
+/// The same rule for any front shield of `half` radians either side of `facing` (a Warden
+/// elite's, `affixes::guard_hit`).
+pub fn cone_blocks(at: Vec3, facing: Vec3, knock: Vec3, shooter: Option<Vec3>, half: f32) -> bool {
     let from = if knock.length_squared() > 1e-6 {
         tangent(-knock, at)
     } else if let Some(s) = shooter {
@@ -806,7 +812,7 @@ pub fn shield_blocks(at: Vec3, facing: Vec3, knock: Vec3, shooter: Option<Vec3>)
     } else {
         return false;
     };
-    from != Vec3::ZERO && from.dot(tangent(facing, at)) > AEGIS_SHIELD_HALF.cos()
+    from != Vec3::ZERO && from.dot(tangent(facing, at)) > half.cos()
 }
 
 /// A Beacon Tick that reaches an astronaut plants itself: the astronaut is tracked (the

@@ -86,6 +86,11 @@ pub struct Scaling {
     pub spawn: f32,
     /// Chance that one elite roll (every `ELITE_ROLL_SECS`) promotes the next spawn.
     pub elite_chance: f32,
+    /// Chance an elite stacks a second Glitched affix (a third at `AFFIX_THIRD_SHARE` of it,
+    /// `content::enemies::roll_affixes`) — §9 "scaling with Difficulty/Cursed".
+    pub affix_extra: f32,
+    /// Δ in points, for the affix roll's Cursed-Touched weight.
+    pub delta: f32,
     /// Boss/miniboss HP multiplier. Bosses arrive at fixed stage marks and their `BossDef`
     /// numbers are authored for that moment, so the run-time term is left out — only the
     /// depth, planet and Δ terms of the §3 formula apply.
@@ -130,6 +135,9 @@ impl Scaling {
                 * density,
             elite_chance: (ELITE_CHANCE_T * t + ELITE_CHANCE_D * d + ELITE_CHANCE_DELTA * delta)
                 .clamp(0.0, ELITE_CHANCE_CAP),
+            affix_extra: (AFFIX_EXTRA_BASE + AFFIX_EXTRA_T * t + AFFIX_EXTRA_D * d + AFFIX_EXTRA_DELTA * delta)
+                .clamp(0.0, AFFIX_EXTRA_CAP),
+            delta,
             boss_hp: depth_hp * i.planet * delta_hp * party_boss,
             boss_dmg: depth_dmg * i.planet * delta_dmg,
             party_spawn,
@@ -231,6 +239,15 @@ pub fn self_check() -> Result<(), String> {
     }
     if Scaling::new(ScalingInputs { t_min: 500.0, depth: 9.0, delta: 99.0, ..base }).elite_chance > ELITE_CHANCE_CAP {
         return Err("elite chance exceeded its cap".into());
+    }
+    // §9: the affix stack grows with t, d and Δ (Difficulty/Cursed), capped
+    let extra = |i: ScalingInputs| Scaling::new(i).affix_extra;
+    if !(extra(base) < extra(ScalingInputs { t_min: 10.0, ..base })
+        && extra(base) < extra(ScalingInputs { depth: 1.0, ..base })
+        && extra(base) < extra(ScalingInputs { delta: 3.0, ..base })
+        && extra(ScalingInputs { t_min: 500.0, depth: 9.0, delta: 99.0, ..base }) <= AFFIX_EXTRA_CAP)
+    {
+        return Err("the elite affix stack does not scale with t, d and Delta under its cap".into());
     }
     // The Static Radio angers The Static only — the living horde is untouched.
     let radio = Scaling::new(ScalingInputs { static_radio: true, ..base });

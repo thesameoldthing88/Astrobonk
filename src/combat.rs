@@ -1117,12 +1117,20 @@ pub fn projectile_move(
     mut q: Query<(Entity, &mut Projectile, &mut Transform), Without<Player>>,
     mut hits: MessageWriter<HitMsg>,
     mut forces: MessageWriter<crate::coop::FriendlyForce>,
+    // §9 Magnetar elites (P10): a client's proxies carry their affixes too, so its own
+    // shots bend exactly as the host's copy of them does
+    (q_magnetars, mut affix_tm): (Query<(&Transform, &crate::affixes::Affixes), (With<Enemy>, Without<Projectile>)>, ResMut<crate::affixes::AffixTelemetry>),
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
     let mut rng = rand::thread_rng();
+    let magnetars: Vec<Vec3> = q_magnetars
+        .iter()
+        .filter(|(_, a)| a.0.has(crate::content::enemies::Affix::Magnetar))
+        .map(|(t, _)| t.translation)
+        .collect();
 
     for (pe, mut p, mut tf) in &mut q {
         let Ok((player, run, ptf)) = q_player.get(p.owner) else {
@@ -1169,6 +1177,14 @@ pub fn projectile_move(
                 }
             }
             ProjKind::Straight => {}
+        }
+        // Magnetar: shots passing near one curve into it (seekers home through)
+        if !magnetars.is_empty() {
+            let seeker = matches!(p.kind, ProjKind::Seek | ProjKind::Rocket { .. });
+            let up = p.dir;
+            if crate::affixes::magnetar_bend(&mut p.heading, tf.translation, up, &magnetars, seeker, dt) {
+                affix_tm.bends += 1;
+            }
         }
 
         if p.life <= 0.0 && p.bounces > 0 {
@@ -1495,6 +1511,8 @@ pub fn apply_hits(
             Option<&mut crate::bestiary::AegisShield>,
             Option<&crate::bestiary::Mimic>,
             Has<arsenal::BellMark>,
+            // §9 Glitched affixes (P10): Nightborne, the Warden's shield, Contagious buds
+            (Option<&crate::affixes::Affixes>, Option<&mut crate::affixes::AffixCore>, Option<&mut crate::affixes::WardenShield>),
         ),
         Without<Pot>,
     >,
@@ -1510,9 +1528,15 @@ pub fn apply_hits(
         ResMut<crate::bestiary::BestiaryTelemetry>,
         ResMut<arsenal::ArsenalTelemetry>,
     ),
+    (mut splits, mut affix_fx, mut affix_tm): (
+        MessageWriter<crate::affixes::AffixSplitMsg>,
+        MessageWriter<crate::affixes::AffixFxMsg>,
+        ResMut<crate::affixes::AffixTelemetry>,
+    ),
 ) {
     let mut rng = rand::thread_rng();
     let now = time.elapsed_secs();
+    let sun = crate::daynight::Sun::of(&run);
     // the §11 duo combos need a teammate: solo keeps no marks
     let squad = q_ps.iter().count() > 1;
     ledger.prune(now);
@@ -1534,15 +1558,18 @@ pub fn apply_hits(
                 is_boss: false,
                 is_miniboss: false,
                 is_pot: true,
+                affixes: Default::default(),
+                by: msg.source,
             });
             sfx.write(SfxMsg(Sfx::Pot));
             commands.entity(msg.target).despawn();
             continue;
         }
-        if let Ok((mut e, tf, boss, slot, shield, mimic, marked)) = enemies.get_mut(msg.target) {
+        if let Ok((mut e, tf, boss, slot, shield, mimic, marked, (affixes, mut core, mut warden))) = enemies.get_mut(msg.target) {
             if e.hp <= 0.0 {
                 continue;
             }
+            let set = affixes.map(|a| a.0).unwrap_or_default();
             // Cosmonaut's Bell: a tolled foe takes crits more easily — from anyone's hit
             let (mut amount, mut crit) = (msg.amount, msg.crit);
             if marked && !crit && rng.gen_bool(BELL_MARK_CRIT as f64) {
@@ -1575,14 +1602,53 @@ pub fn apply_hits(
                     telemetry.aegis_open_hits += 1;
                 }
             }
+            // §9 Glitched affixes (P10): a Nightborne elite in the day takes nothing at all
+            // (no stagger, no stun, no lifesteal off it); a Warden's shield soaks what comes
+            // at its face until it breaks — flank the curve.
+            if !set.is_empty() {
+                let shooter_dir = msg.source.and_then(|s| shooters.get(s).ok()).map(|p| p.dir);
+                match crate::affixes::guard_hit(set, e.dir, sun.is_night(e.dir), warden.as_deref_mut(), msg.knock, shooter_dir, &mut amount) {
+                    crate::affixes::Guard::Immune => {
+                        affix_tm.immune += 1;
+                        if core.as_deref_mut().is_some_and(|c| c.readout_ready()) {
+                            numbers.write(NumberMsg { pos: tf.translation, amount: 0.0, kind: NumKind::Immune });
+                        }
+                        continue;
+                    }
+                    crate::affixes::Guard::Shield { broke, .. } => {
+                        affix_tm.warden_blocks += 1;
+                        if broke {
+                            affix_tm.warden_breaks += 1;
+                            affix_fx.write(crate::affixes::AffixFxMsg { fx: crate::affixes::AffixFx::ShieldBreak { dir: e.dir }, from_wire: false });
+                        }
+                        if amount <= 0.0 {
+                            blocked = true;
+                            if core.as_deref_mut().is_some_and(|c| c.readout_ready()) {
+                                numbers.write(NumberMsg { pos: tf.translation, amount: 0.0, kind: NumKind::Block });
+                            }
+                        }
+                    }
+                    crate::affixes::Guard::Open => {}
+                }
+            }
             e.hp -= amount;
             if !blocked {
                 e.flash = 1.0;
+            }
+            // Contagious buds at each HP threshold a hit it survives crosses (burst, don't chip)
+            if set.has(crate::content::enemies::Affix::Contagious) && e.hp > 0.0 {
+                if let Some(c) = core.as_deref_mut() {
+                    for _ in 0..c.splits(e.hp / e.max_hp.max(1e-3)) {
+                        splits.write(crate::affixes::AffixSplitMsg { kind: e.kind, dir: e.dir });
+                    }
+                }
             }
             let knock_scale = if boss.is_some() {
                 0.05
             } else if blocked {
                 0.2
+            } else if set.has(crate::content::enemies::Affix::Leaden) {
+                LEADEN_KNOCK
             } else {
                 1.0
             };
@@ -1637,6 +1703,8 @@ pub fn apply_hits(
                     is_boss,
                     is_miniboss: is_mini,
                     is_pot: false,
+                    affixes: set,
+                    by: msg.source,
                 });
                 // §3: the 7:00 spike pays out a guaranteed chest where the miniboss fell.
                 if slot.map(|s| s.0) == Some(0) {

@@ -146,6 +146,8 @@ pub fn world_probe_stage(
                 is_boss: false,
                 is_miniboss: false,
                 is_pot: false,
+                affixes: Default::default(),
+                by: None,
             });
             // a staged drop, not a kill: `kill_drops` (ordered after this) counts it back in
             run.kills = run.kills.saturating_sub(1);

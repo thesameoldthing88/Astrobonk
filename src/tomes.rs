@@ -318,6 +318,8 @@ pub fn self_check() -> Result<(), String> {
                     is_boss,
                     is_miniboss,
                     is_pot: false,
+                    affixes: Default::default(),
+                    by: None,
                 };
                 close(st.elite_loot, 2.5)
                     && close(crate::pickups::elite_loot_mult(&kill(false, false), &run), 2.5)

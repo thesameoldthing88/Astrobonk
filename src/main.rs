@@ -1,3 +1,4 @@
+mod affixes;
 mod arsenal;
 mod audio;
 mod bestiary;
@@ -168,6 +169,9 @@ fn main() {
         .init_resource::<bestiary::BestiaryTelemetry>()
         .add_message::<bestiary::BestiaryFxMsg>()
         .add_message::<bestiary::RefundMsg>()
+        .init_resource::<affixes::AffixTelemetry>()
+        .add_message::<affixes::AffixFxMsg>()
+        .add_message::<affixes::AffixSplitMsg>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<techs::TechFxMsg>()
         .add_message::<messages::HitMsg>()
@@ -189,6 +193,7 @@ fn main() {
                 coop::setup_coop_assets,
                 gimmicks::setup_gimmick_assets,
                 bestiary::setup_bestiary_assets,
+                affixes::setup_affix_assets,
                 audio::build_sfx_bank,
                 music::build_music_bank,
                 ui::numbers::spawn_number_pool,
@@ -378,6 +383,45 @@ fn main() {
         )
         // one-shots are presented behind a card panel too (a joiner's launch must land)
         .add_systems(Update, bestiary::bestiary_fx_presentation.run_if(in_state(AppState::InRun)))
+        // ------------- §9 Glitched elite affixes (P10, affixes.rs): the host runs what the
+        // affixes DO for every astronaut (their hit hooks live in combat::apply_hits and
+        // projectile_move); every machine dresses the elites in their auras from `Affixes`
+        // (a client's off the spawn descriptor) and `AffixVis` (the enemy-state lane),
+        // drags its own astronaut through a Leaden well and draws the one-shots
+        .add_systems(
+            Update,
+            (
+                affixes::affix_upkeep.after(bestiary::rollo_roll).after(bestiary::trencher_update),
+                affixes::meteor_leaps,
+            )
+                .after(enemies::enemy_move)
+                .before(combat::apply_hits)
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(
+            Update,
+            (affixes::affix_deaths, affixes::contagious_splits)
+                .after(combat::apply_hits)
+                .run_if(net::is_simulating)
+                .run_if(in_state(AppState::InRun)),
+        )
+        .add_systems(
+            Update,
+            (
+                affixes::gravity_wells.before(player::player_physics).after(affixes::affix_fx_presentation),
+                affixes::affix_lift.after(netenemy::drive_proxies).run_if(net::is_client),
+                affixes::affix_dress
+                    .after(affixes::affix_lift)
+                    .after(affixes::meteor_leaps)
+                    .after(enemies::enemy_move)
+                    .after(bestiary::bestiary_pose),
+                affixes::affix_callouts,
+                affixes::affix_census,
+            )
+                .run_if(in_state(AppState::InRun).and(playing)),
+        )
+        .add_systems(Update, affixes::affix_fx_presentation.run_if(in_state(AppState::InRun)))
         .add_systems(
             Update,
             bestiary::dev_spawn_enemies

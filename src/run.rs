@@ -1133,6 +1133,25 @@ pub fn roll_item(ps: &PlayerState, luck: f32, rng: &mut impl Rng) -> (ItemKind, 
     }
 }
 
+/// The Legendary a Cursed-Touched elite pays its killing blow (§9, §11): an item `ps` can
+/// still take, dealt at Legendary grade — a native Legendary `GRADE_NATIVE_SHARE` of the
+/// time (while one is left), else a lower item rolled up to it. Never a cursed item: the
+/// curse was the elite's. `None` when nothing can drop.
+pub fn roll_legendary(ps: &PlayerState, rng: &mut impl Rng) -> Option<ItemKind> {
+    let pick: f32 = rng.gen_range(0.0..1.0);
+    let (native, lower): (Vec<ItemKind>, Vec<ItemKind>) = ItemKind::pool()
+        .filter(|i| !i.is_cursed() && item_available(ps, *i))
+        .partition(|i| i.def().rarity == Rarity::Legendary);
+    let share = config::GRADE_NATIVE_SHARE;
+    let (bucket, x) = if lower.is_empty() || (!native.is_empty() && pick < share) {
+        let x = if lower.is_empty() { pick } else { pick / share };
+        (native, x)
+    } else {
+        (lower, if native.is_empty() { pick } else { (pick - share) / (1.0 - share) })
+    };
+    bucket.get(((x * bucket.len() as f32) as usize).min(bucket.len().saturating_sub(1))).copied()
+}
+
 /// Roll the level-up options (`config::LEVELUP_CARDS` of them).
 pub fn roll_upgrades(run: &PlayerState, save: &MetaSave, rng: &mut impl Rng) -> Vec<UpgradeOption> {
     let mut opts: Vec<UpgradeOption> = Vec::new();

@@ -2569,9 +2569,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::gimmicks::self_check())
         .and_then(|_| crate::bestiary::self_check())
         .and_then(|_| crate::netenemy::state_lane_self_check())
+        .and_then(|_| crate::affixes::self_check())
         .and_then(|_| crate::coop::self_check(&MetaSave::default()));
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks, spawn tables, new enemies, enemy-state lane, co-op rules)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, save format, mesh winding, spatial hash, flash gate, ui fit, tomes, movement techs, input edges, day/night, world gimmicks, spawn tables, new enemies, enemy-state lane, elite affixes, co-op rules)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -2723,13 +2724,16 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_message::<crate::arsenal::WeaponFxMsg>()
         .add_message::<crate::bestiary::BestiaryFxMsg>()
         .add_message::<crate::bestiary::RefundMsg>()
+        .init_resource::<crate::affixes::AffixTelemetry>()
+        .add_message::<crate::affixes::AffixFxMsg>()
+        .add_message::<crate::affixes::AffixSplitMsg>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
         .add_message::<crate::messages::NumberMsg>()
         .add_message::<crate::messages::BannerMsg>()
         .add_message::<crate::messages::SfxMsg>()
-        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, crate::bestiary::setup_bestiary_assets, crate::coop::setup_coop_assets, headless_enter))
+        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, crate::bestiary::setup_bestiary_assets, crate::affixes::setup_affix_assets, crate::coop::setup_coop_assets, headless_enter))
         .add_systems(
             Update,
             (
@@ -2852,6 +2856,41 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_systems(
             Update,
             crate::bestiary::bestiary_fx_presentation.run_if(resource_exists::<crate::planet::CurrentPlanet>),
+        )
+        // §9 Glitched elite affixes (P10) — the host's half and the presentation, as main.rs
+        // runs them (headless IS the host, so the client-only lift never runs)
+        .add_systems(
+            Update,
+            (
+                crate::affixes::affix_upkeep.after(crate::bestiary::rollo_roll).after(crate::bestiary::trencher_update),
+                crate::affixes::meteor_leaps,
+            )
+                .after(crate::enemies::enemy_move)
+                .before(crate::combat::apply_hits)
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            (crate::affixes::affix_deaths, crate::affixes::contagious_splits)
+                .after(crate::combat::apply_hits)
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
+        )
+        .add_systems(
+            Update,
+            (
+                crate::affixes::gravity_wells.before(crate::player::player_physics).after(crate::affixes::affix_fx_presentation),
+                crate::affixes::affix_dress
+                    .after(crate::affixes::meteor_leaps)
+                    .after(crate::enemies::enemy_move)
+                    .after(crate::bestiary::bestiary_pose),
+                crate::affixes::affix_callouts,
+                crate::affixes::affix_census,
+            )
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            crate::affixes::affix_fx_presentation.run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         // §7 items — the same set main.rs runs (headless IS the host, so the client-only
         // trail drops simply never run)

@@ -460,8 +460,9 @@ pub fn kill_drops(
 
         run.kills += 1;
 
-        if run.static_active {
-            // ghosts pay silver (tagged: Tome of Static pays on exactly these)
+        if run.static_active || msg.kind == Some(crate::content::enemies::EnemyKind::Ghost) {
+            // ghosts pay silver (tagged: Tome of Static pays on exactly these) — a Cursed-
+            // Touched elite's mini-Static before the clock runs out too (§9)
             if rng.gen_bool(0.5) {
                 let coin = spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Silver(1));
                 commands.entity(coin).insert(StaticSilver);
@@ -472,12 +473,15 @@ pub fn kill_drops(
 
         if msg.elite {
             let more = elite_loot_mult(msg, &run);
-            let coins = (rng.gen_range(4..8) as f32 * more).round() as u32;
+            // §9: the loot grows with a Glitched elite's stack (two affixes and up: a
+            // powerup for certain)
+            let extra = msg.affixes.len().saturating_sub(1) as f32;
+            let coins = (rng.gen_range(4..8) as f32 * more * (1.0 + AFFIX_LOOT_PER_EXTRA * extra)).round() as u32;
             for _ in 0..coins {
                 let n = rng.gen_range(4..10);
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, gold(n, &mut rng));
             }
-            if rng.gen_bool((0.35 * more).min(0.95) as f64) {
+            if rng.gen_bool(((0.35 + AFFIX_POWERUP_PER_EXTRA * extra) * more).min(if extra > 0.0 { 1.0 } else { 0.95 }) as f64) {
                 let kinds = [PowerupKind::Damage2x, PowerupKind::Magnet, PowerupKind::Speed];
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Powerup(kinds[rng.gen_range(0..3)]));
             }

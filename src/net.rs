@@ -58,7 +58,10 @@ use std::time::{Duration, SystemTime};
 // P18 (merged after P08): the down/revive/drop-in fields in PlayerVitals, the squad tally
 // and STATIC CASCADE's charge in RunSnapMsg, and the co-op one-shots appended to the hazard
 // lane (Revived, Shove, Cascade, Duo, DropIn) -> _C.
-pub const PROTOCOL_ID: u64 = 0xA570B0_C;
+// P10: an elite's affix byte on its crowd spawn descriptor, affix-state records on the
+// EnemyStateMsg lane (`n_affix`) and five appended hazard events (AffixWell, AffixSplit,
+// AffixShieldBreak, AffixSlam, AffixCursed) -> _D.
+pub const PROTOCOL_ID: u64 = 0xA570B0_D;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -574,6 +577,19 @@ pub enum HazardEvent {
     Duo { feat: u8, a: u8, b: u8, dir: [f32; 3], first: bool },
     /// Drop-in `owner` landed from orbit at `dir`, at `level`.
     DropIn { owner: u8, level: u8, dir: [f32; 3] },
+    // ---- appended (P10): Glitched elite one-shots, see `affixes::AffixFx` ----
+    /// A Leaden elite fell at `dir`: the client opens its copy of the gravity well (it drags
+    /// the joiner's own predicted body; the host's copy crushes).
+    AffixWell { dir: [f32; 3], secs: f32 },
+    /// A Contagious elite budded at `dir` (the bud itself streams as a crowd enemy).
+    AffixSplit { dir: [f32; 3] },
+    /// A Warden's shield broke at `dir`.
+    AffixShieldBreak { dir: [f32; 3] },
+    /// A Meteoric elite landed at `dir` (its ring streamed as an OwnedTelegraph).
+    AffixSlam { dir: [f32; 3] },
+    /// A Cursed-Touched elite died at `dir`; astronaut `owner` rolls its Legendary on its
+    /// own machine (the mini-Static streams as crowd enemies).
+    AffixCursed { dir: [f32; 3], owner: u8 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -586,8 +602,9 @@ pub struct HazardEventMsg {
 /// size data-dependent, and we need it exact to keep each chunk under renet's 1200-byte
 /// slice limit (a fragmented chunk becomes all-or-nothing on an unreliable channel).
 ///
-/// Layout of `data`: n_spawn × 8-byte descriptors, then n_update × 6-byte updates, then
-/// n_despawn × 2-byte despawns.
+/// Layout of `data`: n_spawn descriptors (8 bytes; 9 for an elite, whose last byte is its
+/// Glitched affix bits — P10), then n_update × 6-byte updates, then n_despawn × 2-byte
+/// despawns.
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
 pub struct EnemySnapMsg {
     pub seq: u16,
@@ -609,11 +626,13 @@ pub struct EnemySnapMsg {
 /// new-kind enemies each client has resident (their proxies exist), unreliable: every
 /// record is the whole state, so a lost one is simply superseded.
 ///
-/// Layout of `data`: `n` records of STATE_RECORD_BYTES, hand-packed like `EnemySnapMsg`
-/// (see `netenemy::encode_state`).
+/// Layout of `data`: `n` records of STATE_RECORD_BYTES, then `n_affix` records of
+/// AFFIX_RECORD_BYTES (P10: a Glitched elite's Warden shield and Meteoric altitude), both
+/// hand-packed like `EnemySnapMsg` (see `netenemy::encode_state` / `encode_affix_state`).
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
 pub struct EnemyStateMsg {
     pub n: u16,
+    pub n_affix: u16,
     pub data: Vec<u8>,
 }
 
@@ -946,7 +965,7 @@ impl Plugin for NetPlugin {
             )
             .add_systems(
                 Update,
-                crate::coop::log_coop
+                (crate::coop::log_coop, crate::affixes::log_affixes)
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )

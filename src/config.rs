@@ -260,6 +260,98 @@ pub const NET_ENEMY_STATE_HZ: f32 = 10.0;
 /// Emissive strength of a new kind's accent (lens, core, rim) over its accent colour.
 pub const ENEMY_ACCENT_GLOW: f32 = 4.0;
 
+// ── Glitched elite affixes (GDD §9, P10; `affixes.rs`, `content::enemies::Affix`) ────────
+/// How many an elite stacks: always one; a second at `Scaling::affix_extra` — §3's shape
+/// again, rising with run minutes, chain depth and Δ, capped — and a third at that times
+/// THIRD_SHARE. Around 20% two-affix elites at 10:00 of a first world, ~60% on a T3 finale.
+pub const AFFIX_EXTRA_BASE: f32 = 0.08;
+pub const AFFIX_EXTRA_T: f32 = 0.012;
+pub const AFFIX_EXTRA_D: f32 = 0.10;
+pub const AFFIX_EXTRA_DELTA: f32 = 0.05;
+pub const AFFIX_EXTRA_CAP: f32 = 0.8;
+pub const AFFIX_THIRD_SHARE: f32 = 0.4;
+/// Cursed-Touched's roll weight (the others weigh 1), plus this per Δ point: the Cursed
+/// items call the black-gold elites.
+pub const AFFIX_CURSED_WEIGHT: f32 = 0.45;
+pub const AFFIX_CURSED_WEIGHT_DELTA: f32 = 0.15;
+/// Overclocked: +60% move speed, and its attack cooldowns (spit, railbolt, mortar, bite,
+/// the Trencher's dive) run 60% faster.
+pub const OVERCLOCK_SPEED: f32 = 1.6;
+pub const OVERCLOCK_ATTACK: f32 = 1.6;
+/// Leaden: HP ×HP on top of the elite's, a slower heavier walk that shrugs off knockback,
+/// and on death a gravity well of RADIUS for SECS: astronauts are dragged toward its core at
+/// up to PULL m/s (a run is 8.5 — you can walk out, slowly), the horde at ENEMY_PULL, and
+/// anyone inside CORE is crushed for CRUSH × the elite's bite every contact tick.
+pub const LEADEN_HP: f32 = 2.5;
+pub const LEADEN_SPEED: f32 = 0.8;
+pub const LEADEN_KNOCK: f32 = 0.25;
+pub const LEADEN_WELL_SECS: f32 = 5.0;
+pub const LEADEN_WELL_RADIUS: f32 = 11.0;
+pub const LEADEN_WELL_PULL: f32 = 4.5;
+pub const LEADEN_WELL_ENEMY_PULL: f32 = 3.0;
+pub const LEADEN_WELL_CORE: f32 = 2.4;
+pub const LEADEN_WELL_CRUSH: f32 = 0.6;
+/// Warden: a front shield (a cone of HALF radians either side of where it faces, turned
+/// toward its mark at TURN_RATE rad/s — circle it faster and you are behind it) holding
+/// FRAC × the elite's max HP. Hits into it drain the shield instead; broken, it is down for
+/// DOWN_SECS and comes back whole; untouched for REGEN_DELAY it refills at REGEN_RATE of the
+/// shield per second.
+pub const WARDEN_SHIELD_FRAC: f32 = 0.35;
+pub const WARDEN_SHIELD_HALF: f32 = 1.05;
+pub const WARDEN_TURN_RATE: f32 = 1.2;
+pub const WARDEN_DOWN_SECS: f32 = 5.0;
+pub const WARDEN_REGEN_DELAY: f32 = 2.5;
+pub const WARDEN_REGEN_RATE: f32 = 0.2;
+/// Contagious: each of these HP fractions crossed by a hit it survives buds one copy of it
+/// (a plain foe of its kind with SPLIT_HP × that kind's scaled HP). A burst that kills it
+/// through them buds nothing.
+pub const CONTAGIOUS_THRESHOLDS: [f32; 3] = [0.75, 0.5, 0.25];
+pub const CONTAGIOUS_SPLIT_HP: f32 = 2.0;
+/// Magnetar: your projectiles within RADIUS metres of it are bent toward it at up to PULL
+/// rad/s (full at its body, none at the edge) — shots meant for the horde around it curve
+/// into it. Seekers home through it (their pull × SEEKER_RESIST); piercers go through it.
+pub const MAGNETAR_RADIUS: f32 = 9.0;
+pub const MAGNETAR_PULL: f32 = 7.0;
+pub const MAGNETAR_SEEKER_RESIST: f32 = 0.3;
+/// Nightborne: nothing hurts it while it stands in the day; on the night side its bite is
+/// ×NIGHT_DMG and it moves ×NIGHT_SPEED (not the full double — a doubled elite Sprinter
+/// would outrun every astronaut, and the answer is meant to be "fight it at dawn", not
+/// "you cannot leave").
+pub const NIGHTBORNE_NIGHT_DMG: f32 = 2.0;
+pub const NIGHTBORNE_NIGHT_SPEED: f32 = 1.35;
+/// Least seconds between two IMMUNE / BLOCK read-outs from one elite.
+pub const AFFIX_READOUT_SECS: f32 = 0.4;
+/// Meteoric: every CD seconds (rolled in the range), with a standing astronaut between
+/// MIN_ARC and MAX_ARC, it hurls itself skyward (APEX metres) and comes down AIR_SECS later
+/// where that astronaut stood, slamming a ring of RING_RADIUS for SLAM_MULT × its bite (the
+/// ring's edge band hurts — step inside or out). Its shadow crosses the ground under it.
+pub const METEOR_CD: (f32, f32) = (5.0, 8.0);
+pub const METEOR_MIN_ARC: f32 = 5.0;
+pub const METEOR_MAX_ARC: f32 = 24.0;
+pub const METEOR_AIR_SECS: f32 = 1.5;
+pub const METEOR_APEX: f32 = 11.0;
+pub const METEOR_RING_RADIUS: f32 = 5.5;
+pub const METEOR_SLAM_MULT: f32 = 1.6;
+/// Cursed-Touched: HP and bite ×; on death its killer takes a Legendary item (§11 "Legendary
+/// elite drops go to the killing blow"; GOLD instead when nothing can drop) and a mini-Static
+/// of MINI_STATIC ghosts rises around the corpse, ARC metres out.
+pub const CURSED_TOUCHED_HP: f32 = 1.5;
+pub const CURSED_TOUCHED_DMG: f32 = 1.25;
+pub const CURSED_MINI_STATIC: u32 = 5;
+pub const CURSED_MINI_STATIC_ARC: (f32, f32) = (3.0, 6.0);
+pub const CURSED_LEGENDARY_GOLD: u64 = 150;
+/// Loot grows with the stack: each affix past the first adds LOOT_PER_EXTRA to the coin
+/// count and POWERUP_PER_EXTRA to the powerup odds (two or more make the powerup certain).
+pub const AFFIX_LOOT_PER_EXTRA: f32 = 0.5;
+pub const AFFIX_POWERUP_PER_EXTRA: f32 = 0.65;
+/// The callout: an elite coming within ARC of this machine's astronaut is named on a
+/// banner (its affixes and the counterplay), at most once per GAP seconds.
+pub const AFFIX_CALLOUT_ARC: f32 = 45.0;
+pub const AFFIX_CALLOUT_GAP: f32 = 12.0;
+/// Emissive strength of an affix's aura ring and body glow over its aura colour.
+pub const AFFIX_RING_GLOW: f32 = 3.2;
+pub const AFFIX_BODY_GLOW: f32 = 1.1;
+
 pub const GEM_CAP: usize = 550;
 pub const PICKUP_BASE_RANGE: f32 = 3.2;
 pub const PICKUP_FLY_SPEED: f32 = 26.0;

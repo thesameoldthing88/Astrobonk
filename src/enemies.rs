@@ -3,7 +3,7 @@
 //! minibosses, stage bosses, and THE STATIC.
 
 use crate::config::*;
-use crate::content::enemies::{BossKind, EliteMods, EnemyKind};
+use crate::content::enemies::{AffixSet, BossKind, EliteMods, EnemyKind};
 use crate::content::palettes::Palette;
 use crate::events_world::InStorm;
 use crate::fx::{self, Pcolor, ParticleAssets, Shake};
@@ -241,6 +241,9 @@ pub struct EnemyAssets {
     pub meshes: HashMap<EnemyKind, Handle<Mesh>>,
     pub mats: HashMap<EnemyKind, Handle<StandardMaterial>>,
     pub elite_mat: Handle<StandardMaterial>,
+    /// §9 Glitched elites (P10): the body of an elite whose primary affix is
+    /// `Affix::ALL[i]` — one material per affix, shared by every kind.
+    pub affix_mats: Vec<Handle<StandardMaterial>>,
     pub flash_mat: Handle<StandardMaterial>,
     pub boss_mat: Handle<StandardMaterial>,
     pub worm_head_mesh: Handle<Mesh>,
@@ -821,8 +824,10 @@ pub fn setup_enemy_assets(
         perceptual_roughness: 0.8,
         ..default()
     });
+    let affix_mats = crate::content::enemies::Affix::ALL.iter().map(|a| materials.add(crate::affixes::body_material(*a))).collect();
     commands.insert_resource(EnemyAssets {
         ghost_night_mat,
+        affix_mats,
         meshes: mesh_map,
         mats: mat_map,
         elite_mat: materials.add(StandardMaterial {
@@ -973,11 +978,14 @@ pub fn spawn_enemy_at(
     rng: &mut impl Rng,
 ) -> Entity {
     let (hp, dmg) = if kind == EnemyKind::Ghost { (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg) } else { (sc.hp, sc.dmg) };
-    spawn_enemy(commands, assets, planet, kind, dir, elite, hp, dmg, rng)
+    // §9: every elite of the horde is Glitched — 1-3 stacked affixes, more with t, d and Δ
+    let affixes = if elite { crate::content::enemies::roll_affixes(kind, sc.affix_extra, sc.delta, rng) } else { AffixSet::EMPTY };
+    spawn_enemy_affixed(commands, assets, planet, kind, dir, elite, hp, dmg, affixes, rng)
 }
 
 /// One crowd enemy with explicit HP/damage multipliers (see `spawn_enemy_at`). Public so the
-/// headless probes can stage an exact scene (a comet tail).
+/// headless probes can stage an exact scene (a comet tail). An elite spawned here is a
+/// plain one — no affixes (`spawn_enemy_affixed` gives it some).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_enemy(
     commands: &mut Commands,
@@ -990,36 +998,61 @@ pub fn spawn_enemy(
     dmg_mult: f32,
     rng: &mut impl Rng,
 ) -> Entity {
+    spawn_enemy_affixed(commands, assets, planet, kind, dir, elite, hp_mult, dmg_mult, AffixSet::EMPTY, rng)
+}
+
+/// `spawn_enemy`, wearing `affixes` (§9 Glitched elites): their numbers (`affixes::stat_mods`),
+/// the primary affix's body, and what each needs to act (`affixes::attach`).
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy_affixed(
+    commands: &mut Commands,
+    assets: &EnemyAssets,
+    planet: &CurrentPlanet,
+    kind: EnemyKind,
+    dir: Vec3,
+    elite: bool,
+    hp_mult: f32,
+    dmg_mult: f32,
+    affixes: AffixSet,
+    rng: &mut impl Rng,
+) -> Entity {
     let def = kind.def();
+    let (affix_hp, affix_speed, affix_dmg) = crate::affixes::stat_mods(affixes);
     let scale = def.scale * if elite { EliteMods::SCALE } else { 1.0 } * rng.gen_range(0.92..1.1);
-    let hp = def.hp * hp_mult * if elite { EliteMods::HP } else { 1.0 };
-    let mat = if elite { assets.elite_mat.clone() } else { assets.mats[&kind].clone() };
+    let hp = def.hp * hp_mult * if elite { EliteMods::HP } else { 1.0 } * affix_hp;
+    let mat = match affixes.primary() {
+        Some(a) => assets.affix_mats[a.index()].clone(),
+        None if elite => assets.elite_mat.clone(),
+        None => assets.mats[&kind].clone(),
+    };
     let pos = planet.surface_point(dir) + dir * (def.hover + scale * 0.6);
+    let enemy = Enemy {
+        kind,
+        dir,
+        hover: def.hover,
+        speed: def.speed * rng.gen_range(0.9..1.15) * affix_speed,
+        damage: def.damage * dmg_mult * if elite { EliteMods::DMG } else { 1.0 } * affix_dmg,
+        xp: def.xp * if elite { EliteMods::XP } else { 1.0 },
+        hp,
+        max_hp: hp,
+        elite,
+        contact_cd: 0.0,
+        slow: 0.0,
+        knock: Vec3::ZERO,
+        flash: 0.0,
+        scale,
+        wobble: rng.gen_range(0.0..6.28),
+        stride: rng.gen_range(0.0..6.28),
+    };
     let mut cmd = commands.spawn((
-        Enemy {
-            kind,
-            dir,
-            hover: def.hover,
-            speed: def.speed * rng.gen_range(0.9..1.15),
-            damage: def.damage * dmg_mult * if elite { EliteMods::DMG } else { 1.0 },
-            xp: def.xp * if elite { EliteMods::XP } else { 1.0 },
-            hp,
-            max_hp: hp,
-            elite,
-            contact_cd: 0.0,
-            slow: 0.0,
-            knock: Vec3::ZERO,
-            flash: 0.0,
-            scale,
-            wobble: rng.gen_range(0.0..6.28),
-            stride: rng.gen_range(0.0..6.28),
-        },
         Mesh3d(assets.meshes[&kind].clone()),
         MeshMaterial3d(mat.clone()),
         BaseMat(mat),
         Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
         StageScoped,
     ));
+    crate::affixes::attach(&mut cmd, affixes, dir, &enemy, rng);
+    cmd.insert(enemy);
     if kind == EnemyKind::Spitter || kind == EnemyKind::Ufo {
         cmd.insert(Spitter { cd: rng.gen_range(1.0..3.0) });
     }

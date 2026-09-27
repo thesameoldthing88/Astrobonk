@@ -68,6 +68,12 @@ pub struct KillMsg {
     /// A miniboss (a `Boss` that is not the stage boss) — `elite` is set for it too.
     pub is_miniboss: bool,
     pub is_pot: bool,
+    /// An affixed elite's Glitched affixes (§9, P10; empty for everything else) — they
+    /// shape its loot and what it leaves behind (`affixes::affix_deaths`).
+    pub affixes: crate::content::enemies::AffixSet,
+    /// The astronaut whose hit killed it, if one did (§11: a Legendary elite drop goes to
+    /// the killing blow).
+    pub by: Option<Entity>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -78,6 +84,8 @@ pub enum NumKind {
     Dodge,
     /// An Aegis Drone's shield took the hit (§9).
     Block,
+    /// A Nightborne elite in the day: nothing lands (§9, P10).
+    Immune,
 }
 
 /// Floating combat text request.
