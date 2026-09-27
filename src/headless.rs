@@ -142,7 +142,7 @@ fn bot_drive(
     mut keys: ResMut<ButtonInput<KeyCode>>,
     mut script: Local<ChoiceScript>,
     mut heading_angle: Local<f32>,
-    tech_probe: Res<TechProbe>,
+    (tech_probe, bestiary_probe): (Res<TechProbe>, Res<BestiaryProbe>),
 ) {
     let dt = time.delta_secs();
     // E is "tapped" fresh each frame the bot wants it, so interact_system sees just_pressed.
@@ -184,7 +184,7 @@ fn bot_drive(
         *phase = RunPhase::Playing;
         return;
     }
-    if matches!(*phase, RunPhase::Dead) || tech_probe.holding {
+    if matches!(*phase, RunPhase::Dead) || tech_probe.holding || bestiary_probe.holding {
         return;
     }
 
@@ -1458,6 +1458,523 @@ fn tech_probe_fx(mut probe: ResMut<TechProbe>, mut fx: MessageReader<crate::tech
     }
 }
 
+/// `--bestiary [all|rollo,trencher,…]`: the §9 batch-1 probe. The bot is pinned and
+/// disarmed (its weapons would kill the staged enemies before they could show anything),
+/// then each new kind is staged next to it and made to prove its behaviour through the
+/// real systems: the Aegis shield blocks a hit to its face and takes one from behind; Rollo
+/// bonks into a rock; a Trencher tunnels (out of every weapon's reach, throwing a ridge)
+/// and uppercuts the grounded astronaut into the air, spares an airborne one, and its ring
+/// dies with it; a Sunskimmer is hittable at altitude and blasts its mark; a Beacon Tick
+/// tracks; a Mimic eats the chest price, shockwaves, flees and pays back THE PURSE THAT PAID
+/// (with `--coop2`, a peer's) — or digs out; a Beamer Prime leads a running mark.
+#[derive(Resource, Default)]
+struct BestiaryProbe {
+    on: bool,
+    kinds: Vec<crate::content::enemies::EnemyKind>,
+    ticks: u64,
+    /// the bot's hands are off (`bot_drive`) while the probe pins it
+    holding: bool,
+    pin: Option<Vec3>,
+    /// the pinned astronaut runs sideways (the Prime's lead test) instead of standing
+    run_side: Option<Vec3>,
+    stash: Vec<(Entity, Vec<crate::run::WeaponInstance>)>,
+    staged: Vec<Entity>,
+    /// scene bookkeeping
+    subject: Option<Entity>,
+    hp_mark: f32,
+    base: u32,
+    mark: u64,
+    ring: Option<Entity>,
+    peer_gold: u64,
+    refund_grants: Vec<(u8, u64)>,
+    natural: HashMap<crate::content::enemies::EnemyKind, u32>,
+    ok: Vec<String>,
+    fail: Vec<String>,
+}
+
+impl BestiaryProbe {
+    fn has(&self, k: crate::content::enemies::EnemyKind) -> bool {
+        self.kinds.contains(&k)
+    }
+    fn check(&mut self, cond: bool, ok: String, fail: String) {
+        if cond {
+            self.ok.push(ok);
+        } else {
+            self.fail.push(fail);
+        }
+    }
+}
+
+/// Scene starts, in probe ticks (33 ms). Each scene runs to the next one's start.
+const BP_START: u64 = 30;
+const BP_AEGIS: u64 = 40;
+const BP_ROLLO: u64 = 100;
+const BP_TRENCH: u64 = 200;
+const BP_ORPHAN: u64 = 330;
+const BP_SPARE: u64 = 450;
+const BP_SKIM: u64 = 570;
+const BP_TICK: u64 = 710;
+const BP_MIMIC: u64 = 760;
+const BP_PRIME: u64 = 900;
+const BP_DONE: u64 = 1110;
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn bestiary_probe(
+    mut commands: Commands,
+    mut probe_res: ResMut<BestiaryProbe>,
+    planet: Res<CurrentPlanet>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    run: Res<RunState>,
+    (hash, props, telemetry): (Res<crate::enemies::SpatialHash>, Res<crate::planet::PropColliders>, Res<crate::bestiary::BestiaryTelemetry>),
+    mut q_astro: Query<(Entity, &crate::player::PlayerId, &mut Player, &mut PlayerState, Has<crate::player::LocalPlayer>, Has<crate::bestiary::Tracked>), Without<Enemy>>,
+    mut q_foes: Query<
+        (
+            Entity,
+            &mut Enemy,
+            Option<&mut crate::bestiary::Trencher>,
+            Option<&mut crate::bestiary::Mimic>,
+            Option<&crate::bestiary::EnemyVis>,
+            Option<&mut crate::bestiary::Rollo>,
+        ),
+        Without<Player>,
+    >,
+    (q_chests, q_rings, q_mounds, q_beacons): (
+        Query<(Entity, &crate::interact::Interactable, &Transform, Has<crate::bestiary::MimicDisguise>)>,
+        Query<(Entity, &crate::enemies::Telegraph, Option<&crate::bestiary::TelegraphOwner>)>,
+        Query<(), With<crate::bestiary::RidgeMound>>,
+        Query<(), With<crate::bestiary::TrackerBeacon>>,
+    ),
+    (mut keys, mut hits, mut grants): (
+        ResMut<ButtonInput<KeyCode>>,
+        MessageWriter<crate::messages::HitMsg>,
+        MessageReader<crate::net::GrantOut>,
+    ),
+) {
+    use crate::bestiary::EnemyVis;
+    // a plain &mut, so `probe.check(…, format!(…probe.field…))` two-phase borrows
+    let probe = &mut *probe_res;
+    use crate::content::enemies::EnemyKind as K;
+    probe.ticks += 1;
+    let t = probe.ticks;
+    let r = planet.radius;
+    let mut rng = rand::thread_rng();
+    let sc = crate::run::scaling::Scaling::for_run(&run, q_astro.iter().count());
+    for g in grants.read() {
+        if let crate::net::GrantOut::Loot(pid, crate::pickups::PickupKind::Gold(v)) = *g {
+            probe.refund_grants.push((pid, v));
+        }
+    }
+    let Some((me, _, me_p, _, _, _)) = q_astro.iter().find(|(.., local, _)| *local) else { return };
+    let me_dir = me_p.dir;
+    let peer = q_astro.iter().find(|(_, pid, ..)| pid.0 == 1).map(|(e, ..)| e);
+
+    // ---- setup: pin + disarm (every astronaut), keep them alive ----
+    if t == BP_START {
+        probe.holding = true;
+        probe.pin = Some(me_dir);
+        let stash: Vec<(Entity, Vec<crate::run::WeaponInstance>)> =
+            q_astro.iter_mut().map(|(e, _, _, mut ps, ..)| (e, std::mem::take(&mut ps.weapons))).collect();
+        probe.stash = stash;
+    }
+    if t == BP_DONE {
+        let stash = std::mem::take(&mut probe.stash);
+        for (e, weapons) in stash {
+            if let Ok((.., mut ps, _, _)) = q_astro.get_mut(e) {
+                ps.weapons = weapons;
+            }
+        }
+        for e in std::mem::take(&mut probe.staged) {
+            if let Ok(mut ec) = commands.get_entity(e) {
+                ec.try_despawn();
+            }
+        }
+        probe.holding = false;
+        probe.pin = None;
+        probe.run_side = None;
+    }
+    if probe.holding {
+        for (e, _, mut p, mut ps, _, _) in &mut q_astro {
+            ps.hp = ps.stats.max_hp;
+            ps.dead = false;
+            if e != me {
+                continue;
+            }
+            if let Some(side) = probe.run_side {
+                p.vel_t = (side - p.dir * side.dot(p.dir)).normalize_or_zero() * PLAYER_RUN_SPEED * 0.8;
+            } else if let Some(pin) = probe.pin {
+                p.dir = pin;
+                p.vel_t = Vec3::ZERO;
+            }
+        }
+    }
+    let pin = probe.pin.unwrap_or(me_dir);
+    let fwd = sphere::tangent_frame(pin).0;
+    let mut stage = |commands: &mut Commands, probe: &mut BestiaryProbe, kind: K, dir: Vec3| -> Entity {
+        let e = crate::enemies::spawn_enemy_at(commands, &assets, &planet, kind, dir, false, &sc, &mut rng);
+        probe.staged.push(e);
+        e
+    };
+
+    // ---- AEGIS DRONE: a hit into its face is blocked, one from behind lands ----
+    if probe.has(K::AegisDrone) {
+        if t == BP_AEGIS {
+            let at = sphere::offset_dir(pin, fwd, 5.0, r);
+            probe.subject = Some(stage(&mut commands, probe, K::AegisDrone, at));
+        }
+        if let Some(d) = probe.subject.filter(|_| (BP_AEGIS..BP_ROLLO).contains(&t)) {
+            if let Ok((_, mut en, ..)) = q_foes.get_mut(d) {
+                // tough for the test: only the probe's own two hits may move its HP
+                if t == BP_AEGIS + 2 {
+                    en.max_hp = 1.0e6;
+                    en.hp = 1.0e6;
+                }
+                if t == BP_AEGIS + 60 {
+                    probe.hp_mark = en.hp;
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO });
+                }
+                if t == BP_AEGIS + 61 {
+                    let lost = probe.hp_mark - en.hp;
+                    probe.check(
+                        (lost - 50.0 * AEGIS_BLOCK_FRACTION).abs() < 0.5,
+                        format!("Aegis Drone: a 50 hit into its face took {lost:.1}"),
+                        format!("Aegis Drone: a hit into its face took {lost:.1}, want {:.1}", 50.0 * AEGIS_BLOCK_FRACTION),
+                    );
+                    // run round behind it — far faster than its shield can swing
+                    let back = (pin - en.dir * pin.dot(en.dir)).normalize_or_zero();
+                    probe.pin = Some(sphere::offset_dir(en.dir, -back, 5.0, r));
+                    probe.hp_mark = en.hp;
+                }
+                if t == BP_AEGIS + 62 {
+                    probe.hp_mark = en.hp;
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: d, amount: 50.0, crit: false, knock: Vec3::ZERO });
+                }
+                if t == BP_AEGIS + 63 {
+                    let lost = probe.hp_mark - en.hp;
+                    probe.check(
+                        (lost - 50.0).abs() < 0.5,
+                        format!("Aegis Drone: flanked from behind, the same hit took {lost:.1}"),
+                        format!("Aegis Drone: a hit from behind took {lost:.1}, want 50"),
+                    );
+                }
+            }
+        }
+    }
+
+    // ---- ROLLO: rolled into a rock at speed, it bonks ----
+    if probe.has(K::Rollo) {
+        if t == BP_ROLLO {
+            probe.base = telemetry.rollo_bonks;
+            match props.0.iter().filter(|c| c.radius > 0.6 && c.height > 0.5).min_by(|a, b| a.dir.angle_between(pin).total_cmp(&b.dir.angle_between(pin))) {
+                Some(rock) => {
+                    let h = sphere::tangent_frame(rock.dir).0;
+                    probe.pin = Some(sphere::offset_dir(rock.dir, h, rock.radius + 3.0, r));
+                    let at = sphere::offset_dir(rock.dir, -h, rock.radius + 9.0, r);
+                    probe.subject = Some(stage(&mut commands, probe, K::Rollo, at));
+                    probe.mark = t;
+                }
+                None => probe.fail.push("Rollo: no rock on this planet to bait it into".into()),
+            }
+        }
+        if t == BP_ROLLO + 1 {
+            if let Some((_, en, _, _, _, Some(mut ro))) = probe.subject.and_then(|s| q_foes.get_mut(s).ok()) {
+                // already rolling hard at the rock
+                let toward = (pin - en.dir * pin.dot(en.dir)).normalize_or_zero();
+                ro.heading = toward;
+                ro.speed = ROLLO_MAX_SPEED;
+            }
+        }
+        if t == BP_TRENCH - 1 {
+            let bonks = telemetry.rollo_bonks - probe.base;
+            probe.check(bonks > 0, format!("Rollo: baited into a rock, bonked {bonks}x"), "Rollo: rolled at a rock and never bonked".into());
+            probe.check(
+                telemetry.rollo_max_turn <= ROLLO_TURN_RATE * 1.05,
+                format!("Rollo: turned at most {:.2} rad/s (cap {ROLLO_TURN_RATE})", telemetry.rollo_max_turn),
+                format!("Rollo: turned {:.2} rad/s, over its {ROLLO_TURN_RATE} cap", telemetry.rollo_max_turn),
+            );
+        }
+    }
+
+    // ---- TRENCHER: dives, tunnels unseen under a ridge, uppercuts a grounded mark ----
+    if probe.has(K::Trencher) {
+        for (scene, next) in [(BP_TRENCH, BP_ORPHAN), (BP_ORPHAN, BP_SPARE), (BP_SPARE, BP_SKIM)] {
+            if t == scene {
+                probe.pin = Some(me_dir);
+                let at = sphere::offset_dir(me_dir, fwd, 9.0, r);
+                probe.subject = Some(stage(&mut commands, probe, K::Trencher, at));
+                probe.base = if scene == BP_SPARE { telemetry.trench_airborne_spared } else { telemetry.trench_uppercuts };
+                probe.mark = 0;
+                probe.ring = None;
+            }
+            if !(scene + 1..next).contains(&t) {
+                continue;
+            }
+            let Some(s) = probe.subject else { continue };
+            let state = q_foes.get(s).ok().and_then(|(.., vis, _)| vis.map(|v| v.state));
+            if let Ok((_, _, Some(mut tr), ..)) = q_foes.get_mut(s) {
+                if t == scene + 1 {
+                    tr.cd = 0.0; // dive now
+                }
+                if scene == BP_SPARE && tr.phase == EnemyVis::WINDUP && tr.timer < 0.12 && probe.mark == 0 {
+                    // jump just before it breaks the crust
+                    probe.mark = t;
+                    if let Ok((.., mut p, _, _, _)) = q_astro.get_mut(me) {
+                        p.height = 1.2;
+                        p.vel_r = 3.0;
+                        p.grounded = false;
+                    }
+                }
+            }
+            if scene == BP_TRENCH {
+                if state == Some(EnemyVis::TUNNEL) {
+                    let hidden = !hash.map.values().flatten().any(|(e, _)| *e == s);
+                    if !hidden {
+                        probe.fail.push("Trencher: tunnelling but still in the spatial hash (hittable)".into());
+                    }
+                    probe.hp_mark = probe.hp_mark.max(q_mounds.iter().count() as f32);
+                }
+                if let Ok((.., p, _, _, _)) = q_astro.get(me) {
+                    if p.vel_r > 5.0 && telemetry.trench_uppercuts > probe.base {
+                        probe.mark = probe.mark.max(1);
+                    }
+                }
+                if t == next - 1 {
+                    probe.check(
+                        telemetry.trench_uppercuts > probe.base && probe.mark > 0,
+                        format!("Trencher: dove, tunnelled under {:.0} ridge mounds, uppercut the grounded astronaut into the air", probe.hp_mark),
+                        format!("Trencher: no uppercut launch (uppercuts {} launched {})", telemetry.trench_uppercuts - probe.base, telemetry.trench_launched),
+                    );
+                    probe.check(probe.hp_mark >= 2.0, "Trencher: the ridge showed".into(), "Trencher: tunnelled without a ridge".into());
+                    probe.hp_mark = 0.0;
+                }
+            }
+            if scene == BP_ORPHAN {
+                // kill it mid-windup: its ring must go with it
+                if state == Some(EnemyVis::WINDUP) && probe.ring.is_none() {
+                    let ring = q_rings.iter().find(|(_, _, o)| o.is_some_and(|o| o.0 == s)).map(|(e, ..)| e);
+                    if let Some(ring) = ring {
+                        probe.ring = Some(ring);
+                        probe.mark = t;
+                        hits.write(crate::messages::HitMsg { source: Some(me), target: s, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+                    }
+                }
+                if probe.mark > 0 && t == probe.mark + 4 {
+                    let left = probe.ring.is_some_and(|ring| q_rings.get(ring).is_ok());
+                    probe.check(
+                        !left,
+                        "Trencher: killed mid-windup, its uppercut ring went with it".into(),
+                        "Trencher: killed mid-windup, its ring was left standing".into(),
+                    );
+                }
+                if t == next - 1 && probe.mark == 0 {
+                    probe.fail.push("Trencher: never wound up for the orphan-ring check".into());
+                }
+            }
+            if scene == BP_SPARE && t == next - 1 {
+                let spared = telemetry.trench_airborne_spared - probe.base;
+                probe.check(
+                    spared > 0,
+                    "Trencher: an astronaut in the air at the eruption was spared".into(),
+                    format!("Trencher: the airborne dodge failed (jumped at tick {})", probe.mark),
+                );
+            }
+        }
+    }
+
+    // ---- SUNSKIMMER: hittable at altitude (its column), blasts its mark ----
+    if probe.has(K::Sunskimmer) {
+        if t == BP_SKIM {
+            probe.pin = Some(me_dir);
+            let at = sphere::offset_dir(me_dir, fwd, 30.0, r);
+            probe.subject = Some(stage(&mut commands, probe, K::Sunskimmer, at));
+            probe.base = telemetry.skim_blast_hits;
+            probe.mark = 0;
+        }
+        if (BP_SKIM + 2..BP_TICK).contains(&t) {
+            if let Some((_, en, _, _, Some(vis), _)) = probe.subject.and_then(|s| q_foes.get(s).ok()) {
+                if vis.alt > 8.0 && probe.mark == 0 {
+                    let column = planet.surface_point(en.dir) + en.dir * COLUMN_HIT_HEIGHT;
+                    let s = probe.subject.unwrap_or(Entity::PLACEHOLDER);
+                    let found = hash.near(column, 1.0).any(|(e, _)| e == s);
+                    probe.mark = t;
+                    probe.check(
+                        found,
+                        format!("Sunskimmer: at {:.1} m up, filed in the hash at weapon height (hittable)", vis.alt),
+                        format!("Sunskimmer: at {:.1} m up it is out of every weapon's reach", vis.alt),
+                    );
+                }
+            }
+            if t == BP_TICK - 1 {
+                probe.check(
+                    telemetry.skim_blast_hits > probe.base,
+                    format!("Sunskimmer: dove and blasted its mark ({} dives, {} blasts)", telemetry.skim_dives, telemetry.skim_blasts),
+                    format!("Sunskimmer: never blasted its mark (dives {}, blasts {})", telemetry.skim_dives, telemetry.skim_blasts),
+                );
+            }
+        }
+    }
+
+    // ---- BEACON TICK: a touch plants a tracker that runs out ----
+    if probe.has(K::BeaconTick) {
+        if t == BP_TICK {
+            probe.pin = Some(me_dir);
+            stage(&mut commands, probe, K::BeaconTick, sphere::offset_dir(me_dir, fwd, 1.2, r));
+        }
+        if t == BP_TICK + 30 {
+            let tracked = q_astro.get(me).is_ok_and(|(.., tr)| tr);
+            probe.check(
+                tracked && telemetry.ticks_latched > 0 && !q_beacons.is_empty(),
+                "Beacon Tick: its touch tracked the astronaut, beacon up".into(),
+                format!("Beacon Tick: tracked={tracked} latched={} beacons={}", telemetry.ticks_latched, q_beacons.iter().count()),
+            );
+        }
+        if t == BP_TICK + 30 + (TRACKER_SECS / 0.033) as u64 + 10 {
+            let tracked = q_astro.get(me).is_ok_and(|(.., tr)| tr);
+            probe.check(!tracked, "Beacon Tick: the tracker ran out".into(), "Beacon Tick: the tracker never ran out".into());
+        }
+    }
+
+    // ---- MIMIC: greed, punished — and repaid to the purse that paid ----
+    if probe.has(K::Mimic) {
+        let chests: Vec<(Entity, Vec3, bool)> = q_chests
+            .iter()
+            .filter(|(_, i, ..)| i.kind == crate::interact::InteractKind::Chest && !i.used)
+            .map(|(e, _, tf, m)| (e, tf.translation.normalize_or_zero(), m))
+            .collect();
+        if t == BP_MIMIC {
+            // a real disguised chest when the layout rolled one, else dress one up
+            match chests.iter().find(|c| c.2).or(chests.first()) {
+                Some(&(chest, dir, disguised)) => {
+                    if !disguised {
+                        commands.entity(chest).insert(crate::bestiary::MimicDisguise { tell: 3.0, breath: 0.0 });
+                    }
+                    probe.ring = Some(chest);
+                    let h = sphere::tangent_frame(dir).0;
+                    probe.pin = Some(sphere::offset_dir(dir, h, 1.4, r));
+                }
+                None => probe.fail.push("Mimic: no chest on the stage".into()),
+            }
+        }
+        if t == BP_MIMIC + 3 {
+            if let Ok((.., mut ps, _, _)) = q_astro.get_mut(me) {
+                ps.gold = 500;
+            }
+            keys.press(KeyCode::KeyE);
+        }
+        if t == BP_MIMIC + 6 {
+            let gold = q_astro.get(me).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
+            let mimic = q_foes.iter().find(|(_, en, _, m, ..)| en.kind == K::Mimic && m.is_some_and(|m| m.payer == Some(me)));
+            let chest_gone = probe.ring.is_none_or(|c| q_chests.get(c).is_err());
+            let shock = q_rings.iter().any(|(_, tg, _)| (tg.radius - MIMIC_SHOCK_RADIUS).abs() < 1e-3);
+            match mimic {
+                Some((m, _, _, Some(mm), ..)) => {
+                    probe.subject = Some(m);
+                    probe.staged.push(m);
+                    probe.base = mm.paid as u32;
+                    probe.check(
+                        // (a coin or two may have rolled into the pocket meanwhile)
+                        (500 - mm.paid..=500 - mm.paid + 30).contains(&gold) && mm.paid > 0 && chest_gone && shock,
+                        format!("Mimic: the lid cost {} gold, the chest sprang with its shockwave", mm.paid),
+                        format!("Mimic: sprang wrong (gold {gold}, paid {}, chest gone {chest_gone}, shockwave {shock})", mm.paid),
+                    );
+                    probe.hp_mark = sphere::arc_dist(pin, q_foes.get(m).map(|f| f.1.dir).unwrap_or(pin), r);
+                }
+                _ => probe.fail.push(format!("Mimic: pressing E on a disguised chest sprang nothing (gold {gold})")),
+            }
+        }
+        if t == BP_MIMIC + 45 {
+            if let Some((m, en, ..)) = probe.subject.and_then(|s| q_foes.get(s).ok()) {
+                let arc = sphere::arc_dist(pin, en.dir, r);
+                probe.check(arc > probe.hp_mark + 2.0, format!("Mimic: fled {:.1} m", arc - probe.hp_mark), format!("Mimic: did not flee ({:.1} m)", arc - probe.hp_mark));
+                probe.mark = q_astro.get(me).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
+                hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+            }
+        }
+        if t == BP_MIMIC + 48 {
+            let gold = q_astro.get(me).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
+            probe.check(
+                gold >= probe.mark + probe.base as u64,
+                format!("Mimic: killed, it coughed {} gold back into its payer's purse", probe.base),
+                format!("Mimic: killed, the payer's purse went {} -> {gold} (want +{})", probe.mark, probe.base),
+            );
+        }
+        // with --coop2: a PEER pays (as P14's peer interactables will) and the HOST kills it
+        if let Some(peer) = peer {
+            if t == BP_MIMIC + 50 {
+                if let Some(&(chest, dir, _)) = chests.iter().find(|c| Some(c.0) != probe.ring) {
+                    if let Ok((.., mut ps, _, _)) = q_astro.get_mut(peer) {
+                        ps.gold = 300 - 40;
+                        probe.peer_gold = ps.gold;
+                    }
+                    commands.entity(chest).insert(crate::bestiary::MimicSprung { payer: peer, paid: 40 });
+                    probe.pin = Some(sphere::offset_dir(dir, sphere::tangent_frame(dir).0, 1.4, r));
+                    probe.refund_grants.clear();
+                }
+            }
+            if t == BP_MIMIC + 56 {
+                let host_gold = q_astro.get(me).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
+                probe.mark = host_gold;
+                if let Some((m, ..)) = q_foes.iter().find(|(_, en, _, mm, ..)| en.kind == K::Mimic && mm.is_some_and(|mm| mm.payer == Some(peer))) {
+                    probe.staged.push(m);
+                    hits.write(crate::messages::HitMsg { source: Some(me), target: m, amount: 1.0e7, crit: false, knock: Vec3::ZERO });
+                } else {
+                    probe.fail.push("Mimic: the peer's chest never sprang".into());
+                }
+            }
+            if t == BP_MIMIC + 59 {
+                let peer_gold = q_astro.get(peer).map(|(.., ps, _, _)| ps.gold).unwrap_or(0);
+                let sent = probe.refund_grants.iter().any(|&(pid, g)| pid == 1 && g == 40);
+                probe.check(
+                    peer_gold == probe.peer_gold + 40 && sent,
+                    "Mimic: the host's kill paid 40 gold back to the PEER who paid it (and its machine was told)".into(),
+                    format!("Mimic: the peer's refund went wrong (peer {} -> {peer_gold}, grant sent {sent})", probe.peer_gold),
+                );
+            }
+        }
+        // one left alone digs out with its gold
+        if t == BP_MIMIC + 62 {
+            probe.base = telemetry.mimic_escapes;
+            let at = sphere::offset_dir(pin, fwd, 6.0, r);
+            probe.subject = Some(stage(&mut commands, probe, K::Mimic, at));
+        }
+        if t == BP_MIMIC + 64 {
+            if let Some((.., Some(mut mm), _, _)) = probe.subject.and_then(|s| q_foes.get_mut(s).ok()) {
+                mm.left = 1.0;
+            }
+        }
+        if t == BP_PRIME - 1 {
+            probe.check(telemetry.mimic_escapes > probe.base, "Mimic: left alone, it dug out".into(), "Mimic: never escaped".into());
+        }
+    }
+
+    // ---- BEAMER PRIME: paints a RUNNING mark and leads it ----
+    if probe.has(K::BeamerPrime) {
+        if t == BP_PRIME {
+            probe.pin = Some(me_dir);
+            probe.base = telemetry.prime_shots;
+            let at = sphere::offset_dir(me_dir, fwd, 30.0, r);
+            probe.subject = Some(stage(&mut commands, probe, K::BeamerPrime, at));
+            // run across its line of fire
+            probe.run_side = Some(sphere::tangent_frame(me_dir).1);
+        }
+        if t == BP_DONE - 1 {
+            probe.check(
+                telemetry.prime_shots > probe.base && telemetry.prime_max_lead > 0.02,
+                format!("Beamer Prime: fired {} railbolt(s), leading its running mark by up to {:.1} deg ({} stopped by a hill)", telemetry.prime_shots - probe.base, telemetry.prime_max_lead.to_degrees(), telemetry.prime_bolts_shadowed),
+                format!("Beamer Prime: shots {} lead {:.3} rad", telemetry.prime_shots - probe.base, telemetry.prime_max_lead),
+            );
+        }
+    }
+}
+
+/// Count the director's natural spawns of each kind (the staged ones are the probe's).
+fn bestiary_natural(mut probe: ResMut<BestiaryProbe>, q_new: Query<(Entity, &Enemy), Added<Enemy>>) {
+    for (e, en) in &q_new {
+        if !probe.staged.contains(&e) && en.speed > 0.0 {
+            *probe.natural.entry(en.kind).or_default() += 1;
+        }
+    }
+}
+
 /// Gems collected over the run (every collection writes one `GrantOut::Xp`).
 #[derive(Resource, Default)]
 struct XpTally(u64);
@@ -1620,9 +2137,11 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .and_then(|_| crate::ui::settings::ui_scale_self_check())
         .and_then(|_| crate::tomes::self_check())
         .and_then(|_| crate::techs::self_check())
-        .and_then(|_| crate::net::edge_presses_self_check());
+        .and_then(|_| crate::net::edge_presses_self_check())
+        .and_then(|_| crate::bestiary::self_check())
+        .and_then(|_| crate::netenemy::state_lane_self_check());
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes, movement techs, input edges)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items, settings, flash gate, ui fit, tomes, movement techs, input edges, spawn tables, new enemies, enemy-state lane)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -1736,21 +2255,29 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
         .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .insert_resource(BestiaryProbe {
+            on: args.iter().any(|a| a == "--bestiary"),
+            kinds: crate::bestiary::kinds_from_args("--bestiary"),
+            ..default()
+        })
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
         .init_resource::<crate::fx::FlashGate>()
+        .init_resource::<crate::bestiary::BestiaryTelemetry>()
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
         .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::techs::TechFxMsg>()
+        .add_message::<crate::bestiary::BestiaryFxMsg>()
+        .add_message::<crate::bestiary::RefundMsg>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
         .add_message::<crate::messages::NumberMsg>()
         .add_message::<crate::messages::BannerMsg>()
         .add_message::<crate::messages::SfxMsg>()
-        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, headless_enter))
+        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, crate::techs::setup_tech_assets, crate::bestiary::setup_bestiary_assets, headless_enter))
         .add_systems(
             Update,
             (
@@ -1797,6 +2324,42 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
             )
                 .chain()
                 .run_if(crate::playing),
+        )
+        // §9 new enemies (P08) — the same sets main.rs runs (headless IS the host)
+        .add_systems(
+            Update,
+            (
+                crate::bestiary::rollo_roll,
+                crate::bestiary::trencher_update,
+                crate::bestiary::skimmer_update,
+                crate::bestiary::aegis_turn,
+                crate::bestiary::tick_latch,
+                crate::bestiary::tracker_upkeep,
+                crate::bestiary::mimic_flee,
+                crate::bestiary::prime_attack,
+            )
+                .after(crate::enemies::enemy_move)
+                .before(crate::bestiary::bestiary_pose)
+                .run_if(crate::playing),
+        )
+        .add_systems(Update, crate::bestiary::mimic_spring.after(crate::interact::interact_system).run_if(crate::playing))
+        .add_systems(Update, crate::bestiary::pay_refunds.after(crate::combat::apply_hits))
+        .add_systems(
+            Update,
+            (
+                crate::bestiary::bestiary_pose.after(crate::enemies::enemy_move),
+                crate::bestiary::trencher_ridges.after(crate::bestiary::bestiary_pose),
+                crate::bestiary::skimmer_shadows.after(crate::bestiary::bestiary_pose),
+                crate::bestiary::skimmer_whine,
+                crate::bestiary::mimic_tells,
+                crate::bestiary::tracker_beacons,
+                crate::bestiary::reap_owned_telegraphs,
+            )
+                .run_if(crate::playing),
+        )
+        .add_systems(
+            Update,
+            crate::bestiary::bestiary_fx_presentation.run_if(resource_exists::<crate::planet::CurrentPlanet>),
         )
         // §7 items — the same set main.rs runs (headless IS the host, so the client-only
         // trail drops simply never run)
@@ -1889,6 +2452,20 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .add_systems(
             Update,
             static_now.run_if(crate::playing).run_if(|| std::env::args().any(|a| a == "--staticnow")),
+        )
+        .add_systems(
+            Update,
+            (
+                bestiary_probe
+                    .after(bot_drive)
+                    .before(crate::interact::interact_system)
+                    .before(crate::combat::apply_hits)
+                    .before(crate::combat::apply_player_hits)
+                    .before(crate::player::player_physics),
+                bestiary_natural,
+            )
+                .run_if(|p: Res<BestiaryProbe>| p.on)
+                .run_if(crate::playing),
         )
         .add_systems(
             Update,
@@ -2022,7 +2599,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // `--staticnow` winds the run into The Static within seconds, and while it is up no
     // kill drops XP (`pickups::kill_drops` pays its ghosts' Silver instead): the XP pipeline
     // is judged on the runs that walk a horde, not on this one.
-    let xp_run = !std::env::args().any(|a| a == "--staticnow");
+    // `--bestiary` pins and disarms the bot for most of the run to stage its scenes: it
+    // walks no horde either.
+    let xp_run = !std::env::args().any(|a| a == "--staticnow" || a == "--bestiary");
     if xp_run && run.kills > 50 && xp_grants == 0 && gems_left == 0 {
         println!("FAIL: XP pipeline dead (kills dropped no gems)");
         ok = false;
@@ -2371,6 +2950,30 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         } else {
             for f in fails {
                 println!("FAIL: techs: {f}");
+            }
+            ok = false;
+        }
+    }
+    // §9 new enemies (P08)
+    let bestiary = world.resource::<BestiaryProbe>();
+    if bestiary.on {
+        let tel = world.resource::<crate::bestiary::BestiaryTelemetry>();
+        println!("BESTIARY telemetry {tel:?}");
+        let mut natural: Vec<String> = bestiary.natural.iter().map(|(k, n)| format!("{}={n}", k.def().name)).collect();
+        natural.sort();
+        println!("BESTIARY natural spawns: {}", natural.join(" "));
+        for l in &bestiary.ok {
+            println!("  BESTIARY {l}");
+        }
+        let mut fails = bestiary.fail.clone();
+        if bestiary.ticks < BP_DONE {
+            fails.push(format!("the probe needs {BP_DONE} ticks, the run gave it {}", bestiary.ticks));
+        }
+        if fails.is_empty() {
+            println!("BESTIARY OK ({} kinds: {})", bestiary.kinds.len(), bestiary.kinds.iter().map(|k| k.def().name).collect::<Vec<_>>().join(", "));
+        } else {
+            for f in fails {
+                println!("FAIL: bestiary: {f}");
             }
             ok = false;
         }

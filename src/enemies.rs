@@ -390,6 +390,159 @@ fn enemy_mesh(kind: EnemyKind) -> Mesh {
             m.add_sphere(0.22, 1, at(Vec3::new(0.0, 0.48, 0.0)), BODY);
             m.add_box(Vec3::new(0.24, 0.12, 0.08), at(Vec3::new(0.0, 0.48, -0.18)), DARK); // visor
         }
+        // ---- batch 1 (P08): each a silhouette you can name at a glance, one glowing
+        // accent (`set_glow`), front at local -Z like the rest ----
+        Rollo => {
+            // a curled armadillo: a ball banded with plates around its roll axis (local X)
+            m.add_sphere(0.52, 2, at(Vec3::ZERO), BODY);
+            for i in 0..6 {
+                let a = i as f32 / 6.0 * std::f32::consts::TAU;
+                m.add_box(
+                    Vec3::new(1.12, 0.1, 0.34),
+                    Transform::from_translation(Vec3::new(0.0, a.cos() * 0.5, a.sin() * 0.5)).with_rotation(Quat::from_rotation_x(a)),
+                    MID,
+                ); // armour band
+            }
+            m.add_sphere(0.2, 1, at(Vec3::new(0.0, -0.18, -0.46)), DARK); // tucked snout
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.08, 0.22, 4, at(Vec3::new(0.16 * s, 0.56, -0.1)), DARK); // ear
+                m.set_glow(true);
+                m.add_sphere(0.065, 0, at(Vec3::new(0.11 * s, -0.08, -0.6)), BODY); // eye in the curl
+                m.set_glow(false);
+            }
+        }
+        Trencher => {
+            // a low digging beast: wide body, a finned spine (all that shows under the
+            // crust), shovel claws with glowing tips
+            m.add_ellipsoid(Vec3::new(0.58, 0.36, 0.74), 1, at(Vec3::new(0.0, -0.06, 0.0)), BODY);
+            for (z, h) in [(-0.34, 0.38), (0.02, 0.46), (0.38, 0.32)] {
+                m.add_box(Vec3::new(0.1, h, 0.3), at(Vec3::new(0.0, 0.28 + h * 0.4, z)), MID); // spine fin
+            }
+            m.add_cone(0.16, 0.4, 5, Transform::from_translation(Vec3::new(0.0, -0.04, -0.82)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // snout
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.3, 0.08, 0.42),
+                    Transform::from_translation(Vec3::new(0.34 * s, -0.26, -0.66)).with_rotation(Quat::from_rotation_y(0.25 * s)),
+                    DARK,
+                ); // shovel claw
+                m.set_glow(true);
+                for c in [-0.08, 0.08] {
+                    m.add_cone(
+                        0.05,
+                        0.2,
+                        4,
+                        Transform::from_translation(Vec3::new(0.34 * s + c - 0.06 * s, -0.26, -0.94)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
+                        BODY,
+                    ); // hot claw tip
+                }
+                m.set_glow(false);
+                m.add_cylinder(0.08, 0.32, 5, at(Vec3::new(0.32 * s, -0.38, 0.3)), MID); // hind leg
+            }
+        }
+        AegisDrone => {
+            // a drone core behind a curved shield wall whose rim glows: the side it faces
+            // is the side you cannot hurt
+            m.add_sphere(0.34, 1, at(Vec3::new(0.0, 0.0, 0.14)), BODY);
+            m.add_box(Vec3::new(0.86, 0.96, 0.08), at(Vec3::new(0.0, 0.0, -0.4)), MID); // shield face
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.42, 0.9, 0.08),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.0, -0.26)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    MID,
+                ); // shield wing
+                m.add_box(Vec3::new(0.06, 0.32, 0.26), at(Vec3::new(0.26 * s, 0.0, 0.46)), DARK); // stabilizer
+            }
+            m.add_cylinder(0.025, 0.4, 4, at(Vec3::new(0.0, 0.5, 0.18)), DARK); // antenna
+            m.set_glow(true);
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, 0.5, -0.42)), BODY); // lit rim
+            m.add_box(Vec3::new(0.92, 0.06, 0.12), at(Vec3::new(0.0, -0.5, -0.42)), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.06, 0.9, 0.12),
+                    Transform::from_translation(Vec3::new(0.76 * s, 0.0, -0.13)).with_rotation(Quat::from_rotation_y(-0.6 * s)),
+                    BODY,
+                );
+            }
+            m.set_glow(false);
+        }
+        Sunskimmer => {
+            // a swept manta dart burning a little sun under its belly
+            m.add_ellipsoid(Vec3::new(0.24, 0.15, 0.68), 1, at(Vec3::ZERO), BODY);
+            for s in [-1.0, 1.0] {
+                m.add_box(
+                    Vec3::new(0.95, 0.05, 0.42),
+                    Transform::from_translation(Vec3::new(0.56 * s, 0.02, 0.12))
+                        .with_rotation(Quat::from_rotation_y(0.4 * s) * Quat::from_rotation_z(0.14 * s)),
+                    MID,
+                ); // swept wing
+            }
+            m.add_cone(0.1, 0.7, 5, Transform::from_translation(Vec3::new(0.0, 0.0, 0.78)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // tail
+            m.add_cone(0.13, 0.4, 5, Transform::from_translation(Vec3::new(0.0, 0.0, -0.78)).with_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)), DARK); // nose
+            m.set_glow(true);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.13, 0.04)), BODY); // the sun core
+            m.set_glow(false);
+        }
+        BeaconTick => {
+            // a bloated little tick with a tall antenna and a red tracker bulb
+            m.add_ellipsoid(Vec3::new(0.44, 0.32, 0.54), 1, at(Vec3::new(0.0, 0.0, 0.1)), BODY);
+            m.add_sphere(0.19, 1, at(Vec3::new(0.0, -0.04, -0.44)), DARK); // head
+            for s in [-1.0, 1.0] {
+                for z in [-0.25, 0.05, 0.35] {
+                    m.add_cylinder(0.04, 0.5, 4, Transform::from_translation(Vec3::new(0.46 * s, -0.18, z)).with_rotation(Quat::from_rotation_z(1.0 * s)), MID); // leg
+                }
+            }
+            m.add_cylinder(0.03, 0.62, 4, at(Vec3::new(0.0, 0.58, 0.06)), MID); // antenna
+            m.set_glow(true);
+            m.add_sphere(0.13, 1, at(Vec3::new(0.0, 0.92, 0.06)), BODY); // tracker bulb
+            m.set_glow(false);
+        }
+        Mimic => {
+            // the chest, lid up, teeth out, eyes in the dark — on stubby running legs
+            m.add_box(Vec3::new(1.0, 0.52, 0.7), at(Vec3::new(0.0, -0.1, 0.0)), BODY); // box
+            m.add_box(
+                Vec3::new(1.04, 0.2, 0.74),
+                Transform::from_translation(Vec3::new(0.0, 0.34, 0.14)).with_rotation(Quat::from_rotation_x(0.55)),
+                BODY,
+            ); // gaping lid
+            for x in [-0.36, -0.12, 0.12, 0.36] {
+                m.add_cone(0.07, 0.2, 4, at(Vec3::new(x, 0.24, -0.33)), BODY); // lower teeth
+                m.add_cone(
+                    0.07,
+                    0.2,
+                    4,
+                    Transform::from_translation(Vec3::new(x + 0.12, 0.45, -0.22)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)),
+                    BODY,
+                ); // upper teeth
+            }
+            m.add_box(Vec3::new(0.3, 0.06, 0.45), Transform::from_translation(Vec3::new(0.0, 0.18, -0.45)).with_rotation(Quat::from_rotation_x(0.35)), Color::srgb(0.75, 0.15, 0.15)); // tongue
+            m.add_box(Vec3::new(1.03, 0.08, 0.73), at(Vec3::new(0.0, -0.2, 0.0)), DARK); // iron band
+            for (x, z) in [(-0.38, -0.24), (0.38, -0.24), (-0.38, 0.24), (0.38, 0.24)] {
+                m.add_cylinder(0.08, 0.26, 5, at(Vec3::new(x, -0.44, z)), DARK); // stubby leg
+            }
+            m.set_glow(true);
+            for s in [-1.0, 1.0] {
+                m.add_sphere(0.075, 0, at(Vec3::new(0.2 * s, 0.34, -0.02)), BODY); // eye
+            }
+            m.set_glow(false);
+        }
+        BeamerPrime => {
+            // the Beamer's crystal grown into a sniper: tripod, twin crystal, a long barrel
+            // and a glowing scope lens at its tip
+            m.add_cone(0.3, 1.5, 5, at(Vec3::new(0.0, 0.1, 0.1)), BODY); // main crystal
+            m.add_cone(0.2, 0.9, 5, Transform::from_translation(Vec3::new(0.0, -0.35, 0.1)).with_rotation(Quat::from_rotation_x(std::f32::consts::PI)), BODY); // keel
+            m.add_sphere(0.16, 1, at(Vec3::new(0.0, 0.28, 0.05)), DARK); // core
+            m.add_cylinder(0.065, 1.3, 6, Transform::from_translation(Vec3::new(0.0, 0.3, -0.62)).with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)), DARK); // barrel
+            for i in 0..3 {
+                let a = i as f32 / 3.0 * std::f32::consts::TAU + 0.5;
+                m.add_cylinder(0.05, 0.7, 4, Transform::from_translation(Vec3::new(a.cos() * 0.34, -0.5, a.sin() * 0.34 + 0.1)).with_rotation(Quat::from_rotation_z(a.cos() * 0.4) * Quat::from_rotation_x(-a.sin() * 0.4)), MID); // tripod leg
+            }
+            for s in [-1.0, 1.0] {
+                m.add_cone(0.1, 0.6, 4, Transform::from_translation(Vec3::new(0.24 * s, 0.35, 0.15)).with_rotation(Quat::from_rotation_z(-0.45 * s)), MID); // shard
+            }
+            m.set_glow(true);
+            m.add_sphere(0.12, 1, at(Vec3::new(0.0, 0.3, -1.3)), BODY); // scope lens
+            m.set_glow(false);
+        }
     }
     m.build()
 }
@@ -523,32 +676,29 @@ pub fn setup_enemy_assets(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    // absent headless (no renderer): the accents then simply don't glow
+    images: Option<ResMut<Assets<Image>>>,
 ) {
     let mut mesh_map = HashMap::new();
     let mut mat_map = HashMap::new();
-    for kind in [
-        EnemyKind::Shambler,
-        EnemyKind::Sprinter,
-        EnemyKind::Bruiser,
-        EnemyKind::Spitter,
-        EnemyKind::Ufo,
-        EnemyKind::Burrower,
-        EnemyKind::Beamer,
-        EnemyKind::Lobber,
-        EnemyKind::Ghost,
-    ] {
+    let glow_mask = images.map(|mut i| i.add(crate::meshkit::glow_mask_image()));
+    for kind in EnemyKind::ALL {
         let def = kind.def();
         mesh_map.insert(kind, meshes.add(enemy_mesh(kind)));
         let ghost = kind == EnemyKind::Ghost;
+        // A kind with an accent glows ONLY there (the mask's white texel), bright enough
+        // to read on the night side; the built eight keep their faint all-over glow.
+        let (emissive, emissive_texture) = match (kind.accent(), &glow_mask) {
+            (Some(accent), Some(mask)) => (accent.to_linear() * ENEMY_ACCENT_GLOW, Some(mask.clone())),
+            _ if ghost => (def.color.to_linear() * 1.8, None),
+            _ => (def.color.to_linear() * 0.15, None),
+        };
         mat_map.insert(
             kind,
             materials.add(StandardMaterial {
                 base_color: if ghost { def.color.with_alpha(0.55) } else { def.color },
-                emissive: if ghost {
-                    def.color.to_linear() * 1.8
-                } else {
-                    def.color.to_linear() * 0.15
-                },
+                emissive,
+                emissive_texture,
                 alpha_mode: if ghost { AlphaMode::Blend } else { AlphaMode::Opaque },
                 perceptual_roughness: 0.8,
                 ..default()
@@ -653,17 +803,52 @@ pub fn setup_enemy_assets(
     });
 }
 
-pub fn rebuild_hash(mut hash: ResMut<SpatialHash>, q: Query<(Entity, &Transform), With<Enemy>>) {
+pub fn rebuild_hash(
+    mut hash: ResMut<SpatialHash>,
+    planet: Option<Res<CurrentPlanet>>,
+    q: Query<(Entity, &Transform, &Enemy, Has<Buried>)>,
+) {
     for v in hash.map.values_mut() {
         v.clear();
     }
-    for (e, tf) in &q {
-        hash.map.entry(SpatialHash::key(tf.translation)).or_default().push((e, tf.translation));
+    for (e, tf, en, buried) in &q {
+        // A Trencher tunnelling under the crust is out of reach — its ridge is the tell,
+        // not a target.
+        if buried && en.kind == EnemyKind::Trencher {
+            continue;
+        }
+        // Column-hitbox fliers are filed where the weapons fly: under their body.
+        let at = match &planet {
+            Some(p) if en.kind.column_hitbox() => p.surface_point(en.dir) + en.dir * COLUMN_HIT_HEIGHT,
+            _ => tf.translation,
+        };
+        hash.map.entry(SpatialHash::key(at)).or_default().push((e, at));
     }
     hash.map.retain(|_, v| !v.is_empty());
 }
 
-/// One crowd enemy. Public so the headless probes can stage an exact scene (a comet tail).
+/// One crowd enemy of any kind, sized by a run's `Scaling` — THE entry point for anything
+/// that adds to the horde outside the director: boss phase adds (P13's Sandstorm Court
+/// Aegis Drones and Final Judgment Beamer Primes), a sprung Mimic, the headless probes.
+/// Everything a kind needs to behave (its `bestiary` components, a Burrower's crack) comes
+/// with it. Returns the new enemy.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_enemy_at(
+    commands: &mut Commands,
+    assets: &EnemyAssets,
+    planet: &CurrentPlanet,
+    kind: EnemyKind,
+    dir: Vec3,
+    elite: bool,
+    sc: &Scaling,
+    rng: &mut impl Rng,
+) -> Entity {
+    let (hp, dmg) = if kind == EnemyKind::Ghost { (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg) } else { (sc.hp, sc.dmg) };
+    spawn_enemy(commands, assets, planet, kind, dir, elite, hp, dmg, rng)
+}
+
+/// One crowd enemy with explicit HP/damage multipliers (see `spawn_enemy_at`). Public so the
+/// headless probes can stage an exact scene (a comet tail).
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_enemy(
     commands: &mut Commands,
@@ -675,7 +860,7 @@ pub fn spawn_enemy(
     hp_mult: f32,
     dmg_mult: f32,
     rng: &mut impl Rng,
-) {
+) -> Entity {
     let def = kind.def();
     let scale = def.scale * if elite { EliteMods::SCALE } else { 1.0 } * rng.gen_range(0.92..1.1);
     let hp = def.hp * hp_mult * if elite { EliteMods::HP } else { 1.0 };
@@ -718,10 +903,14 @@ pub fn spawn_enemy(
     if kind == EnemyKind::Lobber {
         cmd.insert(Lobber { cd: rng.gen_range(2.5..5.0) });
     }
+    // the §9 batch-1 kinds carry their behaviour (and the look a client streams)
+    crate::bestiary::attach(&mut cmd, kind, dir, rng);
+    let id = cmd.id();
     if kind == EnemyKind::Burrower {
         // the ground cracks over the burrow for exactly as long as it stays under
         spawn_crack_decal(commands, assets, planet, dir, BURROW_SECS);
     }
+    id
 }
 
 /// Timer-driven wave spawner. Runs while playing.
@@ -738,7 +927,7 @@ pub fn director_spawn(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(&Player, &crate::run::PlayerState)>,
-    q_enemies: Query<(), With<Enemy>>,
+    q_enemies: Query<(&Enemy, Has<crate::interact::Pot>, Has<Boss>)>,
     q_boss: Query<&Boss>,
 ) {
     let dt = time.delta_secs();
@@ -814,6 +1003,16 @@ pub fn director_spawn(
     let cap = sc.live_cap;
     let room = cap.saturating_sub(alive);
     let n = budget.min(room);
+    // Live horde by kind, for the world's per-kind caps (pots and boss heads are not horde).
+    let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+    if n > 0 {
+        for (e, pot, boss) in &q_enemies {
+            if !pot && !boss {
+                by_kind[e.kind.index()] += 1;
+            }
+        }
+    }
+    let table = crate::content::enemies::spawn_table(planet.kind);
     for i in 0..n {
         let (anchor, flare) = anchors[i % anchors.len()];
         let heading = {
@@ -831,14 +1030,18 @@ pub fn director_spawn(
         let dir = sphere::offset_dir(anchor, heading, arc, planet.radius);
 
         if run.static_active {
-            let (hp, dmg) = (sc.hp * sc.static_hp, sc.dmg * sc.static_dmg);
-            spawn_enemy(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, hp, dmg, rng);
+            spawn_enemy_at(&mut commands, &assets, &planet, EnemyKind::Ghost, dir, false, &sc, rng);
             continue;
         }
 
-        let mix = EnemyKind::mix(run.elapsed);
-        let kind = mix[rng.gen_range(0..mix.len())];
-        let elite = std::mem::take(&mut director.elite_pending);
+        // The world's table picks the kind; P01's scaling already decided how many and how
+        // tough. A pending elite waits for a kind that may carry it.
+        let Some(row) = crate::content::enemies::pick_spawn(table, run.elapsed, &by_kind, sc.party_spawn, rng) else {
+            continue;
+        };
+        let kind = row.kind;
+        by_kind[kind.index()] += 1;
+        let elite = row.can_elite && std::mem::take(&mut director.elite_pending);
         if elite {
             director.since_elite = 0.0;
         }
@@ -849,7 +1052,7 @@ pub fn director_spawn(
         } else {
             dir
         };
-        spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, rng);
+        spawn_enemy_at(&mut commands, &assets, &planet, kind, dir, elite, &sc, rng);
     }
 }
 
@@ -948,6 +1151,7 @@ pub fn boss_phase_system(
     mut shake: ResMut<Shake>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState)>,
     mut q_boss: Query<(&mut Enemy, &mut Boss)>,
+    q_horde: Query<&Enemy, (Without<Boss>, Without<crate::interact::Pot>)>,
     mut banners: MessageWriter<BannerMsg>,
     mut sfx: MessageWriter<SfxMsg>,
 ) {
@@ -1002,15 +1206,24 @@ pub fn boss_phase_system(
             continue;
         };
         let (t, b) = sphere::tangent_frame(victim.dir);
+        // the ring is drawn from the world's table (its per-kind caps included), at least as
+        // late in the stage as a mid-fight mix
+        let table = crate::content::enemies::spawn_table(planet.kind);
+        let mut by_kind = vec![0u32; EnemyKind::ALL.len()];
+        for e in &q_horde {
+            by_kind[e.kind.index()] += 1;
+        }
         for i in 0..ring {
             let a = i as f32 / ring as f32 * std::f32::consts::TAU + rng.gen_range(-0.2..0.2);
             let heading = t * a.cos() + b * a.sin();
             let arc = rng.gen_range(SPAWN_ARC_MIN..SPAWN_ARC_MAX);
             let dir = sphere::offset_dir(victim.dir, heading, arc, planet.radius);
-            let mix = EnemyKind::mix(run.elapsed.max(300.0));
-            let kind = mix[rng.gen_range(0..mix.len())];
-            let elite = want == 2 && rng.gen_bool(0.25);
-            spawn_enemy(&mut commands, &assets, &planet, kind, dir, elite, sc.hp, sc.dmg, &mut rng);
+            let Some(row) = crate::content::enemies::pick_spawn(table, run.elapsed.max(300.0), &by_kind, sc.party_spawn, &mut rng) else {
+                continue;
+            };
+            by_kind[row.kind.index()] += 1;
+            let elite = want == 2 && row.can_elite && rng.gen_bool(0.25);
+            spawn_enemy_at(&mut commands, &assets, &planet, row.kind, dir, elite, &sc, &mut rng);
         }
     }
 }
@@ -1250,15 +1463,34 @@ pub fn craterpillar_update(
     }
 }
 
-/// Steering + separation + transform write for every enemy.
+/// How far an astronaut SEEMS to the horde, as a multiplier on the real arc: a Signal Flare
+/// carrier (§7) and anyone a Beacon Tick tagged (§9) read closer than they are, so the chase
+/// prefers them over a nearer teammate.
+pub fn horde_lure(revealed: bool, tracked: bool) -> f32 {
+    (if revealed { SIGNAL_FLARE_LURE } else { 1.0 }) * if tracked { TRACKER_LURE } else { 1.0 }
+}
+
+/// Which astronaut an enemy at `from` chases: the least lured great-circle distance.
+pub fn chase_target(from: Vec3, snaps: &[crate::player::AstronautSnap], lure: &[f32], radius: f32) -> usize {
+    (0..snaps.len())
+        .min_by(|&a, &b| {
+            (sphere::arc_dist(from, snaps[a].dir, radius) * lure[a]).total_cmp(&(sphere::arc_dist(from, snaps[b].dir, radius) * lure[b]))
+        })
+        .unwrap_or(0)
+}
+
+/// Steering + separation + transform write for every enemy. Kinds that steer themselves
+/// (`bestiary::SelfSteered`: Rollo, the Sunskimmer, a fleeing Mimic) and anything under the
+/// ground are someone else's.
+#[allow(clippy::type_complexity)]
 pub fn enemy_move(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     hash: Res<SpatialHash>,
-    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform), Without<Enemy>>,
+    q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<crate::bestiary::Tracked>), Without<Enemy>>,
     mut q: Query<
         (Entity, &mut Enemy, &mut Transform),
-        (Without<Buried>, Without<crate::interact::Pot>),
+        (Without<Buried>, Without<crate::interact::Pot>, Without<crate::bestiary::SelfSteered>),
     >,
 ) {
     let dt = time.delta_secs();
@@ -1270,45 +1502,38 @@ pub fn enemy_move(
     // Downed astronauts are not targets.
     let snaps: Vec<crate::player::AstronautSnap> = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(e, p, _, tf)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(e, p, _, tf, _)| crate::player::AstronautSnap { entity: e, dir: p.dir, pos: tf.translation })
         .collect();
     if snaps.is_empty() {
         return;
     }
-    // How far each astronaut SEEMS to the horde: a Signal Flare carrier reads closer than
-    // they are, so the chase prefers them over a nearer teammate (§7).
-    let lure: Vec<f32> = q_player
+    // How far each astronaut SEEMS to the horde (Signal Flare, a Beacon Tick's tracker).
+    let (lure, tracked): (Vec<f32>, Vec<bool>) = q_player
         .iter()
-        .filter(|(_, _, ps, _)| !ps.dead)
-        .map(|(_, _, ps, _)| if ps.revealed() { SIGNAL_FLARE_LURE } else { 1.0 })
-        .collect();
+        .filter(|(_, _, ps, ..)| !ps.dead)
+        .map(|(_, _, ps, _, tracked)| (horde_lure(ps.revealed(), tracked), tracked))
+        .unzip();
     let t_now = time.elapsed_secs();
 
     for (entity, mut e, mut tf) in &mut q {
         // Each enemy chases whoever is closest ALONG THE SURFACE (as the lure reads it).
-        let target = snaps
-            .iter()
-            .zip(&lure)
-            .min_by(|(a, la), (b, lb)| {
-                (sphere::arc_dist(e.dir, a.dir, planet.radius) * **la)
-                    .total_cmp(&(sphere::arc_dist(e.dir, b.dir, planet.radius) * **lb))
-            })
-            .map(|(s, _)| *s)
-            .unwrap_or(snaps[0]);
+        let pick = chase_target(e.dir, &snaps, &lure, planet.radius);
+        let target = snaps[pick];
         let player_dir = target.dir;
         let player_pos = target.pos;
-        e.contact_cd = (e.contact_cd - dt).max(0.0);
-        e.flash = (e.flash - dt * 6.0).max(0.0);
-        e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
-        e.knock *= (1.0 - 7.0 * dt).max(0.0);
+        tick_enemy(&mut e, dt);
 
         let r = planet.surface(e.dir);
-        let eff_speed = e.speed * (1.0 - e.slow);
+        let mut eff_speed = e.speed * (1.0 - e.slow);
+        // A tracked astronaut is a beacon: the far horde closes on it faster (§9 Beacon Tick).
+        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
+        if tracked[pick] && to_player_arc > TRACKER_SPEEDUP_ARC {
+            eff_speed *= TRACKER_SPEED_MULT;
+        }
 
         // Ranged kinds hold their preferred distance and strafe; melee beelines.
         let standoff = e.kind.def().standoff;
-        let to_player_arc = sphere::arc_dist(e.dir, player_dir, planet.radius);
         let steer_target = if standoff > 0.0 && to_player_arc < standoff {
             let (t, _) = sphere::tangent_frame(e.dir);
             let tangent_to = {
@@ -1367,6 +1592,15 @@ pub fn enemy_move(
 
         animate_crowd(&mut e, &mut tf, &planet, player_pos, eff_speed, dt, t_now);
     }
+}
+
+/// The per-frame decays every simulated enemy runs, whoever steers it (`enemy_move`, or a
+/// `bestiary` kind's own mover): contact cooldown, hit-flash, slow and knockback.
+pub fn tick_enemy(e: &mut Enemy, dt: f32) {
+    e.contact_cd = (e.contact_cd - dt).max(0.0);
+    e.flash = (e.flash - dt * 6.0).max(0.0);
+    e.slow = (e.slow - dt * 0.35).clamp(0.0, 0.9);
+    e.knock *= (1.0 - 7.0 * dt).max(0.0);
 }
 
 /// Crowd-tier animation, shared by the host's simulated horde and a client's streamed
@@ -1449,7 +1683,9 @@ pub fn burrower_emerge(
     assets: Res<EnemyAssets>,
     q_player: Query<(Entity, &Transform), With<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
-    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), Without<Player>>,
+    // a tunnelling Trencher wears `Buried` too (every weapon already skips it), but it
+    // surfaces on its own terms (`bestiary::trencher_update`)
+    mut q: Query<(Entity, &Enemy, &mut Buried, &mut Transform), (Without<Player>, Without<crate::bestiary::Trencher>)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -1498,7 +1734,9 @@ pub fn enemy_contact(
         return;
     }
     for (entity, mut e, tf) in &mut q {
-        if e.contact_cd > 0.0 || e.speed == 0.0 {
+        // no bite at all (a Beacon Tick's touch is `bestiary::tick_latch`'s): a zero hit would
+        // still spend the victim's i-frames and shield recharge
+        if e.contact_cd > 0.0 || e.speed == 0.0 || e.damage <= 0.0 {
             continue;
         }
         let reach = e.scale * 0.55 + PLAYER_RADIUS + 0.25;
@@ -1579,7 +1817,8 @@ pub fn beamer_attack(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     q_player: Query<(Entity, &Player, &crate::run::PlayerState, &Transform, Has<InStorm>), Without<Enemy>>,
-    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), Without<Buried>>,
+    // the Longshot Beamer Prime wears a Beamer (for the shared aim line) but aims itself
+    mut q: Query<(Entity, &Enemy, &mut Beamer, &Transform), (Without<Buried>, Without<crate::bestiary::PrimeSight>)>,
     q_lines: Query<(Entity, &AimLine)>,
 ) {
     let dt = time.delta_secs();
@@ -1697,7 +1936,6 @@ pub fn aim_line_visuals(
     mut q_lines: Query<(Entity, &mut AimLine, &mut Transform), Without<Enemy>>,
 ) {
     let dt = time.delta_secs();
-    let period = AIM_LINE_LEN / AIM_DASHES as f32;
     for (le, mut line, mut ltf) in &mut q_lines {
         let Ok((e, b, tf)) = q.get(line.owner) else {
             commands.entity(le).try_despawn();
@@ -1706,16 +1944,23 @@ pub fn aim_line_visuals(
         if b.aim == Vec3::ZERO {
             continue;
         }
-        let locked = b.charging <= BEAMER_LOCK_SECS;
+        // the Prime's line is longer, its charge and lock its own
+        let (len, charge_secs, lock_secs) = if e.kind == EnemyKind::BeamerPrime {
+            (PRIME_AIM_LINE_LEN, PRIME_CHARGE_SECS, PRIME_LOCK_SECS)
+        } else {
+            (AIM_LINE_LEN, BEAMER_CHARGE_SECS, BEAMER_LOCK_SECS)
+        };
+        let period = len / AIM_DASHES as f32;
+        let locked = b.charging <= lock_secs;
         if !locked {
             line.march = (line.march + dt * AIM_DASH_SPEED / period).fract();
         }
-        let charge = 1.0 - (b.charging / BEAMER_CHARGE_SECS).clamp(0.0, 1.0);
+        let charge = 1.0 - (b.charging / charge_secs).clamp(0.0, 1.0);
         let width = if locked { 0.26 } else { 0.09 + charge * 0.1 };
         // The dash mesh runs from the origin along local -Z (frame_quat's forward).
         ltf.translation = tf.translation + e.dir * 1.0 + b.aim * (line.march * period);
         ltf.rotation = sphere::frame_quat(e.dir, b.aim);
-        ltf.scale = Vec3::new(width, width, AIM_LINE_LEN);
+        ltf.scale = Vec3::new(width, width, len);
     }
 }
 
@@ -1799,26 +2044,50 @@ pub fn enemy_projectiles(
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
     q_player: Query<(Entity, &Transform), With<Player>>,
-    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform), Without<Player>>,
+    mut q: Query<(Entity, &mut EnemyProjectile, &mut Transform, Option<&mut crate::bestiary::CurveShot>), Without<Player>>,
     mut writer: MessageWriter<PlayerHitMsg>,
+    particles: Option<Res<ParticleAssets>>,
+    mut telemetry: ResMut<crate::bestiary::BestiaryTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
     let ppos: Vec<(Entity, Vec3)> = q_player.iter().map(|(e, t)| (e, t.translation)).collect();
-    for (e, mut p, mut tf) in &mut q {
+    for (e, mut p, mut tf, curve) in &mut q {
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(e).despawn();
             continue;
         }
-        let r = planet.surface(p.dir) + p.hover;
+        // A Beamer Prime's railbolt flies a line of fire over the curve instead of hugging
+        // the ground: any terrain that rises into that line stops it (the hill's shadow).
+        let r = match &curve {
+            Some(c) => c.radius(),
+            None => planet.surface(p.dir) + p.hover,
+        };
         let vel = p.heading * p.speed;
         let (nd, nv) = sphere::advance(p.dir, vel, r, dt);
         p.dir = nd;
         p.heading = nv.normalize_or_zero();
-        tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        if let Some(mut c) = curve {
+            c.flown += p.speed * dt;
+            let r = c.radius();
+            tf.translation = p.dir * r;
+            tf.rotation = sphere::frame_quat(p.dir, p.heading);
+            if planet.surface(p.dir) > r - PRIME_BOLT_CLEARANCE {
+                if p.damage > 0.0 {
+                    telemetry.prime_bolts_shadowed += 1; // the host's own shot, not a client's copy
+                }
+                if let Some(pa) = &particles {
+                    fx::burst(&mut commands, pa, tf.translation, p.dir, Pcolor::Danger, 10, 5.0);
+                }
+                commands.entity(e).despawn();
+                continue;
+            }
+        } else {
+            tf.translation = planet.surface_point(p.dir) + p.dir * p.hover;
+        }
         // first astronaut it touches eats it (a shot is consumed by one body)
         if let Some((pe, _)) = ppos
             .iter()
