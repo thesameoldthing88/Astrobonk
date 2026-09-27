@@ -154,6 +154,7 @@ All flags are plain `std::env::args()` tokens; there is no argument parser. Seve
 | `--autopick` | none | Windowed | Takes option 1 of every card panel and closes chest/shop panels immediately | `src/main.rs:166-171,455-480` |
 | `--stagenow` | none | Windowed | Boot tier becomes 3 (Moon, Mars, Dark Moon) and, about 20 s into stage 1, the host requests stage 2 | `src/main.rs:160-165,381-385,484-500` |
 | `--bossnow` | none | Windowed | On the first in-run frame (host or solo), winds the clock to `BOSS_MARK + 4` s and marks both minibosses as spawned | `src/main.rs:504-520` |
+| `--warp` (with `--dev`) | `noon`, `dusk` or `night` | Windowed | A second into the run, sets the local astronaut (host/solo only) where the sun stands high, just on the lit side of the terminator, or deep in the night, facing away from the sun — the toon look's windowed checks (section 16.9) | `dev_warp` in `src/main.rs` |
 
 ### 3.2 Flag interactions and traps
 
@@ -265,6 +266,7 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `src/headless.rs` | 382 | Smoke harness | Section 4 |
 | `src/sphere.rs` | 176 | Spherical math and the analytic terrain | `hills` `:26-37`; `hash_dir` `:59-68`; `Terrain` `:72-111`; `tangent_frame` `:114-119`; `frame_quat` `:122-126`; `step_toward` `:130-137`; `advance` `:141-151`; `arc_dist` `:154-156`; `offset_dir` `:159-165`; `fib_sphere` `:168-176` |
 | `src/planet.rs` | 517 | Stage world: `StageScoped`, prop colliders, `CurrentPlanet`, the terrain mesh, prop/flora/sky/sun spawning | `PropColliders::resolve` `:33-55`; `CurrentPlanet` `:59-89`; `despawn_stage` `:91-95`; `planet_mesh` `:98-130`; `spawn_stage` `:143-503`; `random_dir` `:505-517` |
+| `src/toon.rs` | 440 | The toon look (P36): `ToonPlugin`, the bevy_pbr lighting patch, the ink/rim render-graph pass (`src/toon_outline.wgsl`), per-world grading, the camera bundle | Section 16.9 |
 | `src/meshkit.rs` | 224 | Procedural mesh compositor (bakes primitives into one vertex-coloured `Mesh`) and `icosphere()` | `MeshData` `:13-173`; `icosphere` `:182-224` |
 | `src/player.rs` | 875 | The astronaut: components, spawning, the rig, local input gathering, movement and physics, the animator, the camera, cursor lock, per-player upkeep | Section 8; `spawn_player` `:117-175`; `build_astronaut_rig` `:183-313`; `gather_local_input` `:382-414`; `player_input` `:418-520`; `player_physics` `:523-589`; `animate_rig` `:617-706`; `camera_rig` `:747-824`; `cursor_control` `:827-839`; `player_upkeep` `:842-875` |
 | `src/enemies.rs` | 1663 | The horde and bosses: components, assets, spatial hash, spawn director, steering, crowd animation, every enemy attack, the Craterpillar and Anubot, telegraphs, hit-flash, the DEV boss key | `director_spawn` `:539-626`; `spawn_boss` `:628-714`; `enemy_move` `:1019-1121`; `animate_crowd` `:1129-1193` |
@@ -309,6 +311,7 @@ If none fail it prints `SMOKE OK` and exits 0; otherwise it prints each `FAIL: .
 | `net::NetPlugin` | `src/net.rs:341-458` | `RepliconPlugins`, `RepliconRenetPlugins`, replication rules, all wire messages, identity, run sync, build sync, grants, input routing, seating, `--netlog` |
 | `remote::RemoteVisualsPlugin` | `src/remote.rs:43-57` | Teammate rigs on clients |
 | `netenemy::EnemyStreamPlugin` | `src/netenemy.rs:150-222` | Stream lanes and the client proxy chain |
+| `toon::ToonPlugin` | `src/toon.rs` | Cel lighting patch, ink/rim pass (render app: `RenderStartup` pipeline, `InkNode` between tonemapping and FXAA), per-world grade, sun tracking. Windowed only |
 | `playlog::PlayLogPlugin` | `src/playlog.rs:50-83` | Session log and panic hook (the log file is opened in `build`, before the app runs) |
 
 Everything else is registered directly in `main()` (`src/main.rs:90-333`).
@@ -1787,17 +1790,18 @@ args    : target/release/astrobonk.exe --netlog
 
 ### 16.1 Zero-asset policy
 
-Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` use. Meshes come from Bevy primitives (`Mesh::from(Sphere/Cuboid/Cylinder/Cone/Torus/Capsule3d)`) or the `meshkit` compositor; materials are plain `StandardMaterial`s with no textures; every sound is synthesized into an in-memory WAV (section 17); UI text uses Bevy's built-in default font. Colour comes from material base colours, vertex colours and emissive values driven through HDR bloom.
+Nothing is loaded from disk: there is no `assets/` folder. The one `AssetServer` use is the toon ink shader, compiled into the binary with `embedded_asset!` (section 16.9). Meshes come from Bevy primitives (`Mesh::from(Sphere/Cuboid/Cylinder/Cone/Torus/Capsule3d)`) or the `meshkit` compositor; materials are plain `StandardMaterial`s with no textures; every sound is synthesized into an in-memory WAV (section 17); UI text uses Bevy's built-in default font. Colour comes from material base colours, vertex colours and emissive values driven through HDR bloom.
 
 ### 16.2 Camera and post-processing
 
 | Item | Value | Where |
 |---|---|---|
 | Camera | One `Camera3d` for the whole process, marked `PlayerRig` | `src/main.rs:337-346` |
-| HDR and bloom | `Hdr` component, `Bloom::NATURAL` | same |
+| HDR and bloom | `Hdr` component, `Bloom::NATURAL` at `BLOOM_INTENSITY` 0.1 (0.04 under flash reduction or photosensitivity) with a soft prefilter threshold (`BLOOM_THRESHOLD` 0.6), so only suns, stars, glows and flashes bloom | `setup_camera` in `src/main.rs`; `fx::apply_fx_settings` |
 | Tonemapping | `AcesFitted` | same |
+| Toon look (P36) | `toon::camera_bundle()`: `DepthPrepass` + `NormalPrepass` (read by the ink pass), `Msaa::Off` + `Fxaa`, `ShadowFilteringMethod::Hardware2x2` (crisp cel shadows), `ColorGrading`, `ToonInk`. See 16.9 | `src/toon.rs` |
 | Field of view | Default perspective (π/4); widens ×1.09 while sliding, eased at rate 10 | `src/player.rs:762-770` |
-| Clear colour | Not set, so Bevy's default grey shows behind the starfield. `PlanetDef.sky` exists but is never read | `src/content/planets.rs:35` |
+| Clear colour | `ClearColor` is the stage planet's `PlanetDef.sky`, set by `toon::apply_world_look` whenever `CurrentPlanet` changes (the Moon's sky before any run) | `src/toon.rs` |
 | Chase camera | Distance 7.5, height term `1.28` (`0.4 × CAM_HEIGHT`), pitch 0.12-1.25 rad (default 0.55), eased at stiffness 14 in real time; target clamped 1.2 m above terrain; looks at `player + 1.2·up + 2·forward`; aims from the unshaken position | `src/player.rs:747-824` |
 | Screenshake | Positional only, applied after aiming: `trauma² × shake_scale` × a few sines along right and up. Trauma decays 1.6/s | `src/player.rs:817-823`; `src/fx.rs:7-20` |
 
@@ -1805,7 +1809,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 
 | Light | Settings | Where |
 |---|---|---|
-| Ambient | `GlobalAmbientLight`, colour (0.65, 0.7, 0.9), brightness 80: dim on purpose so the night side is dark | `src/main.rs:81-85` |
+| Ambient | `GlobalAmbientLight`: the night side's only light, re-graded per world from `PlanetKind::look()` (`night`, `night_brightness` 60-70) by `toon::apply_world_look`; dim on purpose so the night side is dark and the flashlight is the read | `src/content/planets.rs`, `src/toon.rs` |
 | Sun | One `DirectionalLight` per stage, planet `sun` colour, 9,000 lux, shadows on, from a **fixed** direction (-0.55, 0.35, -0.75); there is no day/night rotation. A visible unlit sun disc sits 1600 m away | `src/planet.rs:477-500` |
 | Flashlight | Every astronaut rig (local, host-side peers, and client teammate rigs) carries a `SpotLight`: warm white, intensity 6,000,000, range 55 m, inner 0.22 rad, outer 0.55 rad, **shadows on** | `src/player.rs:297-311` |
 | Emissive glow | Visors, crystals, beacon lights, pickups, projectiles, telegraphs, particles, stars, Earth and the sun rely on emissive colour plus bloom | Section 16.5 |
@@ -1828,7 +1832,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 
 **Colour convention.** Vertex colour multiplies the material's base colour: pass `Color::WHITE` for body parts (the material colour shows fully) and darker greys for accents (visors, joints, undersides), so one material per kind still reads as a detailed model (`src/meshkit.rs:5-7`; `BODY`/`DARK`/`MID` at `src/enemies.rs:220-223`).
 
-**Winding caveat (M12, code-derived).** The ±X and ±Y faces of `add_box` and every cylinder and cone triangle appear to be wound clockwise when seen from outside, which with default back-face culling would render those surfaces inside-out (correct silhouette, wrong shading). Not visually confirmed.
+**Winding.** Every helper winds counter-clockwise seen from outside (Bevy's front face); `build_ccw` is now the same as `build`. Until P36 the ±X/±Y box faces and every cylinder and cone triangle were clockwise, so back-face culling drew those surfaces inside-out (M12). The unit test `meshkit::tests::every_shape_winds_outward` guards it (`cargo test meshkit`).
 
 ### 16.5 Materials
 
@@ -1843,7 +1847,7 @@ Nothing is loaded from disk: there is no `assets/` folder and no `AssetServer` u
 | Weapons | Per weapon: unlit, alpha-blend, emissive 3× its colour. Aura bubble: alpha 0.12, emissive 0.6×, double-sided, no culling | `src/combat.rs:71-94` |
 | Pickups | Unlit emissive: gem green (big gem blue), coin gold, silver pale blue, food red, powerup purple | `src/pickups.rs:53-70` |
 | Particles | 7 unlit emissive colours (×2.5) | `src/fx.rs:103-129` |
-| Terrain | White base, roughness 0.95, vertex colours | `src/planet.rs:158-163` |
+| Terrain | White base, roughness 0.95, vertex colours in `TOON_TERRAIN_BANDS` flat height steps; shading normals leaned toward the radial (`TOON_TERRAIN_NORMAL_DETAIL`) so the cel bands follow the planet's curve | `planet_mesh`, `toon_height_band`, `toon_terrain_normals` in `src/planet.rs` |
 | Scenery | Rocks (`ground_low`, darker variant), emissive crystals in the planet's `enemy_tint`, metallic wrecks and beacons, unlit red beacon lights, flora pairs per style (GlowShrooms emissive), unlit stars, emissive Earth, unlit sun | `src/planet.rs:172-500` |
 | Astronaut | Per rig: suit (roughness 0.7), emissive visor, backpack, metallic tool, unlit lens (5 materials) | `src/player.rs:191-296` |
 | Interactables | Per spawn: an emissive shape material and a darker pedestal material in the kind's colour; teleporter unlit alpha-blend; charge rings unlit alpha-blend cyan | `src/interact.rs:198-233,275-282,310-317` |
@@ -1895,6 +1899,19 @@ Bosses: the Craterpillar's segments ripple (`sin(3.9t - 0.8i)`, lift `0.40·scal
 | Hurt vignette | Full-screen red with alpha `min(0.55·iframes, 0.4)` | `src/ui/hud.rs:379-381` |
 
 ---
+
+### 16.9 The toon look (P36)
+
+Locked direction #7. Two central mechanisms in `src/toon.rs` (`ToonPlugin`, windowed app only; presentation, never simulation, so it has no net gating and no wire path), so every mesh any system spawns is toon without touching a material site:
+
+| Part | How | Tuning |
+|---|---|---|
+| Cel lighting | `patch_pbr_lighting` rewrites bevy_pbr's `bevy_pbr::lighting` shader module in `Assets<Shader>` once it has loaded (Bevy's hot-reload path recompiles every pipeline that imports it). Three anchored lines: the sun's and point/spot lights' N·L go through `toon_band` (none / mid / full), specular through `toon_spec` (a hard highlight or none), the spot cone through `toon_cone` (outer ring + core). Each anchor must match exactly once or nothing is patched and a `TOON lighting NOT applied` warning is logged; success logs `TOON lighting: bevy_pbr::lighting patched (3 sites)`. Unlit materials never run it. Pure fragment ALU: crowd enemies stay one instanced draw per kind | `TOON_BAND_*`, `TOON_SPEC_EDGE`, `TOON_CONE_*` in `config.rs` |
+| Ink + rim | `InkNode`, a fullscreen render-graph pass between `Node3d::Tonemapping` and `Node3d::Fxaa` (`src/toon_outline.wgsl`, embedded). Silhouettes: second difference of reverse-Z depth relative to the pixel's depth (≈0 on any plane, however grazing). Creases: normal-prepass turn against the four neighbours. Rim: pixels within 2-3 line widths inside a silhouette whose normal faces the sun (`track_sun` feeds the sun direction, colour and Devoured-Sun dimming). Faded out between `TOON_INK_FADE` metres, so the starfield and sun disc never ink. Line width scales with window height; ×`TOON_INK_HIGH_CONTRAST` in the §13 high-contrast mode | `TOON_INK_*`, `TOON_RIM_STRENGTH` |
+| Per-world grade | `PlanetKind::look()` → `ToonLook { ink, night, night_brightness, saturation, exposure }`; `apply_world_look` applies it with `PlanetDef.sky` as the clear colour whenever `CurrentPlanet` changes (enter_run, every stage transition, host and client alike). Exhaustive match: a new planet must pick a look | `src/content/planets.rs` |
+| Terrain | Height colours in flat steps; shading normals leaned toward the radial (16.5) | `TOON_TERRAIN_*` |
+
+Windowed checks: `--dev --warp noon|dusk|night` sets the local astronaut (host/solo) down under a high sun, just inside the terminator, or deep in the night, facing away from the sun (`dev_warp` in `src/main.rs`).
 
 ## 17. Audio and music synthesis
 

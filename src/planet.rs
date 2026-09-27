@@ -111,8 +111,9 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
         let h = terrain.height(dir);
         let r = def.radius * (1.0 + def.hill_amp * h);
         positions.push([dir.x * r, dir.y * r, dir.z * r]);
-        // color by height band: crater floors dark, peaks bright
-        let t = (h * 0.38 + 0.5).clamp(0.0, 1.0);
+        // color by height band: crater floors dark, peaks bright — in flat painted steps
+        // (the toon look's contour bands), not a smooth ramp
+        let t = toon_height_band((h * 0.38 + 0.5).clamp(0.0, 1.0));
         let c = if t < 0.5 {
             mix(low, mid, t * 2.0)
         } else {
@@ -126,7 +127,34 @@ fn planet_mesh(def: &PlanetDef, terrain: &Terrain) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(faces));
     mesh.compute_smooth_normals();
+    toon_terrain_normals(&mut mesh);
     mesh
+}
+
+/// Snap a 0..1 terrain height to one of TOON_TERRAIN_BANDS flat color steps, each blending
+/// into the next over a sliver of height — a vertex apart, so the steps read as painted
+/// contour lines rather than as a staircase of triangles.
+fn toon_height_band(t: f32) -> f32 {
+    let n = crate::config::TOON_TERRAIN_BANDS as f32;
+    let x = t * n;
+    let step = x.floor().min(n - 1.0);
+    let edge = ((x - step - (1.0 - 0.15)) / 0.15).clamp(0.0, 1.0);
+    ((step + edge) / (n - 1.0)).clamp(0.0, 1.0)
+}
+
+/// Cel bands quantize N·L, so every small bump in a noisy normal field turns into a speckle
+/// of triangles flipping between bands. Lean the shading normals toward the planet's own
+/// radial normal: the terminator becomes one clean line across the world and only the big
+/// hills and crater walls step into their own bands. Visual only — collision stays analytic.
+fn toon_terrain_normals(mesh: &mut Mesh) {
+    let Some(pos) = mesh.attribute(Mesh::ATTRIBUTE_POSITION).and_then(|a| a.as_float3()) else { return };
+    let radial: Vec<Vec3> = pos.iter().map(|p| Vec3::from(*p).normalize_or_zero()).collect();
+    if let Some(bevy::mesh::VertexAttributeValues::Float32x3(nrm)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {
+        for (n, up) in nrm.iter_mut().zip(radial) {
+            let lean = up.lerp(Vec3::from(*n), crate::config::TOON_TERRAIN_NORMAL_DETAIL).normalize_or_zero();
+            *n = lean.to_array();
+        }
+    }
 }
 
 fn mix(a: LinearRgba, b: LinearRgba, t: f32) -> LinearRgba {
