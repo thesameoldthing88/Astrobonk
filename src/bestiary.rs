@@ -699,9 +699,11 @@ pub fn skimmer_update(
         } else {
             s.t += dt;
             let f = (s.t / SKIM_DIVE_SECS).min(1.0);
-            // it falls faster as it goes: the last third is the fast part
-            e.dir = s.from.slerp(s.to, f.powf(1.4)).normalize();
-            s.alt = SKIM_ALTITUDE * (1.0 - f).powf(1.6);
+            // over the mark first, then down on it: it covers the ground early and drops late,
+            // so the last stretch is a plunge from above — not a skim along the ground through
+            // the camera behind its mark
+            e.dir = s.from.slerp(s.to, 1.0 - (1.0 - f) * (1.0 - f)).normalize();
+            s.alt = SKIM_ALTITUDE * (1.0 - f * f);
             vis.heading = tangent(s.to - s.from, e.dir);
             if f >= 1.0 {
                 for m in &marks {
@@ -1561,7 +1563,7 @@ pub fn dev_spawn_enemies(
     assets: Res<EnemyAssets>,
     planet: Res<CurrentPlanet>,
     run: Res<RunState>,
-    me: Query<&Player, With<LocalPlayer>>,
+    mut me: Query<&mut Player, With<LocalPlayer>>,
     q_party: Query<(), With<Player>>,
     mut next: Local<f32>,
     mut kinds: Local<Option<Vec<EnemyKind>>>,
@@ -1571,7 +1573,8 @@ pub fn dev_spawn_enemies(
     if kinds.is_empty() || now < *next {
         return;
     }
-    let Ok(p) = me.single() else { return };
+    let Ok(mut p) = me.single_mut() else { return };
+    if *next == 0.0 { p.dir = (crate::planet::sunward() + Vec3::Y * 0.3).normalize(); } // TEMP daylight
     *next = now + 12.0;
     let sc = Scaling::for_run(&run, q_party.iter().count());
     let mut rng = rand::thread_rng();
