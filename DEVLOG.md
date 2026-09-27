@@ -1,5 +1,28 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P18 lands: the §11 co-op rules
+- **P18:** a downed astronaut becomes a **Tumbling Beacon** — it rolls down the terrain's fall
+  line under a planet-high flare (faded near the camera) while its **Static Meter** fills; a
+  teammate standing in the ring for 3 s revives it at 50% HP and gets **Hero's Adrenaline**
+  (+20% speed, 5 s); a full meter means The Static claims it until the next teleporter, where it
+  rejoins at 50%. The §11 party table scales crowd and boss HP; spawns anchor on standing
+  astronauts. **Friendly physics** (no friendly damage): swings nudge, blasts and Slams pop,
+  cryo fields chill, Tesla arcs jolt. **Drop-in**: a peer seated 20 s+ into a run falls from
+  orbit at half the squad's level and fights on autopilot while idle. **STATIC CASCADE** (two
+  storm-callers 120°+ apart wrap the planet in a lightning belt) and three named duos (Deep
+  Freeze Protocol, Magnet Circus, Rivet & Rescue) with a squad callout on results. Squad HUD,
+  Beacon edge markers, the downed player's own panel.
+- **Co-op wire:** PlayerVitals carries the down/claim/meter/revive/adrenaline/chill/grace
+  fields; RunSnapMsg the cascade charge and squad tally; five hazard-lane one-shots (Revived,
+  Shove, Cascade, Duo, DropIn); `PROTOCOL_ID` 0xA570B0_C.
+- **Reconciled on landing:** P12's `HitMsg.weapon` and P18's `HitMsg.by` answered the same
+  question; one `HitBy` remains with `HitMsg::weapon()` for P12's readers. A Beacon no longer
+  lifesteals from shots in flight, regenerates, or takes hits that would reset its meters.
+- **Verified:** smoke 6/6; `--revive/--cascade/--duos --coop2`, `--dropin`, `--coop4`, plus
+  `--weapons base|evolve`, `--bestiary all --coop2`, `--daynight --coop2`, `--hazards`,
+  `--overflow` on the merged tree; a two-instance run with `--dev --downpeer` (a revive over the
+  wire, then a real party wipe at 70 s).
+
 ## 2026-09-27 — P08 lands: seven new enemies and per-world spawn tables
 - **P08:** the batch-1 §9 bestiary, each with its own behaviour, silhouette and one emissive
   accent: Rollo (great-circle roller that runs away downhill and bonks on walls), Trencher

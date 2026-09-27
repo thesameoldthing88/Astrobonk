@@ -67,7 +67,7 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P15 World 4: PEBBLE + THE HAND | ☐ |
 | P16 Interactables & lore objects | ☐ |
 | P17 World 5: BRRRR-9 + THE ZAMBONI | ☐ |
-| P18 Co-op revive, scaling, drop-in, co-op ultimates | ☐ |
+| P18 Co-op revive, scaling, drop-in, co-op ultimates | ✅ (landed by the lead after the weekly agent limit, no independent review). Tumbling Beacon + 3 s revive + Hero's Adrenaline, Static Meter/claim/rejoin, §11 party HP table, friendly physics, drop-in at half the squad's level with autopilot, STATIC CASCADE, three named duos; squad HUD. Closed M15, L17-L20, L39; D10 settled. Fixed on landing: Beacons no longer lifesteal, regen or take hits; P12's and P18's hit attribution merged into one `HitBy`. Gaps: 3-4 player balance not playtested; only three duos exist (§11 lists more) |
 | P19 Branching campaign & tiers | ↪ superseded by P33 (planets are the levels) |
 | P20 Bespoke minibosses (2 per world) | ☐ |
 | P21 Quests ~50 + mission wall + unlock gating | ☐ |
