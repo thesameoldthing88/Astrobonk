@@ -13,7 +13,8 @@
 //! Every system that sizes an enemy, a boss or the spawn budget reads a [`Scaling`] built
 //! here instead of doing its own arithmetic. Later layers (Ascension Depth — P23, weekly
 //! mutators — P23, co-op per-enemy and boss HP — P18, Farside's elite bump — P07) multiply
-//! into the fields of `Scaling` inside [`Scaling::new`], never at call sites.
+//! into the fields of `Scaling` inside [`Scaling::new`], never at call sites — as The Static
+//! Radio's "angrier Static" (§7) already does.
 //!
 //! Pure functions of plain numbers so the headless self-check can pin the curve shapes.
 
@@ -35,6 +36,8 @@ pub struct ScalingInputs {
     pub delta: f32,
     /// Astronauts in the run (1–4).
     pub party: usize,
+    /// Someone carries The Static Radio: The Static comes angrier (§7).
+    pub static_radio: bool,
 }
 
 impl ScalingInputs {
@@ -45,6 +48,7 @@ impl ScalingInputs {
             planet: run.planet().def().threat,
             delta: difficulty_points(run),
             party: party.max(1),
+            static_radio: run.static_radio,
         }
     }
 }
@@ -77,6 +81,11 @@ pub struct Scaling {
     pub boss_dmg: f32,
     /// Party multiplier alone — also sizes the live-enemy cap.
     pub party_spawn: f32,
+    /// On top of everything above, for The Static's ghosts only: HP, damage and spawn-rate
+    /// multipliers (The Static Radio makes it "angrier", §7).
+    pub static_hp: f32,
+    pub static_dmg: f32,
+    pub static_rate: f32,
 }
 
 impl Scaling {
@@ -101,6 +110,9 @@ impl Scaling {
             boss_hp: depth_hp * i.planet * delta_hp,
             boss_dmg: depth_dmg * i.planet * delta_dmg,
             party_spawn,
+            static_hp: if i.static_radio { STATIC_RADIO_HP } else { 1.0 },
+            static_dmg: if i.static_radio { STATIC_RADIO_DMG } else { 1.0 },
+            static_rate: if i.static_radio { STATIC_RADIO_RATE } else { 1.0 },
         }
     }
 
@@ -143,7 +155,7 @@ pub fn beat_modifier(miniboss_alive: bool, exhale_left: f32) -> f32 {
 
 /// Headless self-check: the curve SHAPES the GDD asks for. Returns the first violated rule.
 pub fn self_check() -> Result<(), String> {
-    let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1 };
+    let base = ScalingInputs { t_min: 0.0, depth: 0.0, planet: 1.0, delta: 0.0, party: 1, static_radio: false };
     let s0 = Scaling::new(base);
     if (s0.hp - SCALE_HP_BASE).abs() > 1e-4
         || (s0.dmg - SCALE_DMG_BASE).abs() > 1e-4
@@ -155,7 +167,7 @@ pub fn self_check() -> Result<(), String> {
         return Err("elite chance must start at 0".into());
     }
     // exact formula at a probe point: t=10, d=2, T=1.25, Δ=5
-    let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, party: 1 });
+    let p = Scaling::new(ScalingInputs { t_min: 10.0, depth: 2.0, planet: 1.25, delta: 5.0, ..base });
     let want_hp = SCALE_HP_BASE * 2.1f32.powf(1.35) * 1.4 * 1.25 * 1.3;
     let want_dmg = SCALE_DMG_BASE * 1.8 * 1.3 * 1.25 * 1.25;
     let want_spawn = 2.4 * 1.2 * 1.2;
@@ -180,6 +192,11 @@ pub fn self_check() -> Result<(), String> {
     }
     if Scaling::new(ScalingInputs { t_min: 500.0, depth: 9.0, delta: 99.0, ..base }).elite_chance > ELITE_CHANCE_CAP {
         return Err("elite chance exceeded its cap".into());
+    }
+    // The Static Radio angers The Static only — the living horde is untouched.
+    let radio = Scaling::new(ScalingInputs { static_radio: true, ..base });
+    if radio.static_hp <= 1.0 || radio.static_dmg <= 1.0 || radio.static_rate <= 1.0 || radio.hp != s0.hp || radio.spawn != s0.spawn {
+        return Err("The Static Radio must anger The Static and nothing else".into());
     }
     // Rate_base walks the arc beats and never dips outside the breathing modifiers.
     if (spawn_rate_base(600.0, false, 0.0) - SPAWN_RATE_BEATS[0].1).abs() > 1e-4

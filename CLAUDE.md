@@ -64,7 +64,8 @@ Status/history: `PROJECT_STATUS.md`, `DEVLOG.md`, and the NETCODE NOTES at the b
 ## Module map
 `sphere` math · `planet` worldgen/props/lighting · `player` controller+camera+rig ·
 `enemies` horde/bosses/hazards · `combat` weapons/damage · `pickups` drops/magnet ·
-`run` run+player state, upgrade rolls · `director` clock/stages/results · `interact`
+`run` run+player state, upgrade/loot rolls, item grades · `items` what the §7 items DO (procs,
+cursed levers, the one death-save resolver) · `director` clock/stages/results · `interact`
 chests/shrines/vendors · `events_world` planetary events · `comet` Comet Combo · `content/`
 data tables · `save` meta save · `ui/` hud/panels/menus/settings/numbers · `fx` shake/hitstop/
 particles · `audio`/`music` synth · `net` transport/replication · `netenemy` horde/boss/hazard/

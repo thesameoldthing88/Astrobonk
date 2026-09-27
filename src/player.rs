@@ -74,6 +74,7 @@ pub struct InputIntent {
     pub jump: bool,      // edge-triggered (true only on the frame pressed)
     pub slide: bool,     // edge-triggered
     pub interact: bool,  // edge-triggered
+    pub jump_held: bool, // level: jump is down this frame (Anti-Grav Boots hover)
 }
 
 #[derive(Component)]
@@ -106,12 +107,33 @@ pub struct CamRig {
     /// player moves so a fixed aim stays fixed — no per-frame tangent-frame drift/flip.
     pub forward: Vec3,
     pub pitch: f32,
+    /// The local body followed last frame and where it stood. A NEW body (each stage spawns
+    /// one) is picked up as it is; the same body jumping metres in one frame was teleported.
+    pub last_body: Option<(Entity, Vec3)>,
+    /// The point the rig centred on last frame: the body, or partway along a glide.
+    pub focus: Vec3,
+    /// A teleport glide in flight: the focus it left from, and seconds into it.
+    pub glide: Option<(Vec3, f32)>,
 }
 
 impl Default for CamRig {
     fn default() -> Self {
-        Self { forward: Vec3::NEG_Z, pitch: 0.55 }
+        Self { forward: Vec3::NEG_Z, pitch: 0.55, last_body: None, focus: Vec3::ZERO, glide: None }
     }
+}
+
+/// Where a teleport glide's focus is, `s` (0..1, eased) of the way from `from` to `to`:
+/// along the great circle between them with the radius eased, so the frame sweeps over the
+/// ground instead of cutting through the planet. An exact antipode has no unique great
+/// circle, so that one goes forward over the top, the way the camera was looking.
+fn glide_point(from: Vec3, to: Vec3, s: f32, forward: Vec3) -> Vec3 {
+    let (a, b) = (from.normalize_or_zero(), to.normalize_or_zero());
+    let axis = a.cross(b).try_normalize().unwrap_or_else(|| {
+        let f = (forward - a * forward.dot(a)).try_normalize().unwrap_or_else(|| sphere::tangent_frame(a).0);
+        a.cross(f).normalize()
+    });
+    let dir = Quat::from_axis_angle(axis, a.angle_between(b) * s) * a;
+    dir * (from.length() + (to.length() - from.length()) * s)
 }
 
 pub fn spawn_player(
@@ -164,12 +186,14 @@ pub fn spawn_player(
             InputIntent::default(),
             RigHero(character),
             crate::comet::CometState::default(),
+            crate::items::ItemProcs::default(),
             // what crosses the wire (bundled: a flat tuple would pass Bevy's 15-element cap)
             (
                 crate::net::NetTransform { dir, height: 0.0, facing: sphere::tangent_frame(dir).0, sliding: false },
                 crate::net::PlayerVitals { hp: 0.0, max_hp: 0.0, level: 1, down: false },
                 crate::net::NetHero(crate::net::hero_code(character)),
                 crate::net::NetComet::default(),
+                crate::net::NetItemVis::default(),
                 bevy_replicon::prelude::Replicated,
             ),
             Transform::from_translation(pos),
@@ -441,6 +465,7 @@ pub fn gather_local_input(
     intent.wish = wish.normalize_or_zero();
     intent.forward = fwd;
     intent.jump = keys.just_pressed(KeyCode::Space);
+    intent.jump_held = keys.pressed(KeyCode::Space);
     intent.slide = keys.just_pressed(KeyCode::ControlLeft) || keys.just_pressed(KeyCode::KeyC);
     intent.interact = keys.just_pressed(KeyCode::KeyE);
 }
@@ -552,17 +577,23 @@ pub fn player_input(
 }
 
 /// Integrate motion over the sphere, snap to terrain, drive the transform.
+///
+/// Also where the movement-side items live, because this runs on every body a machine
+/// moves (the host: all; a client: its own, predicted) and so the owner's feel and the
+/// host's truth come out of the same code: Anti-Grav Boots' hover, and the `airborne` /
+/// `descent_m` readings Icarus Boots and Downhill Momentum deal damage from.
 pub fn player_physics(
     time: Res<Time>,
     planet: Res<CurrentPlanet>,
     props: Res<crate::planet::PropColliders>,
-    mut q: Query<(&mut Player, &mut PlayerState, &mut Transform)>,
+    mut telemetry: ResMut<crate::items::ItemTelemetry>,
+    mut q: Query<(&mut Player, &mut PlayerState, &mut crate::items::ItemProcs, &InputIntent, &mut Transform)>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
     }
-    for (mut p, mut run, mut tf) in &mut q {
+    for (mut p, mut run, mut procs, intent, mut tf) in &mut q {
     p.slide_timer = (p.slide_timer - dt).max(0.0);
     p.slide_cd = (p.slide_cd - dt).max(0.0);
     p.coyote = (p.coyote - dt).max(0.0);
@@ -571,8 +602,22 @@ pub fn player_physics(
     // above base run speed? (Nova's "no cooldown while sprinting")
     run.fast_move = p.vel_t.length() > PLAYER_RUN_SPEED * run.move_speed_mult() * 1.08;
 
-    // gravity
-    p.vel_r -= PLAYER_GRAVITY * dt;
+    // Anti-Grav Boots: holding jump once the rise is spent holds the altitude — gravity
+    // simply stops for as long as the airtime's budget lasts.
+    procs.hovering = !p.grounded
+        && intent.jump_held
+        && procs.hover_left > 0.0
+        && p.vel_r <= 0.0
+        && !run.dead
+        && run.has_item(crate::content::items::ItemKind::AntiGravBoots);
+    if procs.hovering {
+        procs.hover_left -= dt;
+        p.vel_r = 0.0;
+        telemetry.hover_secs += dt;
+    } else {
+        // gravity
+        p.vel_r -= PLAYER_GRAVITY * dt;
+    }
 
     // advance over the sphere at current radius
     let r = planet.surface(p.dir) + p.height;
@@ -608,9 +653,17 @@ pub fn player_physics(
         p.grounded = true;
         p.jumps_used = 0;
         p.coyote = 0.12;
+        procs.hover_left = ANTIGRAV_HOVER_SECS;
     } else if p.height > 0.02 {
         p.grounded = false;
     }
+    run.airborne = !p.grounded;
+    if run.airborne {
+        telemetry.airborne_secs += dt;
+    }
+    // altitude above the core, so a crater slope and a fall both count as descent
+    run.descent_m = procs.track_descent(planet.surface(p.dir) + p.height, dt);
+    telemetry.max_descent = telemetry.max_descent.max(run.descent_m);
 
     let up = p.dir;
     let pos = planet.surface_point(p.dir) + up * (p.height + PLAYER_HEIGHT * 0.5);
@@ -784,12 +837,13 @@ pub fn camera_rig(
     planet: Res<CurrentPlanet>,
     phase: Res<RunPhase>,
     save: Res<crate::save::MetaSave>,
-    q_player: Query<(&Player, &Transform), (With<LocalPlayer>, Without<PlayerRig>)>,
+    q_player: Query<(Entity, &Player, &Transform), (With<LocalPlayer>, Without<PlayerRig>)>,
     mut q_cam: Query<&mut Transform, With<PlayerRig>>,
     mut q_proj: Query<&mut Projection, With<PlayerRig>>,
 ) {
-    let Ok((p, ptf)) = q_player.single() else { return };
+    let Ok((pe, p, ptf)) = q_player.single() else { return };
     let Ok(mut cam) = q_cam.single_mut() else { return };
+    let dt = time.delta_secs();
 
     // FOV punch while sliding — speed you can feel
     if let Ok(mut proj) = q_proj.single_mut() {
@@ -801,9 +855,47 @@ pub fn camera_rig(
         }
     }
 
-    let up = p.dir;
+    // The point the rig centres on. Normally the body; after a teleport (Dead Man's
+    // Tether's rewind, P06's blink, a joiner snapped by the host) it GLIDES there over
+    // CAM_TELEPORT_GLIDE_SECS — re-aiming at the new spot in one frame would whip the view
+    // round (camera law: never snap). Walking can't trip it: the threshold rides on speed.
+    let body = ptf.translation;
+    match rig.last_body {
+        Some((e, last)) if e == pe => {
+            let jump = sphere::arc_dist(last.normalize_or_zero(), body.normalize_or_zero(), planet.radius);
+            if jump > CAM_TELEPORT_ARC + p.vel_t.length() * dt * 2.0 {
+                rig.glide = Some((rig.focus, 0.0));
+            }
+        }
+        _ => {
+            // a new body (stage start): take it where it stands
+            rig.focus = body;
+            rig.glide = None;
+        }
+    }
+    rig.last_body = Some((pe, body));
+    let focus = match rig.glide {
+        Some((from, t)) if t + dt < CAM_TELEPORT_GLIDE_SECS => {
+            let t = t + dt;
+            rig.glide = Some((from, t));
+            let s = t / CAM_TELEPORT_GLIDE_SECS;
+            glide_point(from, body, s * s * (3.0 - 2.0 * s), rig.forward)
+        }
+        _ => {
+            rig.glide = None;
+            body
+        }
+    };
+    let up = focus.normalize_or_zero();
+    // Parallel-transport the persistent forward along the focus's move since last frame
+    // (a glide can swing it far), then back onto the current tangent plane.
+    let prev_up = rig.focus.normalize_or_zero();
+    if prev_up != Vec3::ZERO && up != Vec3::ZERO {
+        rig.forward = Quat::from_rotation_arc(prev_up, up) * rig.forward;
+    }
+    rig.focus = focus;
 
-    // Parallel-transport the persistent forward onto the current tangent plane
+    // Keep the persistent forward on the current tangent plane
     // (as the player moves, `up` changes; keep `forward` tangent without twisting it).
     let mut fwd = rig.forward - up * rig.forward.dot(up);
     if fwd.length_squared() < 1e-6 {
@@ -826,7 +918,7 @@ pub fn camera_rig(
 
     // Clamp the TARGET above terrain (pre-lerp) so ground clearance is smoothed by the
     // easing instead of popping the final position.
-    let mut target_pos = ptf.translation + back + lift;
+    let mut target_pos = focus + back + lift;
     let tdir = target_pos.normalize_or_zero();
     if tdir != Vec3::ZERO {
         let min_r = planet.surface(tdir) + 1.2;
@@ -835,13 +927,13 @@ pub fn camera_rig(
         }
     }
 
-    let k = 1.0 - (-CAM_STIFFNESS * time.delta_secs()).exp();
+    let k = 1.0 - (-CAM_STIFFNESS * dt).exp();
     let pos = cam.translation.lerp(target_pos, k);
 
     // Aim from the UNSHAKEN position so shake never becomes rotational jitter,
     // and never re-aim across a degenerate (near-zero) look vector.
     cam.translation = pos;
-    let look_at = ptf.translation + up * 1.2 + fwd * 2.0;
+    let look_at = focus + up * 1.2 + fwd * 2.0;
     if (look_at - pos).length_squared() > 0.25 {
         cam.look_at(look_at, up);
     }

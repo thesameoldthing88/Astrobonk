@@ -32,6 +32,11 @@ pub enum StatKind {
     GoldGain,
     SilverGain,
     ChestDiscount,
+    // appended
+    /// Incoming damage multiplier (+1.0 = double damage taken) — Cracked Helmet.
+    DamageTaken,
+    /// Max HP as a fraction, applied after every flat bonus (−0.2 = −20%) — Widow's Ring.
+    MaxHpMult,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -63,6 +68,10 @@ pub struct Stats {
     pub gold_gain: f32,
     pub silver_gain: f32,
     pub chest_discount: f32, // 0..0.6
+    /// Multiplier on every hit taken, base 1.0.
+    pub damage_taken: f32,
+    /// Multiplier on max HP after every flat bonus, base 1.0 (`PlayerState::recompute_stats`).
+    pub max_hp_mult: f32,
 }
 
 impl Default for Stats {
@@ -95,6 +104,8 @@ impl Default for Stats {
             gold_gain: 1.0,
             silver_gain: 1.0,
             chest_discount: 0.0,
+            damage_taken: 1.0,
+            max_hp_mult: 1.0,
         }
     }
 }
@@ -130,17 +141,9 @@ impl Stats {
             GoldGain => self.gold_gain += v,
             SilverGain => self.silver_gain += v,
             ChestDiscount => self.chest_discount = (self.chest_discount + v).min(0.6),
+            DamageTaken => self.damage_taken += v,
+            MaxHpMult => self.max_hp_mult += v,
         }
-    }
-
-    /// Armor/evasion use diminishing curves and can never hit 100%.
-    pub fn armor_fraction(&self) -> f32 {
-        let a = self.armor.max(0.0);
-        a / (a + 100.0)
-    }
-    pub fn evasion_fraction(&self) -> f32 {
-        let e = self.evasion.max(0.0);
-        e / (e + 100.0)
     }
 }
 
@@ -175,6 +178,8 @@ impl StatKind {
             GoldGain => format!("+{:.0}% Gold Gain", v * 100.0),
             SilverGain => format!("+{:.0}% Silver Gain", v * 100.0),
             ChestDiscount => format!("-{:.0}% Chest Cost", v * 100.0),
+            DamageTaken => format!("+{:.0}% Damage Taken", v * 100.0),
+            MaxHpMult => format!("{:+.0}% Max HP", v * 100.0),
         }
     }
 }

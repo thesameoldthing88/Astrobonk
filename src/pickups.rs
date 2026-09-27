@@ -219,15 +219,19 @@ pub fn pickup_update(
             }
             continue;
         }
-        let owner_id = q_player.get(collector).map(|(_, _, _, _, _)| ()).ok();
-        let _ = owner_id;
+        // Gold goes over the wire AFTER the collector's Gold gain: the joiner adds what it
+        // is told, so a raw amount would silently drop its Golden Antennas and Signal Flare.
+        let mut granted = kind;
         if let Ok((_, _, mut ps, _, _)) = q_player.get_mut(collector) {
+            if let PickupKind::Gold(g) = kind {
+                granted = PickupKind::Gold((g as f32 * ps.stats.gold_gain).round() as u64);
+            }
             collect(&mut run, &mut ps, kind, pos, is_local, &mut numbers, &mut sfx, &mut banners);
         }
         if !is_local {
             // loot picked up by a REMOTE astronaut has to reach that player's machine
             if let Ok(pid) = q_ids.get(collector) {
-                grants.write(crate::net::GrantOut::Loot(pid.0, kind));
+                grants.write(crate::net::GrantOut::Loot(pid.0, granted));
             }
         }
     }

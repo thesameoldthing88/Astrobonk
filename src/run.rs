@@ -141,6 +141,15 @@ pub struct RunState {
     pub result: Option<RunResult>,
     /// Aggregated difficulty from all players (Cursed items/tomes). World-level in co-op.
     pub difficulty: f32,
+    /// Someone in the party carries The Static Radio: The Static comes early and angrier
+    /// (§7). Party-wide like `difficulty`, set by the host each frame (`items::run_wide_items`).
+    pub static_radio: bool,
+    /// Devoured Sun Shard's diegetic lever: how far the day side has shrunk toward total
+    /// night, 0..1. The host advances it; `RunSnapMsg` carries it so both machines light the
+    /// same sky. P07's day/night terminator reads this.
+    pub sun_shrink: f32,
+    /// HOST: seconds a Shard has been carried since the sun last shrank.
+    pub sun_shard_secs: f32,
     /// Character of the local/primary player — kept so menus and results screens
     /// have something to show without querying the world.
     pub character: AstronautKind,
@@ -158,7 +167,7 @@ pub struct PlayerState {
     pub pending_levelups: u32,
     pub gold: u64,
     pub weapons: Vec<WeaponInstance>,
-    pub items: Vec<(ItemKind, u32)>,
+    pub items: Vec<ItemStack>,
     pub stats: Stats,
     pub hp: f32,
     pub shield: f32,
@@ -181,6 +190,42 @@ pub struct PlayerState {
     pub reticle_timer: f32,  // cycles 0..1.5 for Reticle's focus pulse
     pub powerups: Vec<(PowerupKind, f32)>,
     pub dead: bool,
+    // ---- live conditions the conditional items read (refreshed every frame, like
+    // `fast_move`, by player_physics / items::encirclement_scan) ----
+    /// Off the ground — Icarus Boots, Anti-Grav Boots' ring.
+    pub airborne: bool,
+    /// Metres of altitude lost over the last second — Downhill Momentum.
+    pub descent_m: f32,
+    /// Bitmask of the compass octants holding an enemy nearby — Encirclement Bonus.
+    pub encircle_dirs: u8,
+    /// Dead Man's Tether already rewound this run (it is once per run, so it rides the
+    /// sheet across stages rather than the per-stage `items::ItemProcs`).
+    pub tether_used: bool,
+    /// The weapon Second Astronaut's ghost is mirroring. Picked by the host, adopted by a
+    /// client from the replicated `net::NetItemVis`, so its own cosmetic fire matches.
+    pub ghost_weapon: Option<WeaponKind>,
+}
+
+/// Every copy of one item a player holds. Grades are kept per copy because each copy was
+/// rolled on its own (§7): the stack's effect is the SUM of its copies' grade multipliers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ItemStack {
+    pub kind: ItemKind,
+    pub grades: Vec<Rarity>,
+}
+
+impl ItemStack {
+    pub fn count(&self) -> u32 {
+        self.grades.len() as u32
+    }
+    /// Σ grade multipliers — what boosts and proc numbers scale by.
+    pub fn power(&self) -> f32 {
+        self.grades.iter().map(|g| self.kind.grade_mult(*g)).sum()
+    }
+    /// The highest grade held (HUD chip colour, Microwave duplication).
+    pub fn best(&self) -> Rarity {
+        self.grades.iter().copied().max().unwrap_or(self.kind.def().rarity)
+    }
 }
 
 impl RunState {
@@ -215,6 +260,9 @@ impl RunState {
             reward_chest: None,
             result: None,
             difficulty: 0.0,
+            static_radio: false,
+            sun_shrink: 0.0,
+            sun_shard_secs: 0.0,
             character,
         }
     }
@@ -252,6 +300,11 @@ impl PlayerState {
             reticle_timer: 0.0,
             powerups: Vec::new(),
             dead: false,
+            airborne: false,
+            descent_m: 0.0,
+            encircle_dirs: 0,
+            tether_used: false,
+            ghost_weapon: None,
         };
         s.recompute_stats(save, 0);
         s.hp = s.stats.max_hp;
@@ -283,10 +336,11 @@ impl PlayerState {
             Passive::Luck(v) => st.apply(StatKind::Luck, v),
             Passive::Size(v) => st.apply(StatKind::Size, v),
         }
-        // Items
-        for (item, count) in &self.items {
-            for (k, v) in item.def().boosts {
-                st.apply(*k, v * *count as f32);
+        // Items: each boost scaled by the stack's summed grade multipliers
+        for stack in &self.items {
+            let power = stack.power();
+            for (k, v) in stack.kind.def().boosts {
+                st.apply(*k, v * power);
             }
         }
         // Greed shrines (run-global, passed in)
@@ -294,6 +348,8 @@ impl PlayerState {
         st.apply(StatKind::Luck, 0.08 * greed_stacks as f32);
         // Level-ups grant +1 max hp each (genre staple)
         st.apply(StatKind::MaxHp, (self.level - 1) as f32);
+        // Percentage max HP (Widow's Ring) lands on the finished flat total.
+        st.max_hp = (st.max_hp * st.max_hp_mult.max(0.1)).max(1.0);
 
         let hp_frac = if self.stats.max_hp > 0.0 { self.hp / self.stats.max_hp } else { 1.0 };
         self.stats = st;
@@ -312,11 +368,11 @@ impl PlayerState {
         if self.character == AstronautKind::Nova && self.fast_move {
             a += 1.3;
         }
-        a.max(0.1)
+        (a * self.widow_mult()).max(0.1)
     }
 
     pub fn damage_mult(&self) -> f32 {
-        let mut d = self.stats.damage;
+        let mut d = (self.stats.damage + self.conditional_damage()).max(0.1);
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Damage2x) {
             d *= 2.0;
         }
@@ -324,16 +380,71 @@ impl PlayerState {
         if self.character == AstronautKind::Gristle && self.hp < self.stats.max_hp * 0.5 {
             d *= 1.4;
         }
-        d
+        d * self.widow_mult()
+    }
+
+    /// The §7 conditional damage items, additive to the Damage stat like any "+X% dmg".
+    /// They read live conditions (`airborne`, `descent_m`, `encircle_dirs`) that each
+    /// machine refreshes every frame, so the number is the same on the host that deals the
+    /// damage and on the owner's HUD.
+    pub fn conditional_damage(&self) -> f32 {
+        let mut bonus = 0.0;
+        let icarus = self.item_power(ItemKind::IcarusBoots);
+        if icarus > 0.0 {
+            bonus += if self.airborne {
+                config::ICARUS_AIR_BONUS * icarus
+            } else {
+                -config::ICARUS_GROUND_PENALTY * self.item_count(ItemKind::IcarusBoots) as f32
+            };
+        }
+        bonus += config::DOWNHILL_DMG_PER_M * self.descent_m * self.item_power(ItemKind::DownhillMomentum);
+        bonus += config::ENCIRCLE_DMG_PER_DIR
+            * self.encircle_dirs.count_ones() as f32
+            * self.item_power(ItemKind::EncirclementBonus);
+        bonus
+    }
+
+    /// Widow's Ring is live: the ring is worn and the astronaut hangs at 1 HP.
+    pub fn widow_active(&self) -> bool {
+        self.hp > 0.0 && self.hp < config::WIDOW_HP_BAND && self.has_item(ItemKind::WidowsRing)
+    }
+
+    /// Widow's Ring "+30% all stats": one factor every stat accessor applies.
+    pub fn widow_mult(&self) -> f32 {
+        if self.widow_active() {
+            1.0 + config::WIDOW_STAT_BONUS
+        } else {
+            1.0
+        }
     }
 
     /// Effective crit chance — Dr. Reticle's focus pulse guarantees a crit briefly each cycle.
     pub fn crit_chance(&self) -> f32 {
-        let mut c = self.stats.crit_chance;
+        let mut c = self.stats.crit_chance * self.widow_mult();
         if self.character == AstronautKind::Reticle && self.reticle_timer < 0.35 {
             c += 1.0;
         }
         c
+    }
+
+    pub fn crit_damage(&self) -> f32 {
+        self.stats.crit_damage * self.widow_mult()
+    }
+
+    /// The sheet as weapons should read it right now: the scalar stats with Widow's Ring's
+    /// bonus folded in. Weapons clone the sheet once per volley anyway.
+    pub fn live_stats(&self) -> Stats {
+        let mut s = self.stats.clone();
+        let w = self.widow_mult();
+        if w != 1.0 {
+            s.crit_damage *= w;
+            s.proj_speed *= w;
+            s.size *= w;
+            s.duration *= w;
+            s.knockback *= w;
+            s.elite_damage *= w;
+        }
+        s
     }
 
     /// Aura-radius multiplier — Aurora Prime's fields swell while she's sprinting.
@@ -345,17 +456,23 @@ impl PlayerState {
         }
     }
 
-    /// Armor after hero mechanics — Old Ironclad's plating doubles when badly hurt.
+    /// Armor after hero mechanics — Old Ironclad's plating doubles when badly hurt. Armor
+    /// and evasion use diminishing curves and can never reach 100%.
     pub fn effective_armor_fraction(&self) -> f32 {
-        let mut armor = self.stats.armor.max(0.0);
+        let mut armor = self.stats.armor.max(0.0) * self.widow_mult();
         if self.character == AstronautKind::Ironclad && self.hp < self.stats.max_hp * 0.3 {
             armor *= 2.0;
         }
         armor / (armor + 100.0)
     }
 
+    pub fn effective_evasion_fraction(&self) -> f32 {
+        let e = self.stats.evasion.max(0.0) * self.widow_mult();
+        e / (e + 100.0)
+    }
+
     pub fn move_speed_mult(&self) -> f32 {
-        let mut m = self.stats.move_speed;
+        let mut m = self.stats.move_speed * self.widow_mult();
         if self.powerups.iter().any(|(k, _)| *k == PowerupKind::Speed) {
             m *= 1.5;
         }
@@ -386,11 +503,40 @@ impl PlayerState {
     }
 
     pub fn has_item(&self, kind: ItemKind) -> bool {
-        self.items.iter().any(|(k, _)| *k == kind)
+        self.items.iter().any(|s| s.kind == kind)
     }
 
     pub fn item_count(&self, kind: ItemKind) -> u32 {
-        self.items.iter().find(|(k, _)| *k == kind).map(|(_, c)| *c).unwrap_or(0)
+        self.item_stack(kind).map(|s| s.count()).unwrap_or(0)
+    }
+
+    pub fn item_stack(&self, kind: ItemKind) -> Option<&ItemStack> {
+        self.items.iter().find(|s| s.kind == kind)
+    }
+
+    /// Σ grade multipliers of every copy held; 0 without the item. What proc numbers scale by.
+    pub fn item_power(&self, kind: ItemKind) -> f32 {
+        self.item_stack(kind).map(|s| s.power()).unwrap_or(0.0)
+    }
+
+    /// Take one copy of `kind` at `grade`. Stats are NOT recomputed here — the caller owns
+    /// the save/greed context that needs.
+    pub fn add_item(&mut self, kind: ItemKind, grade: Rarity) {
+        match self.items.iter_mut().find(|s| s.kind == kind) {
+            Some(s) => s.grades.push(grade),
+            None => self.items.push(ItemStack { kind, grades: vec![grade] }),
+        }
+    }
+
+    /// Rarity Grades The Static Radio adds to every loot roll this player makes (§7).
+    pub fn grade_bonus(&self) -> u32 {
+        u32::from(self.has_item(ItemKind::StaticRadio))
+    }
+
+    /// Signal Flare: the horde always knows where this astronaut is — no storm or night
+    /// hides them, the chase prefers them, and their share of each wave lands closer.
+    pub fn revealed(&self) -> bool {
+        self.has_item(ItemKind::SignalFlare)
     }
 
     /// Evolved weapons this astronaut already owns.
@@ -483,7 +629,8 @@ impl PlayerState {
             return false;
         }
         match opt {
-            UpgradeOption::NewItem(i) | UpgradeOption::ItemUp(i) => {
+            // A banish strikes the ITEM, every grade of it.
+            UpgradeOption::NewItem(i, _) | UpgradeOption::ItemUp(i, _) => {
                 self.banned_items.insert(*i);
             }
             UpgradeOption::NewWeapon(w) | UpgradeOption::WeaponUp(w) => {
@@ -521,8 +668,9 @@ pub enum UpgradeOption {
     NewWeapon(WeaponKind),
     WeaponUp(WeaponKind),
     Evolve(WeaponKind),
-    NewItem(ItemKind),
-    ItemUp(ItemKind),
+    /// An item and the Rarity Grade this copy was rolled at.
+    NewItem(ItemKind, Rarity),
+    ItemUp(ItemKind, Rarity),
     GoldPile(u64),
 }
 
@@ -538,8 +686,25 @@ impl UpgradeOption {
                     Rarity::Common
                 }
             }
-            UpgradeOption::NewItem(i) | UpgradeOption::ItemUp(i) => i.def().rarity,
+            UpgradeOption::NewItem(_, g) | UpgradeOption::ItemUp(_, g) => *g,
             UpgradeOption::GoldPile(_) => Rarity::Common,
+        }
+    }
+
+    /// The card for one copy of `item` at `grade`, NEW or a stack-up by what `ps` holds.
+    pub fn item(item: ItemKind, grade: Rarity, ps: &PlayerState) -> Self {
+        if ps.has_item(item) {
+            UpgradeOption::ItemUp(item, grade)
+        } else {
+            UpgradeOption::NewItem(item, grade)
+        }
+    }
+
+    /// The item this card deals, if it is an item card.
+    pub fn item_kind(&self) -> Option<ItemKind> {
+        match self {
+            UpgradeOption::NewItem(i, _) | UpgradeOption::ItemUp(i, _) => Some(*i),
+            _ => None,
         }
     }
 
@@ -550,8 +715,8 @@ impl UpgradeOption {
             UpgradeOption::Evolve(w) => {
                 format!("EVOLVE: {}", w.def().evolves_to.map(|e| e.def().name).unwrap_or("?"))
             }
-            UpgradeOption::NewItem(i) => format!("NEW: {}", i.def().name),
-            UpgradeOption::ItemUp(i) => i.def().name.to_string(),
+            UpgradeOption::NewItem(i, _) => format!("NEW: {}", i.def().name),
+            UpgradeOption::ItemUp(i, _) => i.def().name.to_string(),
             UpgradeOption::GoldPile(g) => format!("{g} GOLD"),
         }
     }
@@ -602,28 +767,39 @@ impl UpgradeOption {
                 .evolves_to
                 .map(|e| e.def().desc.to_string())
                 .unwrap_or_default(),
-            UpgradeOption::NewItem(i) => {
+            UpgradeOption::NewItem(i, g) => format!("{}\n{}{}", i.def().desc, item_lines(*i, *g), catalyst_line(*i, run)),
+            UpgradeOption::ItemUp(i, g) => {
                 let d = i.def();
-                let stats: Vec<String> =
-                    d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                format!("{}\n{}{}", d.desc, stats.join(", "), catalyst_line(*i, run))
-            }
-            UpgradeOption::ItemUp(i) => {
-                let d = i.def();
-                let stats: Vec<String> =
-                    d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                format!(
-                    "{} ({}/{})\n{}{}",
-                    d.desc,
-                    run.item_count(*i),
-                    d.max_stacks,
-                    stats.join(", "),
-                    catalyst_line(*i, run)
-                )
+                let held = if d.max_stacks >= config::ITEM_STACKS_UNCAPPED {
+                    format!("{} held", run.item_count(*i))
+                } else {
+                    format!("{}/{}", run.item_count(*i), d.max_stacks)
+                };
+                format!("{} ({held})\n{}{}", d.desc, item_lines(*i, *g), catalyst_line(*i, run))
             }
             UpgradeOption::GoldPile(_) => "Cold hard currency".into(),
         }
     }
+}
+
+/// What one copy of `item` at `grade` gives: its graded stat lines, what it does, and —
+/// when it rolled above its native grade — by how much the roll beat the base (§7: a bigger
+/// roll of the SAME effect). Shared by every card that deals an item (level-up, chest,
+/// vendor, shrine, cache).
+pub fn item_lines(item: ItemKind, grade: Rarity) -> String {
+    let m = item.grade_mult(grade);
+    let mut lines: Vec<String> = Vec::new();
+    let stats: Vec<String> = item.def().boosts.iter().map(|(k, v)| k.label(v * m)).collect();
+    if !stats.is_empty() {
+        lines.push(stats.join(", "));
+    }
+    if let Some(e) = item.effect(m) {
+        lines.push(e);
+    }
+    if m > 1.0 {
+        lines.push(format!("{} roll: x{m:.1} effect", grade.name()));
+    }
+    lines.join("\n")
 }
 
 /// Card line shown instead of an evolution hint once every evolution slot is taken, so a
@@ -644,6 +820,72 @@ pub fn catalyst_line(item: ItemKind, run: &PlayerState) -> String {
     } else {
         let names: Vec<&str> = weapons.iter().map(|w| w.def().name).collect();
         format!("\nEvo catalyst: {}", names.join(", "))
+    }
+}
+
+/// The grade a dealt copy of `item` comes at (§7 "Luck raises grade rolls everywhere"): a
+/// ladder roll at `luck`, never below the item's native grade, then `bonus` rungs up (The
+/// Static Radio). Cursed items are always Cursed. Always exactly one draw.
+pub fn roll_grade(item: ItemKind, luck: f32, bonus: u32, rng: &mut impl Rng) -> Rarity {
+    let native = item.def().rarity;
+    let rolled = Rarity::roll(luck, rng);
+    if native == Rarity::Cursed {
+        return Rarity::Cursed;
+    }
+    rolled.max(native).step_up(bonus)
+}
+
+/// Can `ps` still be dealt `item` (pooled, not banished, below its stack cap)?
+pub fn item_available(ps: &PlayerState, item: ItemKind) -> bool {
+    let d = item.def();
+    d.pooled && !ps.banned_items.contains(&item) && ps.item_count(item) < d.max_stacks
+}
+
+/// Roll one loot item and the grade it drops at — chests, the Shady Guy, shrines, the Moai
+/// and the miniboss cache all deal through here (§7). First a `CURSED_LOOT_CHANCE` for a
+/// cursed item; otherwise a grade from `luck` (+ The Static Radio's rung), then an item that
+/// can drop at that grade: one native to it `GRADE_NATIVE_SHARE` of the time, else a
+/// lower-grade item rolled up to it.
+///
+/// A FIXED three draws whatever the sheet: the Shady Guy's stock is rolled from the seeded
+/// world stream (CLAUDE.md rule 5), where a draw count that depended on a machine's own save
+/// would shift every later draw.
+pub fn roll_item(ps: &PlayerState, luck: f32, rng: &mut impl Rng) -> (ItemKind, Rarity) {
+    let cursed = rng.gen_bool(config::CURSED_LOOT_CHANCE);
+    let grade = Rarity::roll(luck, rng).step_up(ps.grade_bonus());
+    let pick: f32 = rng.gen_range(0.0..1.0);
+
+    // Cursed: one of the cursed family, if any is still available. Otherwise an item that
+    // can drop at the rolled grade: one NATIVE to it GRADE_NATIVE_SHARE of the time (a
+    // Legendary roll is mostly Legendaries), else a lower-grade item rolled up to it (a
+    // huge Borgar). A fixed share, not per-item weights, so the pool's grade mix can't
+    // drown the rare natives out. The one `pick` draw chooses both bucket and item.
+    let cursed_items: Vec<ItemKind> = if cursed {
+        ItemKind::pool().filter(|i| i.is_cursed() && item_available(ps, *i)).collect()
+    } else {
+        Vec::new()
+    };
+    let (bucket, x) = if !cursed_items.is_empty() {
+        (cursed_items, pick)
+    } else {
+        let (native, lower): (Vec<ItemKind>, Vec<ItemKind>) = ItemKind::pool()
+            .filter(|i| !i.is_cursed() && item_available(ps, *i) && i.def().rarity <= grade)
+            .partition(|i| i.def().rarity == grade);
+        let share = config::GRADE_NATIVE_SHARE;
+        if lower.is_empty() || (!native.is_empty() && pick < share) {
+            let x = if lower.is_empty() { pick } else { pick / share };
+            (native, x)
+        } else if native.is_empty() {
+            (lower, pick)
+        } else {
+            (lower, (pick - share) / (1.0 - share))
+        }
+    };
+    let grade_of = |i: ItemKind| if i.is_cursed() { Rarity::Cursed } else { grade };
+    match bucket.get(((x * bucket.len() as f32) as usize).min(bucket.len().saturating_sub(1))) {
+        Some(item) => (*item, grade_of(*item)),
+        // Everything capped or banished: a Borgar — it never caps out.
+        None => (ItemKind::SpaceBorgar, grade),
     }
 }
 
@@ -675,29 +917,22 @@ pub fn roll_upgrades(run: &PlayerState, save: &MetaSave, rng: &mut impl Rng) -> 
             }
         }
     }
-    // Items
-    for i in ItemKind::ALL {
-        if run.banned_items.contains(&i) {
-            continue;
-        }
-        let count = run.item_count(i);
-        if count >= i.def().max_stacks {
+    // Items, each copy dealt at its own rolled grade
+    for i in ItemKind::pool() {
+        if !item_available(run, i) {
             continue;
         }
         // rarity gate: rarer items appear less often in the raw pool
-        let copies = match i.def().rarity {
+        let native = i.def().rarity;
+        let copies = match native {
             Rarity::Common => 3,
             Rarity::Rare => 2,
-            Rarity::Epic => 1,
-            Rarity::Legendary => 1,
+            Rarity::Epic | Rarity::Legendary | Rarity::Cursed => 1,
         };
         for _ in 0..copies {
-            if rng.gen_bool(rarity_pass(i.def().rarity, run.stats.luck)) {
-                pool.push(if count == 0 {
-                    UpgradeOption::NewItem(i)
-                } else {
-                    UpgradeOption::ItemUp(i)
-                });
+            if rng.gen_bool(rarity_pass(native, run.stats.luck)) {
+                let grade = roll_grade(i, run.stats.luck, run.grade_bonus(), rng);
+                pool.push(UpgradeOption::item(i, grade, run));
             }
         }
     }
@@ -707,7 +942,9 @@ pub fn roll_upgrades(run: &PlayerState, save: &MetaSave, rng: &mut impl Rng) -> 
         if opts.len() >= config::LEVELUP_CARDS {
             break;
         }
-        if !opts.contains(&p) {
+        // one card per weapon/item: two grades of the same item is not a choice
+        let dup = opts.iter().any(|o| o == &p || (o.item_kind().is_some() && o.item_kind() == p.item_kind()));
+        if !dup {
             opts.push(p);
         }
     }
@@ -724,6 +961,8 @@ fn rarity_pass(r: Rarity, luck: f32) -> f64 {
         Rarity::Rare => 0.55 + 0.2 * l,
         Rarity::Epic => 0.3 + 0.25 * l,
         Rarity::Legendary => 0.12 + 0.2 * l,
+        // Luck-blind on purpose: Cursed is the honeypot you walk into, not a reward tier.
+        Rarity::Cursed => config::CURSED_CARD_PASS,
     }
 }
 
@@ -759,10 +998,10 @@ impl PlayerState {
                     }
                 }
             }
-            UpgradeOption::NewItem(i) => self.items.push((*i, 1)),
-            UpgradeOption::ItemUp(i) => {
-                if let Some(entry) = self.items.iter_mut().find(|(k, _)| k == i) {
-                    entry.1 += 1;
+            UpgradeOption::NewItem(i, g) | UpgradeOption::ItemUp(i, g) => {
+                // Re-checked at pick time too: a queued hand can deal the last copy twice.
+                if self.item_count(*i) < i.def().max_stacks {
+                    self.add_item(*i, *g);
                 }
             }
             UpgradeOption::GoldPile(g) => self.gold += g,
@@ -827,13 +1066,13 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
     }
     let item = ItemKind::ALL[0];
     let own = ps.weapons[0].kind;
-    if !ps.banish(&UpgradeOption::NewItem(item)) || !ps.banish(&UpgradeOption::WeaponUp(own)) {
+    if !ps.banish(&UpgradeOption::NewItem(item, Rarity::Common)) || !ps.banish(&UpgradeOption::WeaponUp(own)) {
         return Err("a banish with charges left was refused".into());
     }
     for _ in 0..300 {
         for o in roll_upgrades(&ps, save, &mut rng) {
             match o {
-                UpgradeOption::NewItem(i) | UpgradeOption::ItemUp(i) if i == item => {
+                UpgradeOption::NewItem(i, _) | UpgradeOption::ItemUp(i, _) if i == item => {
                     return Err("a banished item was dealt again".into());
                 }
                 UpgradeOption::WeaponUp(w) | UpgradeOption::NewWeapon(w) if w == own => {
@@ -844,7 +1083,7 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
         }
     }
     ps.banishes = 0;
-    if ps.banish(&UpgradeOption::NewItem(ItemKind::ALL[1])) {
+    if ps.banish(&UpgradeOption::NewItem(ItemKind::ALL[1], Rarity::Common)) {
         return Err("banished with no charges".into());
     }
 
@@ -874,7 +1113,9 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
         .iter()
         .map(|(w, _)| WeaponInstance { kind: *w, level: config::MAX_WEAPON_LEVEL, cd: 0.0 })
         .collect();
-    ps.items = pairs.iter().map(|(_, i)| (*i, 1)).collect();
+    for (_, i) in &pairs {
+        ps.add_item(*i, i.def().rarity);
+    }
     if ps.evolvable().len() != 2 {
         return Err("both ready weapons should be evolvable before the cap bites".into());
     }
@@ -887,7 +1128,7 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
     if roll_upgrades(&ps, save, &mut rng).iter().any(|o| matches!(o, UpgradeOption::Evolve(_))) {
         return Err("an evolution card was dealt past the cap".into());
     }
-    let catalyst_card = UpgradeOption::ItemUp(pairs[1].1).body(&ps);
+    let catalyst_card = UpgradeOption::ItemUp(pairs[1].1, Rarity::Common).body(&ps);
     if catalyst_card.contains("Evo catalyst") || !catalyst_card.contains("Evolution slots full") {
         return Err("an item card still advertised an evolution past the cap".into());
     }
@@ -895,7 +1136,7 @@ pub fn rules_self_check(save: &MetaSave) -> Result<(), String> {
     if ps.evolvable() != vec![pairs[1].0] {
         return Err("an extra evolution slot did not reopen the second evolution".into());
     }
-    if !UpgradeOption::ItemUp(pairs[1].1).body(&ps).contains("Evo catalyst") {
+    if !UpgradeOption::ItemUp(pairs[1].1, Rarity::Common).body(&ps).contains("Evo catalyst") {
         return Err("a free evolution slot hid the catalyst hint".into());
     }
     Ok(())

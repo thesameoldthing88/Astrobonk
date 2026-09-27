@@ -115,7 +115,7 @@ fn scripted_choice(
 fn same_pool_entry(a: &UpgradeOption, b: &UpgradeOption) -> bool {
     use UpgradeOption::*;
     match (a, b) {
-        (NewItem(x) | ItemUp(x), NewItem(y) | ItemUp(y)) => x == y,
+        (NewItem(x, _) | ItemUp(x, _), NewItem(y, _) | ItemUp(y, _)) => x == y,
         (NewWeapon(x) | WeaponUp(x), NewWeapon(y) | WeaponUp(y)) => x == y,
         (Evolve(x), Evolve(y)) => x == y,
         _ => false,
@@ -413,6 +413,154 @@ fn storm_peer_check(
     *host_charging = now_host;
 }
 
+/// `--items a,b,…` / `--deathsave`: the §7 item probes. Items are handed to EVERY
+/// astronaut (with `--coop2` that includes the peer, so the host is seen simulating a
+/// joiner's items too), and the summary asserts each one visibly did its thing.
+#[derive(Resource, Default)]
+struct ItemProbe {
+    items: Vec<crate::content::items::ItemKind>,
+    granted: bool,
+    ticks: u64,
+    /// PlayerIds that threw a yo-yo / opened a singularity / lit a trail (from ItemFxMsg).
+    fx_owners: Vec<u8>,
+    deathsave: bool,
+    /// `--deathsave` stage: 0 waiting, 1 first lethal hit (Tether), 2 second (Widow's
+    /// Ring), 3 third (co-op peer only: must die), 4 done.
+    ds_stage: u8,
+    ds_victim: Option<Entity>,
+    ds_log: Vec<String>,
+    ds_fail: Option<String>,
+}
+
+/// Hand out the probe's items on the first frame the astronauts stand.
+fn item_probe_grant(
+    mut probe: ResMut<ItemProbe>,
+    save: Res<MetaSave>,
+    global: Res<RunState>,
+    mut q: Query<(Entity, &crate::player::PlayerId, &mut PlayerState, Has<crate::player::LocalPlayer>)>,
+) {
+    if probe.granted || q.is_empty() {
+        return;
+    }
+    let coop2 = std::env::args().any(|a| a == "--coop2");
+    for (e, pid, mut ps, local) in &mut q {
+        let mut items = probe.items.clone();
+        let victim = if coop2 { pid.0 == 1 } else { local };
+        if probe.deathsave && victim {
+            items.extend([crate::content::items::ItemKind::DeadMansTether, crate::content::items::ItemKind::WidowsRing]);
+            probe.ds_victim = Some(e);
+        }
+        let taken = crate::items::grant_items(&mut ps, &items, &save, global.greed_stacks);
+        println!("  ITEMS player {} granted {}", pid.0, taken.iter().map(|i| i.def().name).collect::<Vec<_>>().join(", "));
+    }
+    probe.granted = true;
+}
+
+/// Make the bot exercise the items it holds: stand still for a beat every 8 s (Comet Tail
+/// ignites on a stand-still) and hop the rest of the time, holding jump (Icarus, Anti-Grav
+/// hover and its 360° ring).
+fn item_probe_drive(
+    mut probe: ResMut<ItemProbe>,
+    mut q: Query<(&mut Player, &mut crate::player::InputIntent, &PlayerState)>,
+) {
+    probe.ticks += 1;
+    let t = probe.ticks % 240; // 8 s at 33 ms
+    for (mut p, mut intent, ps) in &mut q {
+        if ps.dead {
+            continue;
+        }
+        if t < 80 {
+            p.vel_t = Vec3::ZERO;
+            intent.jump_held = false;
+        } else {
+            intent.jump_held = true;
+            if p.grounded && t % 45 == 0 {
+                p.vel_r = PLAYER_JUMP_VEL * ps.stats.jump_height.sqrt();
+                p.grounded = false;
+            }
+        }
+    }
+}
+
+fn item_probe_fx(mut probe: ResMut<ItemProbe>, mut fx: MessageReader<crate::items::ItemFxMsg>) {
+    use crate::items::ItemFx;
+    for m in fx.read() {
+        let owner = match m.fx {
+            ItemFx::Orbit { owner, .. } | ItemFx::Ignite { owner } | ItemFx::DeathSave { owner, .. } => owner,
+            ItemFx::Singularity { .. } => continue,
+        };
+        if !probe.fx_owners.contains(&owner) {
+            probe.fx_owners.push(owner);
+        }
+    }
+}
+
+/// `--deathsave`: lethal hits on the victim, one stage at a time, re-sent every tick until
+/// one lands (i-frames and evasion can eat a hit) — then check exactly the right save fired.
+fn deathsave_probe(
+    mut probe: ResMut<ItemProbe>,
+    telemetry: Res<crate::items::ItemTelemetry>,
+    q: Query<&PlayerState>,
+    mut hits: MessageWriter<crate::messages::PlayerHitMsg>,
+    mut last: Local<[u32; 4]>,
+    mut waited: Local<u32>,
+) {
+    let Some(victim) = probe.ds_victim else { return };
+    let Ok(ps) = q.get(victim) else { return };
+    let coop2 = std::env::args().any(|a| a == "--coop2");
+    let saves = telemetry.saves;
+    match probe.ds_stage {
+        0 => {
+            if probe.ticks >= 150 {
+                *last = saves;
+                probe.ds_stage = 1;
+            }
+        }
+        1 | 2 | 3 => {
+            let stage = probe.ds_stage;
+            let new: Vec<usize> = (0..4).filter(|i| saves[*i] > last[*i]).collect();
+            if !new.is_empty() || ps.dead {
+                let want: Option<usize> = match stage {
+                    1 => Some(crate::items::DeathSave::Tether.code() as usize),
+                    2 => Some(crate::items::DeathSave::WidowsRing.code() as usize),
+                    _ => None,
+                };
+                let got_one = new.len() == 1 && saves[new[0]] == last[new[0]] + 1;
+                let ok = match want {
+                    Some(w) => got_one && new[0] == w && !ps.dead && (ps.hp - 1.0).abs() < 0.5,
+                    None => new.is_empty() && ps.dead,
+                };
+                probe.ds_log.push(format!("stage {stage}: saves {:?} -> {:?}, hp {:.1}, dead {}", *last, saves, ps.hp, ps.dead));
+                if !ok {
+                    probe.ds_fail = Some(format!("stage {stage} resolved wrong ({})", probe.ds_log.last().cloned().unwrap_or_default()));
+                    probe.ds_stage = 4;
+                    return;
+                }
+                if stage == 1 && telemetry.rewinds.last().is_none_or(|m| *m < 0.5) {
+                    probe.ds_fail = Some(format!("the Tether rewind did not move the astronaut ({:?})", telemetry.rewinds));
+                    probe.ds_stage = 4;
+                    return;
+                }
+                *last = saves;
+                *waited = 0;
+                // the third, unsaved hit only on a co-op peer: a solo death would end the run
+                probe.ds_stage = if stage == 2 && !coop2 { 4 } else { stage + 1 };
+                return;
+            }
+            // Past the i-frames of the previous save (60 ticks = 2 s), keep swinging.
+            *waited += 1;
+            if *waited > 60 {
+                hits.write(crate::messages::PlayerHitMsg { victim, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+            }
+            if *waited > 600 {
+                probe.ds_fail = Some(format!("stage {stage}: no lethal hit landed in 20 s"));
+                probe.ds_stage = 4;
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Gems collected over the run (every collection writes one `GrantOut::Xp`).
 #[derive(Resource, Default)]
 struct XpTally(u64);
@@ -568,9 +716,10 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
     // The rules are pure data: pin them before simulating anything.
     let rules = crate::run::scaling::self_check()
         .and_then(|_| crate::run::rules_self_check(&MetaSave::default()))
-        .and_then(|_| silver_self_check());
+        .and_then(|_| silver_self_check())
+        .and_then(|_| crate::items::self_check(&MetaSave::default()));
     match rules {
-        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver)"),
+        Ok(()) => println!("RULES OK (scaling, choice economy, evolution cap, silver, items)"),
         Err(e) => {
             println!("SMOKE FAIL: rules self-check: {e}");
             std::process::exit(1);
@@ -644,16 +793,23 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<crate::net::MyPlayerId>()
         .insert_resource(probe)
         .init_resource::<XpTally>()
+        .init_resource::<crate::items::ItemTelemetry>()
+        .insert_resource(ItemProbe {
+            items: crate::items::items_from_args(),
+            deathsave: args.iter().any(|a| a == "--deathsave"),
+            ..default()
+        })
         .insert_resource(save)
         .insert_resource(run)
         .add_message::<crate::net::GrantOut>()
+        .add_message::<crate::items::ItemFxMsg>()
         .add_message::<crate::messages::HitMsg>()
         .add_message::<crate::messages::PlayerHitMsg>()
         .add_message::<crate::messages::KillMsg>()
         .add_message::<crate::messages::NumberMsg>()
         .add_message::<crate::messages::BannerMsg>()
         .add_message::<crate::messages::SfxMsg>()
-        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, headless_enter))
+        .add_systems(Startup, (crate::enemies::setup_enemy_assets, crate::combat::setup_weapon_assets, crate::pickups::setup_pickup_assets, crate::items::setup_item_assets, headless_enter))
         .add_systems(
             Update,
             (
@@ -698,6 +854,45 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 storm_peer_check.run_if(|p: Res<CoopProbe>| p.storm_peer),
             )
                 .chain()
+                .run_if(crate::playing),
+        )
+        // §7 items — the same set main.rs runs (headless IS the host, so the client-only
+        // trail drops simply never run)
+        .add_systems(
+            Update,
+            (
+                crate::items::item_upkeep,
+                crate::items::encirclement_scan,
+                crate::items::orbital_yoyo,
+                crate::items::comet_tail,
+                crate::items::little_black_hole,
+                crate::items::orbit_chunks,
+                crate::items::trail_patches,
+                crate::items::trail_client_drops.run_if(crate::net::is_client),
+                crate::items::singularity_update,
+                crate::items::push_net_item_vis,
+                crate::items::item_visuals,
+                crate::items::apply_sun_shrink,
+            )
+                .chain()
+                .run_if(crate::playing),
+        )
+        // as in main.rs: item one-shots are presented behind a card panel too
+        .add_systems(
+            Update,
+            crate::items::item_fx_presentation
+                .after(crate::items::apply_sun_shrink)
+                .run_if(resource_exists::<crate::planet::CurrentPlanet>),
+        )
+        .add_systems(
+            Update,
+            (
+                item_probe_grant,
+                item_probe_drive.after(bot_drive),
+                item_probe_fx,
+                deathsave_probe.before(crate::combat::apply_player_hits),
+            )
+                .run_if(|p: Res<ItemProbe>| !p.items.is_empty() || p.deathsave)
                 .run_if(crate::playing),
         )
         .add_systems(
@@ -887,6 +1082,114 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         );
         if probe.storm_ticks_hidden == 0 || probe.storm_marker_errors > 0 || probe.storm_hidden_locks > 0 {
             println!("FAIL: dust storm hiding is not per-astronaut");
+            ok = false;
+        }
+    }
+    // §7 items: every item handed out must have visibly DONE its thing, on every astronaut
+    // that carries it (with --coop2 the peer's items are the host simulating a joiner's).
+    let item_sheets: Vec<(u8, PlayerState, crate::net::NetItemVis)> = world
+        .query::<(&crate::player::PlayerId, &PlayerState, &crate::net::NetItemVis)>()
+        .iter(world)
+        .map(|(pid, ps, vis)| (pid.0, ps.clone(), *vis))
+        .collect();
+    let item_probe = world.resource::<ItemProbe>();
+    if !item_probe.items.is_empty() || item_probe.deathsave {
+        let tel = world.resource::<crate::items::ItemTelemetry>();
+        println!(
+            "ITEMS yoyo[throws={} hits={}] tail[patches={} ignites={} hits={}] jams={} ghost={} ring={} hover={:.1}s air={:.1}s hole[{} pulled={}] encircle={}/8 descent={:.2}m sun_steps={} radio_static_at={:?} saves={:?} fx_owners={:?}",
+            tel.yoyo_throws, tel.yoyo_hits, tel.trail_patches, tel.ignites, tel.trail_hits, tel.jams,
+            tel.ghost_volleys, tel.ring_volleys, tel.hover_secs, tel.airborne_secs, tel.singularities,
+            tel.pulled, tel.max_encircle, tel.max_descent, tel.sun_steps, tel.radio_static_at, tel.saves,
+            item_probe.fx_owners
+        );
+        use crate::content::items::ItemKind as I;
+        let has = |i: I| item_probe.items.contains(&i);
+        let mut fails: Vec<String> = Vec::new();
+        let mut need = |cond: bool, what: &str| {
+            if !cond {
+                fails.push(what.to_string());
+            }
+        };
+        if has(I::OrbitalYoYo) {
+            need(tel.yoyo_throws > 0 && tel.yoyo_hits > 0, "Orbital Yo-Yo never hit anything");
+        }
+        if has(I::CometTail) {
+            need(tel.trail_patches > 0 && tel.trail_hits > 0, "Comet Tail laid no burning trail");
+            need(tel.ignites > 0, "Comet Tail never ignited on a stand-still");
+        }
+        if has(I::TheOverheat) {
+            need(tel.jams > 0, "The Overheat never jammed");
+        }
+        if has(I::DownhillMomentum) {
+            need(tel.max_descent > 0.0, "Downhill Momentum never read a descent");
+        }
+        if has(I::SecondAstronaut) {
+            need(tel.ghost_volleys > 0, "Second Astronaut's ghost never fired");
+        }
+        if has(I::EncirclementBonus) {
+            need(tel.max_encircle > 0, "Encirclement Bonus never saw the horde");
+        }
+        if has(I::IcarusBoots) {
+            need(tel.airborne_secs > 0.0, "Icarus Boots: never airborne");
+        }
+        if has(I::AntiGravBoots) {
+            need(tel.hover_secs > 0.0, "Anti-Grav Boots never hovered");
+            need(tel.ring_volleys > 0, "Anti-Grav Boots never fired a 360 ring");
+        }
+        if has(I::LittleBlackHole) {
+            need(tel.singularities > 0 && tel.pulled > 0, "Little Black Hole pulled nothing");
+        }
+        if has(I::StaticRadio) {
+            need(run.static_radio, "The Static Radio did not reach RunState");
+            if run.timer <= STATIC_RADIO_LEAD_SECS && fast_boss {
+                need(run.static_active && tel.radio_static_at.is_some(), "The Static Radio did not bring The Static early");
+            }
+        }
+        // held for a full period (the probe's own clock: fast-boss winds total_elapsed)
+        if has(I::DevouredSunShard) && item_probe.ticks as f32 * 0.033 > SUN_SHARD_PERIOD + 1.0 {
+            need(tel.sun_steps > 0 && run.sun_shrink > 0.0, "Devoured Sun Shard never shrank the sun");
+        }
+        for (pid, ps, vis) in &item_sheets {
+            let who = format!("player {pid}");
+            if has(I::CrackedHelmet) {
+                need(ps.stats.damage_taken >= 2.0, &format!("{who}: Cracked Helmet does not double damage taken"));
+            }
+            if has(I::WidowsRing) {
+                need((ps.stats.max_hp_mult - 0.8).abs() < 1e-3, &format!("{who}: Widow's Ring did not cut max HP"));
+            }
+            if has(I::SignalFlare) {
+                need(ps.revealed() && ps.stats.xp_gain >= 1.4, &format!("{who}: Signal Flare not live"));
+            }
+            // the replicated look must match the simulated state (what a joiner draws)
+            let ghost = ps.ghost_weapon.map(|w| w.code() + 1).unwrap_or(0);
+            need(vis.ghost == ghost, &format!("{who}: NetItemVis ghost {} but sheet {ghost}", vis.ghost));
+            need(
+                (vis.flags & crate::net::ITEMVIS_TETHER_SPENT != 0) == ps.tether_used,
+                &format!("{who}: NetItemVis tether flag disagrees with the sheet"),
+            );
+        }
+        let coop2 = std::env::args().any(|a| a == "--coop2");
+        if coop2 && has(I::OrbitalYoYo) {
+            need(item_probe.fx_owners.contains(&1), "the host never simulated the peer's items (no item event owned by player 1)");
+        }
+        if item_probe.deathsave {
+            for l in &item_probe.ds_log {
+                println!("  DEATHSAVE {l}");
+            }
+            match &item_probe.ds_fail {
+                Some(f) => need(false, &format!("death-save: {f}")),
+                None => need(item_probe.ds_stage == 4, &format!("death-save probe never finished (stage {})", item_probe.ds_stage)),
+            }
+            if item_probe.ds_fail.is_none() && item_probe.ds_stage == 4 {
+                println!("DEATHSAVE OK: Tether rewound {:.1} m, then Widow's Ring held at 1 HP{}", tel.rewinds.first().copied().unwrap_or(0.0), if coop2 { ", then the spent peer went down" } else { "" });
+            }
+        }
+        if fails.is_empty() {
+            println!("ITEMS OK ({} items)", item_probe.items.len());
+        } else {
+            for f in fails {
+                println!("FAIL: {f}");
+            }
             ok = false;
         }
     }

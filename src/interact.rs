@@ -9,7 +9,7 @@ use crate::messages::*;
 use crate::pickups::Pickup;
 use crate::planet::{random_dir, CurrentPlanet, StageScoped};
 use crate::player::Player;
-use crate::run::{ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
+use crate::run::{roll_item, ChoicePanel, PlayerState, RunPhase, RunState, UpgradeOption};
 use crate::save::MetaSave;
 use crate::sphere;
 use bevy::prelude::*;
@@ -40,9 +40,9 @@ pub enum InteractKind {
 pub struct Interactable {
     pub kind: InteractKind,
     pub used: bool,
-    /// Chests remember their rolled item; shady guys their stock.
-    pub chest_item: Option<ItemKind>,
-    pub stock: Vec<(ItemKind, u64, bool)>, // item, price, sold
+    /// Chests remember their rolled item (and its grade); shady guys their stock.
+    pub chest_item: Option<(ItemKind, Rarity)>,
+    pub stock: Vec<(ItemKind, Rarity, u64, bool)>, // item, grade, price, sold
 }
 
 #[derive(Component)]
@@ -62,7 +62,7 @@ pub struct InteractPrompt(pub Option<String>);
 #[derive(Resource, Default)]
 pub struct ChestPanel {
     pub open: bool,
-    pub item: Option<ItemKind>,
+    pub item: Option<(ItemKind, Rarity)>,
     pub cost: u64,
     pub chest: Option<Entity>,
 }
@@ -72,7 +72,7 @@ pub struct ChestPanel {
 pub struct ShopPanel {
     pub open: bool,
     pub vendor: Option<Entity>,
-    pub offers: Vec<(ItemKind, u64, bool)>,
+    pub offers: Vec<(ItemKind, Rarity, u64, bool)>,
 }
 
 pub struct InteractDefs;
@@ -92,45 +92,36 @@ impl InteractDefs {
     }
 }
 
-fn roll_item(run: &PlayerState, luck: f32, rng: &mut impl Rng) -> ItemKind {
-    let rarity = Rarity::roll(luck, rng);
-    let candidates: Vec<ItemKind> = ItemKind::ALL
-        .iter()
-        .copied()
-        .filter(|i| !run.banned_items.contains(i))
-        .filter(|i| run.item_count(*i) < i.def().max_stacks)
-        .filter(|i| i.def().rarity == rarity)
-        .collect();
-    if let Some(i) = candidates.choose(rng) {
-        return *i;
-    }
-    // fall back to anything available (a banish is permanent, so it holds here too)
-    let any: Vec<ItemKind> = ItemKind::ALL
-        .iter()
-        .copied()
-        .filter(|i| !run.banned_items.contains(i))
-        .filter(|i| run.item_count(*i) < i.def().max_stacks)
-        .collect();
-    *any.choose(rng).unwrap_or(&ItemKind::SpaceBorgar)
-}
-
 /// The miniboss cache's hand: `REWARD_CACHE_CHOICES` DISTINCT items rolled at bonus luck.
 /// A fork offering the same item twice is not a fork.
 pub fn reward_cache_options(ps: &PlayerState, rng: &mut impl Rng) -> Vec<UpgradeOption> {
-    let mut picked: Vec<ItemKind> = Vec::new();
+    let mut picked: Vec<(ItemKind, Rarity)> = Vec::new();
     for _ in 0..REWARD_CACHE_CHOICES * 8 {
         if picked.len() >= REWARD_CACHE_CHOICES {
             break;
         }
-        let item = roll_item(ps, ps.stats.luck + REWARD_CACHE_LUCK, rng);
-        if !picked.contains(&item) {
-            picked.push(item);
+        let (item, grade) = roll_item(ps, ps.stats.luck + REWARD_CACHE_LUCK, rng);
+        if !picked.iter().any(|(i, _)| *i == item) {
+            picked.push((item, grade));
         }
     }
-    picked
-        .into_iter()
-        .map(|i| if ps.item_count(i) == 0 { UpgradeOption::NewItem(i) } else { UpgradeOption::ItemUp(i) })
-        .collect()
+    picked.into_iter().map(|(i, g)| UpgradeOption::item(i, g, ps)).collect()
+}
+
+/// A shrine/Moai hand: `n` rolled items, one card per item (two grades of one item is not a
+/// choice).
+fn item_hand(ps: &PlayerState, luck: f32, n: usize, rng: &mut impl Rng) -> Vec<UpgradeOption> {
+    let mut picked: Vec<(ItemKind, Rarity)> = Vec::new();
+    for _ in 0..n * 8 {
+        if picked.len() >= n {
+            break;
+        }
+        let (item, grade) = roll_item(ps, luck, rng);
+        if !picked.iter().any(|(i, _)| *i == item) {
+            picked.push((item, grade));
+        }
+    }
+    picked.into_iter().map(|(i, g)| UpgradeOption::item(i, g, ps)).collect()
 }
 
 /// Marks the one miniboss cache entity so `sync_reward_cache` can find it; remembers the
@@ -245,12 +236,15 @@ fn spawn_reward_cache(
         });
 }
 
-fn price(rarity: Rarity, discount: f32) -> u64 {
-    let base = match rarity {
+/// Shady Guy price by the grade the item was ROLLED at — a Legendary-grade Borgar costs
+/// what a Legendary does.
+fn price(grade: Rarity, discount: f32) -> u64 {
+    let base = match grade {
         Rarity::Common => 30.0,
         Rarity::Rare => 60.0,
         Rarity::Epic => 120.0,
         Rarity::Legendary => 240.0,
+        Rarity::Cursed => CURSED_ITEM_PRICE,
     };
     (base * (1.0 - discount)).round().max(1.0) as u64
 }
@@ -330,7 +324,7 @@ pub fn spawn_interactables(
     let pedestal = meshes.add(Mesh::from(Cylinder::new(0.8, 0.5)));
     let icon = meshes.add(Mesh::from(Sphere::new(0.4)));
 
-    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, u64, bool)>, chest_item: Option<ItemKind>| {
+    let mut spawn_simple = |commands: &mut Commands, kind: InteractKind, dir: Vec3, extra_stock: Vec<(ItemKind, Rarity, u64, bool)>, chest_item: Option<(ItemKind, Rarity)>| {
         let c = InteractDefs::color(kind);
         let mat = materials.add(StandardMaterial {
             base_color: c,
@@ -376,8 +370,8 @@ pub fn spawn_interactables(
     for _ in 0..2 {
         let mut stock = Vec::new();
         for _ in 0..3 {
-            let item = roll_item(ps, ps.stats.luck, &mut rng);
-            stock.push((item, price(item.def().rarity, ps.stats.chest_discount), false));
+            let (item, grade) = roll_item(ps, ps.stats.luck, &mut rng);
+            stock.push((item, grade, price(grade, ps.stats.chest_discount), false));
         }
         let dir = place_dir(&mut rng, planet, player_dir, 15.0);
         spawn_simple(commands, InteractKind::ShadyGuy, dir, stock, None);
@@ -508,15 +502,7 @@ pub fn charge_shrines(
             sfx.write(SfxMsg(Sfx::Shrine));
             banners.write(BannerMsg("SHRINE CHARGED".into()));
             let Ok(ps) = q_ps.single() else { continue };
-            let mut opts = Vec::new();
-            for _ in 0..3 {
-                let item = roll_item(ps, ps.stats.luck + 0.3, &mut rng);
-                opts.push(if ps.item_count(item) == 0 {
-                    UpgradeOption::NewItem(item)
-                } else {
-                    UpgradeOption::ItemUp(item)
-                });
-            }
+            let opts = item_hand(ps, ps.stats.luck + 0.3, 3, &mut rng);
             *panel = ChoicePanel { title: "SHRINE BLESSING".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;
             let _ = &save;
@@ -605,6 +591,15 @@ pub fn interact_system(
                 return;
             }
             let item = *inter.chest_item.get_or_insert_with(|| roll_item(&ps, ps.stats.luck, &mut rng));
+            // A chest that rolled an item it can no longer deal (capped since, or banished)
+            // rolls again rather than offering a dead card.
+            let item = if crate::run::item_available(&ps, item.0) {
+                item
+            } else {
+                let fresh = roll_item(&ps, ps.stats.luck, &mut rng);
+                inter.chest_item = Some(fresh);
+                fresh
+            };
             *panels.0 = ChestPanel { open: true, item: Some(item), cost: cost_now, chest: Some(entity) };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Chest));
@@ -635,15 +630,7 @@ pub fn interact_system(
         }
         InteractKind::Moai => {
             inter.used = true;
-            let mut opts = Vec::new();
-            for _ in 0..3 {
-                let item = roll_item(&ps, ps.stats.luck + 0.15, &mut rng);
-                opts.push(if ps.item_count(item) == 0 {
-                    UpgradeOption::NewItem(item)
-                } else {
-                    UpgradeOption::ItemUp(item)
-                });
-            }
+            let opts = item_hand(&ps, ps.stats.luck + 0.15, 3, &mut rng);
             *panel = ChoicePanel { title: "THE MOAI SPEAKS".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;
             sfx.write(SfxMsg(Sfx::Shrine));
@@ -653,14 +640,17 @@ pub fn interact_system(
                 return;
             }
             run.microwave_used = true;
-            let mut owned: Vec<ItemKind> = ps
+            // §7: a duplicate comes out one grade below the best copy held (never under the
+            // item's native grade). P16 adds the gamble, the Gold price and Tome of Duplication.
+            let mut owned: Vec<(ItemKind, Rarity)> = ps
                 .items
                 .iter()
-                .filter(|(k, c)| *c < k.def().max_stacks)
-                .map(|(k, _)| *k)
+                .filter(|s| crate::run::item_available(&ps, s.kind))
+                .map(|s| (s.kind, s.best().step_down(1, s.kind.def().rarity)))
                 .collect();
             owned.shuffle(&mut rng);
-            let opts: Vec<UpgradeOption> = owned.into_iter().take(3).map(UpgradeOption::ItemUp).collect();
+            let opts: Vec<UpgradeOption> =
+                owned.into_iter().take(3).map(|(k, g)| UpgradeOption::ItemUp(k, g)).collect();
             if opts.is_empty() {
                 banners.write(BannerMsg("NOTHING FITS IN THE MICROWAVE".into()));
                 return;

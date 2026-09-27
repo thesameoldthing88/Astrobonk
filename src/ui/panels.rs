@@ -316,7 +316,7 @@ pub fn chest_panel(
     }
     let Ok(mut run) = q_run.single_mut() else { return };
     if q_root.is_empty() {
-        let Some(item) = chest.item else { return };
+        let Some((item, grade)) = chest.item else { return };
         let d = item.def();
         let cost = chest.cost;
         let cat = crate::run::catalyst_line(item, &run);
@@ -335,14 +335,13 @@ pub fn chest_panel(
                         ..default()
                     },
                     BackgroundColor(CARD_BG),
-                    BorderColor::all(d.rarity.color()),
+                    BorderColor::all(grade.color()),
                 ))
                 .with_children(|card| {
-                    card.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
+                    card.spawn(txt(grade.name(), FONT_SMALL, grade.color()));
                     card.spawn(txt(d.name, FONT_MED, Color::WHITE));
                     card.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
-                    let stats: Vec<String> = d.boosts.iter().map(|(k, v)| k.label(*v)).collect();
-                    card.spawn(txt(stats.join(", "), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
+                    card.spawn(txt(crate::run::item_lines(item, grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
                     if !cat.is_empty() {
                         card.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
                     }
@@ -376,14 +375,10 @@ pub fn chest_panel(
     }
 
     if do_take {
-        if let Some(item) = chest.item {
+        if let Some((item, grade)) = chest.item {
             if run.gold >= chest.cost {
                 run.gold -= chest.cost;
-                if run.item_count(item) == 0 {
-                    run.items.push((item, 1));
-                } else if let Some(e) = run.items.iter_mut().find(|(k, _)| *k == item) {
-                    e.1 += 1;
-                }
+                run.add_item(item, grade);
                 let save_c = save.clone();
                 run.recompute_stats(&save_c, global.greed_stacks);
                 // Both were never advanced: chest prices never rose (CHEST_COST_GROWTH was
@@ -439,7 +434,7 @@ pub fn shop_panel(
         let offers = shop.offers.clone();
         let gold = run.gold;
         let cats: Vec<String> =
-            offers.iter().map(|(item, _, _)| crate::run::catalyst_line(*item, &run)).collect();
+            offers.iter().map(|(item, _, _, _)| crate::run::catalyst_line(*item, &run)).collect();
         commands
             .spawn((ShopRoot, overlay_root(), BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)), GlobalZIndex(10)))
             .with_children(|root| {
@@ -447,7 +442,7 @@ pub fn shop_panel(
                 root.spawn(txt(format!("your gold: {gold}"), FONT_SMALL, Color::srgb(1.0, 0.85, 0.3)));
                 root.spawn((Node { column_gap: Val::Px(12.0), ..default() },))
                     .with_children(|row| {
-                        for (i, (item, price, sold)) in offers.iter().enumerate() {
+                        for (i, (item, grade, price, sold)) in offers.iter().enumerate() {
                             let d = item.def();
                             let mut card = row.spawn((
                                 Node {
@@ -460,12 +455,13 @@ pub fn shop_panel(
                                     ..default()
                                 },
                                 BackgroundColor(if *sold { Color::srgba(0.05, 0.05, 0.06, 0.9) } else { CARD_BG }),
-                                BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { d.rarity.color() }),
+                                BorderColor::all(if *sold { Color::srgb(0.3, 0.3, 0.3) } else { grade.color() }),
                             ));
                             card.with_children(|c| {
-                                c.spawn(txt(d.rarity.name(), FONT_SMALL, d.rarity.color()));
+                                c.spawn(txt(grade.name(), FONT_SMALL, grade.color()));
                                 c.spawn(txt(d.name, FONT_MED, Color::WHITE));
                                 c.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.8, 0.82, 0.9)));
+                                c.spawn(txt(crate::run::item_lines(*item, *grade), FONT_SMALL, Color::srgb(0.6, 1.0, 0.7)));
                                 let cat = &cats[i];
                                 if !cat.is_empty() {
                                     c.spawn(txt(cat.trim_start(), FONT_SMALL, Color::srgb(1.0, 0.75, 0.3)));
@@ -502,21 +498,18 @@ pub fn shop_panel(
     }
     if let Some(i) = buy_idx {
         if i < shop.offers.len() {
-            let (item, price, sold) = shop.offers[i];
-            if !sold && run.gold >= price {
+            let (item, grade, price, sold) = shop.offers[i];
+            // a capped item can't be bought again (the stock was rolled before you capped it)
+            if !sold && run.gold >= price && run.item_count(item) < item.def().max_stacks {
                 run.gold -= price;
-                if run.item_count(item) == 0 {
-                    run.items.push((item, 1));
-                } else if let Some(e) = run.items.iter_mut().find(|(k, _)| *k == item) {
-                    e.1 += 1;
-                }
+                run.add_item(item, grade);
                 let save_c = save.clone();
                 run.recompute_stats(&save_c, global.greed_stacks);
-                shop.offers[i].2 = true;
+                shop.offers[i].3 = true;
                 if let Some(v) = shop.vendor {
                     if let Ok(mut inter) = q_inter.get_mut(v) {
                         if i < inter.stock.len() {
-                            inter.stock[i].2 = true;
+                            inter.stock[i].3 = true;
                         }
                     }
                 }
@@ -617,7 +610,7 @@ pub fn pause_panel(
                         root.spawn(txt("PAUSED", FONT_BIG, Color::WHITE));
                         root.spawn(txt(
                             format!(
-                                "DMG x{:.2}  AS x{:.2}  CRIT {:.0}%  SPD x{:.2}\nARMOR {:.0}  EVA {:.0}  LUCK +{:.0}%  DIFF +{:.0}%",
+                                "DMG x{:.2}  AS x{:.2}  CRIT {:.0}%  SPD x{:.2}\nARMOR {:.0}  EVA {:.0}  LUCK +{:.0}%  DIFF +{:.0}%{}",
                                 stats.damage,
                                 stats.attack_speed,
                                 stats.crit_chance * 100.0,
@@ -625,7 +618,13 @@ pub fn pause_panel(
                                 stats.armor,
                                 stats.evasion,
                                 stats.luck * 100.0,
-                                stats.difficulty * 100.0
+                                stats.difficulty * 100.0,
+                                // Cracked Helmet's price, where the player checks their numbers
+                                if (stats.damage_taken - 1.0).abs() > 1e-3 {
+                                    format!("  TAKEN x{:.1}", stats.damage_taken)
+                                } else {
+                                    String::new()
+                                }
                             ),
                             FONT_SMALL,
                             Color::srgb(0.8, 0.85, 0.95),

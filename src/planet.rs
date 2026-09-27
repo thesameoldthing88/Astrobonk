@@ -483,6 +483,8 @@ pub fn spawn_stage(
             shadows_enabled: true,
             ..default()
         },
+        // the Devoured Sun Shard dims it (`items::apply_sun_shrink`)
+        crate::items::SunLight { base: 9_000.0 },
         Transform::from_translation(-sun_dir * 10.0).looking_at(Vec3::ZERO, Vec3::Y),
         StageScoped,
     ));
@@ -495,6 +497,7 @@ pub fn spawn_stage(
     commands.spawn((
         Mesh3d(meshes.add(Mesh::from(Sphere::new(45.0)))),
         MeshMaterial3d(sun_mat),
+        crate::items::SunDisc,
         Transform::from_translation(-sun_dir * 1600.0),
         StageScoped,
     ));

@@ -487,9 +487,21 @@ fn stream_hazards(
     // line entity -> its beamer's NetId, because by the time a removal is seen the line
     // (and possibly the beamer) is gone and can no longer be asked
     mut live_lines: Local<HashMap<Entity, u16>>,
+    // §7 item one-shots (a yo-yo throw, a singularity, an ignition, a death-save): the item
+    // systems already say them as local messages, so they ride this lane as-is
+    mut item_fx: MessageReader<crate::items::ItemFxMsg>,
     mut out: MessageWriter<ToClients<HazardEventMsg>>,
 ) {
+    use crate::items::ItemFx;
     let mut events: Vec<HazardEvent> = Vec::new();
+    for m in item_fx.read().filter(|m| !m.from_wire) {
+        events.push(match m.fx {
+            ItemFx::Orbit { owner, chunks, radius, dur } => HazardEvent::ItemOrbit { owner, chunks, radius, dur },
+            ItemFx::Singularity { dir, radius, dur } => HazardEvent::Singularity { dir: dir.to_array(), radius, dur },
+            ItemFx::Ignite { owner } => HazardEvent::TrailIgnite { owner },
+            ItemFx::DeathSave { owner, save, dir } => HazardEvent::DeathSave { owner, kind: save.code(), dir: dir.to_array() },
+        });
+    }
     // Beamer aim lines: the start carries WHO it is locked onto, not where — the line
     // tracks that astronaut and every client already knows where they all are.
     for (le, line) in &added_lines {
@@ -547,10 +559,27 @@ fn receive_hazards(
     planet: Option<Res<CurrentPlanet>>,
     index: Res<NetEnemyIndex>,
     lines: Query<(Entity, &AimLine)>,
+    mut item_fx: MessageWriter<crate::items::ItemFxMsg>,
 ) {
+    use crate::items::{DeathSave, ItemFx, ItemFxMsg};
     let (Some(assets), Some(planet)) = (assets, planet) else { return };
     for m in msgs.read() {
         for ev in &m.events {
+            // Item one-shots become the SAME local message the host's item systems write,
+            // so `items::item_fx_presentation` draws them identically on both machines.
+            let fx = match *ev {
+                HazardEvent::ItemOrbit { owner, chunks, radius, dur } => Some(ItemFx::Orbit { owner, chunks, radius, dur }),
+                HazardEvent::Singularity { dir, radius, dur } => Some(ItemFx::Singularity { dir: Vec3::from(dir), radius, dur }),
+                HazardEvent::TrailIgnite { owner } => Some(ItemFx::Ignite { owner }),
+                HazardEvent::DeathSave { owner, kind, dir } => {
+                    Some(ItemFx::DeathSave { owner, save: DeathSave::from_code(kind), dir: Vec3::from(dir) })
+                }
+                _ => None,
+            };
+            if let Some(fx) = fx {
+                item_fx.write(ItemFxMsg { fx, from_wire: true });
+                continue;
+            }
             match *ev {
                 HazardEvent::AimLine { enemy, target, charge } => {
                     // A beamer outside our interest set has no proxy — and is then far
@@ -613,6 +642,11 @@ fn receive_hazards(
                         crate::planet::StageScoped,
                     ));
                 }
+                // handled above, as ItemFxMsg
+                HazardEvent::ItemOrbit { .. }
+                | HazardEvent::Singularity { .. }
+                | HazardEvent::TrailIgnite { .. }
+                | HazardEvent::DeathSave { .. } => {}
                 HazardEvent::Mortar { from, to, dur } => {
                     let from = Vec3::from(from);
                     commands.spawn((
