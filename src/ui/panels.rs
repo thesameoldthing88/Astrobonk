@@ -732,9 +732,13 @@ pub fn pause_panel(
                             if role.is_networked() {
                                 root.spawn(txt(
                                     if *role == crate::net::NetRole::Host {
-                                        "you host this run: pausing freezes it for your whole squad"
+                                        format!(
+                                            "you host this run: pausing freezes it for your whole squad\nteammates join at {}  (port {})",
+                                            crate::net::local_ip(),
+                                            crate::net::DEFAULT_PORT
+                                        )
                                     } else {
-                                        "the host's world keeps running while this menu is open"
+                                        "the host's world keeps running while this menu is open".to_string()
                                     },
                                     FONT_SMALL,
                                     Color::srgb(0.6, 0.65, 0.8),
