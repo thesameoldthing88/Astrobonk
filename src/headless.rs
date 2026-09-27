@@ -435,6 +435,9 @@ struct WeaponProbe {
     staged_combo: u32,
     /// Hits a STUNNED foe landed on an astronaut (must stay 0).
     stunned_attacks: u32,
+    /// Frames some live foe stood within arm's reach (3.5 m) of an astronaut: the close-range
+    /// weapons (hug, cone, bell, yo-yo) can only be judged on a run that let foes that near.
+    close_frames: u32,
 }
 
 fn weapons_from_args() -> (Vec<crate::content::weapons::WeaponKind>, bool) {
@@ -524,7 +527,18 @@ fn weapon_probe_watch(
     mut fx: MessageReader<crate::arsenal::WeaponFxMsg>,
     mut hurt: MessageReader<crate::messages::PlayerHitMsg>,
     stunned: Query<(), With<crate::enemies::Stunned>>,
+    hash: Res<crate::enemies::SpatialHash>,
+    astronauts: Query<&Transform, With<Player>>,
+    foes: Query<&Enemy>,
 ) {
+    let close = astronauts.iter().any(|tf| {
+        hash.near(tf.translation, 3.5).any(|(e, p)| {
+            p.distance_squared(tf.translation) < 3.5 * 3.5 && foes.get(e).is_ok_and(|en| en.speed > 0.0)
+        })
+    });
+    if close {
+        probe.close_frames += 1;
+    }
     for m in fx.read() {
         if let crate::arsenal::WeaponFx::Evolve { owner, .. } = m.fx {
             if !probe.fx_evolve.contains(&owner) {
@@ -540,8 +554,15 @@ fn weapon_probe_watch(
 }
 
 /// The summary's verdict on `--weapons`: each carried weapon did its own §6 thing.
-fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
+fn weapon_probe_verdict(world: &mut World, peers: usize) -> bool {
     use crate::content::weapons::WeaponKind as W;
+    let loadouts: Vec<String> = world
+        .query::<(&crate::player::PlayerId, &PlayerState)>()
+        .iter(world)
+        .map(|(pid, ps)| format!("p{}[{}]", pid.0, ps.weapons.iter().map(|w| w.kind.def().name).collect::<Vec<_>>().join(", ")))
+        .collect();
+    println!("WEAPONS loadouts {}", loadouts.join(" "));
+    let world = &*world;
     let probe = world.resource::<WeaponProbe>();
     let tm = world.resource::<crate::arsenal::ArsenalTelemetry>();
     let planet_r = world.resource::<CurrentPlanet>().radius;
@@ -560,6 +581,12 @@ fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
             fails.push(what.to_string());
         }
     };
+    // (close-range weapons are judged only on a run that brought foes into reach — the
+    // early game's thin crowd can leave a kiting bot untouched for the whole run)
+    let close = probe.close_frames >= 90;
+    if !close {
+        println!("  WEAPONS (only {} frames with a foe in reach: the close-range checks are skipped — use --fast-boss)", probe.close_frames);
+    }
     let mut has: Vec<W> = probe.list.clone();
     has.extend(probe.evolved.iter().map(|(_, w)| *w));
     let carried = |w: W| has.contains(&w);
@@ -570,7 +597,7 @@ fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
     if carried(W::RaguRain) {
         need(tm.splits > 0 && tm.splats > tm.lobs, "RAGÙ RAIN never split on the way down");
     }
-    if carried(W::StaticCling) || carried(W::FullDischarge) {
+    if close && (carried(W::StaticCling) || carried(W::FullDischarge)) {
         need(tm.hug_hits > 0, "the hug field never bit");
     }
     if carried(W::FullDischarge) {
@@ -583,28 +610,31 @@ fn weapon_probe_verdict(world: &World, peers: usize) -> bool {
         let lap = std::f32::consts::TAU * planet_r / 46.0;
         need(secs < lap + 4.0 || tm.disc_laps > 0, "THE OMNIDISC never came all the way round the planet");
     }
-    if carried(W::SonicWhoopee) {
+    if close && carried(W::SonicWhoopee) {
         need(tm.cones > 0 && tm.cone_hits > 0, "the Whoopee cone never caught anyone");
     }
     if carried(W::BrownNote) {
         need(tm.repulsors > 0 && tm.repulsor_hits > 0, "THE BROWN NOTE's ring never shoved anyone");
     }
-    if carried(W::SonicWhoopee) || carried(W::BrownNote) {
+    if close && (carried(W::SonicWhoopee) || carried(W::BrownNote)) {
         need(tm.stuns > 0, "nothing was ever stunned");
     }
     need(probe.stunned_attacks == 0, "a stunned foe landed a hit");
     if carried(W::CosmonautsBell) || carried(W::Angelus) {
-        need(tm.tolls > 0 && tm.marks > 0, "the bell never tolled on anyone");
+        need(tm.tolls > 0, "the bell never tolled");
+    }
+    if close && (carried(W::CosmonautsBell) || carried(W::Angelus)) {
+        need(tm.marks > 0, "the bell never tolled on anyone");
         need(tm.mark_crits > 0, "a bell mark never turned a hit into a crit");
     }
-    if carried(W::Angelus) {
+    if close && carried(W::Angelus) {
         need(tm.wisps > 0 && tm.wisp_hits > 0, "THE ANGELUS raised no wisp that hit");
     }
     if carried(W::YoYo) || carried(W::SwordYo) {
-        need(tm.yoyo_hits > 0, "the yo-yo never hit");
+        need(!close || tm.yoyo_hits > 0, "the yo-yo never hit");
         need(tm.max_combo >= 2.0, "the un-hit move combo never built");
     }
-    if carried(W::SwordYo) {
+    if close && carried(W::SwordYo) {
         need(tm.garrote_hits > 0, "SWORD-YO's cord never garrotted at max combo");
     }
     if probe.evolve {

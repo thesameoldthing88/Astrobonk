@@ -1038,13 +1038,11 @@ pub fn record_kills(time: Res<Time>, mut kills: MessageReader<KillMsg>, mut rece
 }
 
 /// Every machine: age bell marks and keep a halo over (up to BELL_HALO_CAP of) them.
-#[allow(clippy::type_complexity)]
 pub fn bell_marks(
     mut commands: Commands,
     time: Res<Time>,
     assets: Res<WeaponAssets>,
     mut marked: Query<(Entity, &mut BellMark, &Transform, &Enemy)>,
-    added: Query<Entity, Added<BellMark>>,
     mut halos: Query<(Entity, &MarkHalo, &mut Transform), Without<BellMark>>,
 ) {
     let dt = time.delta_secs();
@@ -1054,12 +1052,12 @@ pub fn bell_marks(
             commands.entity(e).remove::<BellMark>();
         }
     }
-    let mut count = 0;
     let t = time.elapsed_secs();
+    let mut haloed: HashSet<Entity> = HashSet::new();
     for (he, halo, mut tf) in &mut halos {
         match marked.get(halo.target) {
             Ok((_, m, etf, en)) if m.secs > 0.0 => {
-                count += 1;
+                haloed.insert(halo.target);
                 let up = en.dir;
                 tf.translation = etf.translation + up * (en.scale * 0.9 + 0.35);
                 tf.rotation = sphere::frame_quat(up, sphere::tangent_frame(up).0) * Quat::from_rotation_y(t * 2.0);
@@ -1068,18 +1066,21 @@ pub fn bell_marks(
             _ => commands.entity(he).despawn(),
         }
     }
-    for e in &added {
+    let mut count = haloed.len();
+    for (e, m, _, _) in &marked {
         if count >= BELL_HALO_CAP {
             break;
         }
-        commands.spawn((
-            MarkHalo { target: e },
-            Mesh3d(assets.ring_mesh.clone()),
-            MeshMaterial3d(assets.mats[&WeaponKind::CosmonautsBell].clone()),
-            Transform::from_scale(Vec3::ZERO),
-            StageScoped,
-        ));
-        count += 1;
+        if m.secs > 0.0 && !haloed.contains(&e) {
+            commands.spawn((
+                MarkHalo { target: e },
+                Mesh3d(assets.ring_mesh.clone()),
+                MeshMaterial3d(assets.mats[&WeaponKind::CosmonautsBell].clone()),
+                Transform::from_scale(Vec3::ZERO),
+                StageScoped,
+            ));
+            count += 1;
+        }
     }
 }
 
