@@ -129,10 +129,10 @@ impl ItemProcs {
     }
 }
 
-/// Period of an "every X seconds" item for this sheet. P05's Tome of Swarm ("+proc
-/// frequency on all every-X-seconds items") divides in here.
-pub fn proc_period(base: f32, _ps: &PlayerState) -> f32 {
-    base
+/// Period of an "every X seconds" item for this sheet: Tome of the Swarm ("+proc frequency
+/// on all every-X-seconds items") divides it by the sheet's Proc Frequency.
+pub fn proc_period(base: f32, ps: &PlayerState) -> f32 {
+    base / ps.stats.proc_rate.max(0.1)
 }
 
 /// Where Second Astronaut's ghost floats: off the owner's right shoulder, bobbing — out to
@@ -419,6 +419,8 @@ pub fn item_upkeep(
         return;
     }
     run.static_radio = q.iter().any(|(_, ps, _)| ps.has_item(ItemKind::StaticRadio));
+    // Tome of the Elite: elites are world loot, so the best Elite Loot in the party pays
+    run.elite_loot = q.iter().map(|(_, ps, _)| ps.stats.elite_loot).fold(1.0f32, f32::max);
     if q.iter().any(|(_, ps, _)| ps.has_item(ItemKind::DevouredSunShard)) && run.sun_shrink < 1.0 {
         run.sun_shard_secs += dt;
         if run.sun_shard_secs >= SUN_SHARD_PERIOD {
@@ -467,21 +469,26 @@ pub fn item_upkeep(
     }
 }
 
-/// Every machine: which compass octants around each astronaut hold an enemy (Encirclement
-/// Bonus). The host's number deals the damage; a client's (from its streamed proxies) is
-/// its own HUD's. One spatial-hash query per astronaut every ENCIRCLE_SCAN_SECS — never a
-/// pass over the horde.
+/// Every machine: who is surrounding each astronaut — which compass octants hold an enemy
+/// (Encirclement Bonus) and how many foes stand within TOME_CROWD_RADIUS (Tome of
+/// Encirclement). The host's numbers deal the damage; a client's (from its streamed
+/// proxies) are its own HUD's. One spatial-hash query per astronaut every
+/// ENCIRCLE_SCAN_SECS — never a pass over the horde.
 pub fn encirclement_scan(
     time: Res<Time>,
     hash: Res<SpatialHash>,
     enemies: Query<&Enemy>,
     mut telemetry: ResMut<ItemTelemetry>,
+    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
     mut q: Query<(&Player, &mut PlayerState, &mut ItemProcs, &Transform)>,
 ) {
     let dt = time.delta_secs();
     for (p, mut ps, mut procs, tf) in &mut q {
-        if !ps.has_item(ItemKind::EncirclementBonus) || ps.dead {
+        let octants = ps.has_item(ItemKind::EncirclementBonus);
+        let crowd = ps.stats.crowd_damage > 0.0;
+        if !(octants || crowd) || ps.dead {
             ps.encircle_dirs = 0;
+            ps.crowd = 0;
             continue;
         }
         procs.encircle_cd -= dt;
@@ -491,8 +498,10 @@ pub fn encirclement_scan(
         procs.encircle_cd = ENCIRCLE_SCAN_SECS;
         let up = p.dir;
         let (t, b) = sphere::tangent_frame(up);
+        let reach = if octants { ENCIRCLE_RADIUS.max(TOME_CROWD_RADIUS) } else { TOME_CROWD_RADIUS };
         let mut dirs = 0u8;
-        for (e, pos) in hash.near(tf.translation, ENCIRCLE_RADIUS) {
+        let mut near = 0u32;
+        for (e, pos) in hash.near(tf.translation, reach) {
             // pots share the hash (speed 0); they surround nobody
             if !enemies.get(e).is_ok_and(|en| en.speed > 0.0) {
                 continue;
@@ -500,6 +509,9 @@ pub fn encirclement_scan(
             let v = pos - tf.translation;
             let vt = v - up * v.dot(up);
             let d = vt.length();
+            if d <= TOME_CROWD_RADIUS {
+                near += 1;
+            }
             if d < 0.3 || d > ENCIRCLE_RADIUS {
                 continue;
             }
@@ -507,8 +519,10 @@ pub fn encirclement_scan(
             let octant = ((ang / std::f32::consts::TAU * 8.0) as u32).min(7);
             dirs |= 1 << octant;
         }
-        ps.encircle_dirs = dirs;
-        telemetry.max_encircle = telemetry.max_encircle.max(dirs.count_ones());
+        ps.encircle_dirs = if octants { dirs } else { 0 };
+        ps.crowd = if crowd { near.min(TOME_CROWD_CAP) } else { 0 };
+        telemetry.max_encircle = telemetry.max_encircle.max(ps.encircle_dirs.count_ones());
+        tome_tel.max_crowd_bonus = tome_tel.max_crowd_bonus.max(ps.crowd_bonus());
     }
 }
 
@@ -588,11 +602,14 @@ pub fn orbital_yoyo(
         // so a throw always carries YOYO_DAMAGE × power in total.
         let chunks = stack.count().min(YOYO_MAX_CHUNKS);
         let damage = YOYO_DAMAGE * stack.power() / stack.count() as f32 * ps.damage_mult();
-        let radius = yoyo_radius(&planet);
-        spawn_orbit(&mut commands, &assets, e, tf.translation, chunks, radius, YOYO_ORBIT_SECS, damage);
+        // Tome of Orbit: a wider swing, lapped faster — it is orbiting debris
+        let orbit = ps.stats.orbit.max(0.1);
+        let radius = yoyo_radius(&planet) * orbit;
+        let dur = YOYO_ORBIT_SECS / orbit;
+        spawn_orbit(&mut commands, &assets, e, tf.translation, chunks, radius, dur, damage);
         telemetry.yoyo_throws += 1;
         fx.write(ItemFxMsg {
-            fx: ItemFx::Orbit { owner: pid.0, chunks: chunks as u8, radius, dur: YOYO_ORBIT_SECS },
+            fx: ItemFx::Orbit { owner: pid.0, chunks: chunks as u8, radius, dur },
             from_wire: false,
         });
     }
@@ -991,7 +1008,8 @@ pub fn push_net_item_vis(mut q: Query<(&Player, &PlayerState, &ItemProcs, &mut N
         }
         let ghost = ps.ghost_weapon.map(|w| w.code() + 1).unwrap_or(0);
         let widow_cd = procs.widow_cd.ceil().min(255.0) as u8;
-        let next = NetItemVis { ghost, flags, widow_cd };
+        let lamp = crate::net::lamp_code(ps.stats.flashlight);
+        let next = NetItemVis { ghost, flags, widow_cd, lamp };
         if *vis != next {
             *vis = next;
         }

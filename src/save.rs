@@ -148,12 +148,23 @@ impl AssistOptions {
     }
 }
 
+/// Save-format generation `migrate()` brings every save up to. 1: tomes went from 20 levels
+/// to 10 ranks (P05). Bump when a stored value's MEANING changes; a new field alone needs no
+/// bump (`#[serde(default)]` covers it).
+pub const SAVE_VERSION: u32 = 1;
+
 #[derive(Resource, Serialize, Deserialize, Clone, Debug)]
 #[serde(default)] // missing fields (e.g. from older saves) fall back to Default — never wipe progress
 pub struct MetaSave {
+    /// See `SAVE_VERSION`. Field-level default (0) rather than the struct's: a save written
+    /// before the field existed is the OLDEST format, not the current one.
+    #[serde(default)]
+    pub version: u32,
     pub silver: u64,
+    /// Rank per tome, 0..=TOME_MAX_RANK.
     pub tome_levels: HashMap<TomeKind, u32>,
     pub tome_loadout: Vec<TomeKind>,
+    /// Loadout slots: TOME_BASE_SLOTS plus quest rewards (P21 adds more of those).
     pub tome_slots: u32,
     pub unlocked_chars: HashSet<AstronautKind>,
     pub unlocked_weapons: HashSet<WeaponKind>,
@@ -207,10 +218,11 @@ impl Default for MetaSave {
         unlocked_planets.insert(PlanetKind::Moon);
         unlocked_planets.insert(PlanetKind::Mars); // dev: Mars selectable for playtesting
         Self {
+            version: SAVE_VERSION,
             silver: 0,
             tome_levels: HashMap::new(),
             tome_loadout: vec![TomeKind::Damage, TomeKind::Health, TomeKind::Xp],
-            tome_slots: 3,
+            tome_slots: config::TOME_BASE_SLOTS,
             unlocked_chars,
             unlocked_weapons,
             unlocked_planets,
@@ -254,7 +266,7 @@ impl MetaSave {
 
     /// Fold in content that ships unlocked-by-default so existing saves gain
     /// newly added starter heroes/weapons without wiping progress.
-    fn migrate(&mut self) {
+    pub(crate) fn migrate(&mut self) {
         let fresh = Self::default();
         for c in &fresh.unlocked_chars {
             self.unlocked_chars.insert(*c);
@@ -280,6 +292,34 @@ impl MetaSave {
             1.0
         };
         self.assist = self.assist.clamped();
+        self.migrate_tomes();
+        self.version = SAVE_VERSION;
+    }
+
+    /// Tomes: 20 levels became 10 ranks worth two levels each (P05), so an old level L is
+    /// rank ⌈L/2⌉ — rounded UP, so no tome ever loses power it was paid for. The loadout
+    /// grew from 3 base slots to TOME_BASE_SLOTS; slots are re-derived from the quests that
+    /// granted them, keeping any extra an older build handed out.
+    fn migrate_tomes(&mut self) {
+        if self.version < 1 {
+            for rank in self.tome_levels.values_mut() {
+                *rank = rank.div_ceil(2);
+            }
+        }
+        for rank in self.tome_levels.values_mut() {
+            *rank = (*rank).min(config::TOME_MAX_RANK);
+        }
+        let earned = self
+            .quests_done
+            .iter()
+            .flat_map(|q| q.def().rewards.iter())
+            .filter(|r| matches!(r, Reward::TomeSlot))
+            .count() as u32;
+        self.tome_slots = self.tome_slots.max(config::TOME_BASE_SLOTS + earned).min(config::TOME_SLOTS_MAX);
+        // a hand-edited or corrupt loadout: no duplicates, never more than the slots
+        let mut seen = HashSet::new();
+        self.tome_loadout.retain(|t| seen.insert(*t));
+        self.tome_loadout.truncate(self.tome_slots as usize);
     }
 
     pub fn save(&self) {
@@ -299,6 +339,40 @@ impl MetaSave {
 
     pub fn tome_level(&self, t: TomeKind) -> u32 {
         *self.tome_levels.get(&t).unwrap_or(&0)
+    }
+
+    /// The rank a tome contributes to a run: its rank when slotted, 0 otherwise.
+    pub fn tome_rank_equipped(&self, t: TomeKind) -> u32 {
+        if self.tome_loadout.contains(&t) {
+            self.tome_level(t)
+        } else {
+            0
+        }
+    }
+
+    /// Buy the next rank of `t` if it has one and the Silver is there. True if bought.
+    pub fn buy_tome(&mut self, t: TomeKind) -> bool {
+        let rank = self.tome_level(t);
+        let cost = t.cost(rank);
+        if rank >= config::TOME_MAX_RANK || self.silver < cost {
+            return false;
+        }
+        self.silver -= cost;
+        self.tome_levels.insert(t, rank + 1);
+        true
+    }
+
+    /// Slot `t` into the loadout, or take it out. False when it would not fit.
+    pub fn toggle_tome(&mut self, t: TomeKind) -> bool {
+        if let Some(i) = self.tome_loadout.iter().position(|x| *x == t) {
+            self.tome_loadout.remove(i);
+            true
+        } else if (self.tome_loadout.len() as u32) < self.tome_slots {
+            self.tome_loadout.push(t);
+            true
+        } else {
+            false
+        }
     }
 
     /// Check all quests against counters; apply rewards for newly completed ones.
@@ -355,7 +429,7 @@ impl MetaSave {
             Reward::UnlockPlanet(p) => {
                 self.unlocked_planets.insert(p);
             }
-            Reward::TomeSlot => self.tome_slots = (self.tome_slots + 1).min(5),
+            Reward::TomeSlot => self.tome_slots = (self.tome_slots + 1).min(config::TOME_SLOTS_MAX),
         }
     }
 

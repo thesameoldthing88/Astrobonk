@@ -37,6 +37,48 @@ pub enum StatKind {
     DamageTaken,
     /// Max HP as a fraction, applied after every flat bonus (−0.2 = −20%) — Widow's Ring.
     MaxHpMult,
+    // ---- the §7 tomes' lines (P05); what each one DOES is mapped in `tomes.rs` ----
+    /// Size and speed of orbiting and returning weapons (+0.04 = +4%) — Tome of Orbit.
+    Orbit,
+    /// Damage per foe within TOME_CROWD_RADIUS (up to TOME_CROWD_CAP) — Tome of Encirclement.
+    CrowdDamage,
+    /// Damage while standing on the night side — Tome of Nightfall.
+    NightDamage,
+    /// Flashlight reach and brightness — Tome of Nightfall.
+    Flashlight,
+    /// Gravity while falling (+0.06 = lands 6% harder) — Tome of Gravity.
+    FallSpeed,
+    /// Frequency of every "every X seconds" item — Tome of the Swarm.
+    ProcRate,
+    /// Chance a shot skips off the ground once when it comes down — Tome of Ricochet.
+    Ricochet,
+    /// Damage at full momentum (MOMENTUM_RAMP_SECS of unbroken movement) — Tome of Momentum.
+    MomentumDamage,
+    /// Extra share of Vampire Visor's own lifesteal — Tome of Vampirism.
+    VisorBoost,
+    /// Loot from elite kills — Tome of the Elite (party-wide, like Difficulty).
+    EliteLoot,
+    /// Multiplier on hits from elites — Tome of the Elite's price.
+    EliteDamageTaken,
+    /// Banish charges / free Refreshes per run — Tome of Banishment.
+    ExtraBanishes,
+    ExtraRefreshes,
+    /// Off the Gold price of paid Refreshes — Tome of Banishment.
+    RefreshDiscount,
+    /// Free Microwave uses per stage — Tome of Duplication.
+    FreeMicrowave,
+    /// Chance a Microwave duplicate keeps its full grade — Tome of Duplication.
+    DupeKeepGrade,
+    /// Rate (1/s) at which XP lying over the horizon flies home — Tome of the Horizon.
+    HorizonCollect,
+    /// Silver The Static pays (overtime and its ghosts' drops) — Tome of Static.
+    StaticSilver,
+    /// Multiplier on hits from The Static — Tome of Static's price.
+    StaticDamageTaken,
+    /// Evolution slots on top of `config::EVOLUTION_CAP` — Tome of Ascension.
+    EvoSlots,
+    /// Damage of evolved weapons — Tome of Ascension.
+    EvoDamage,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -72,6 +114,28 @@ pub struct Stats {
     pub damage_taken: f32,
     /// Multiplier on max HP after every flat bonus, base 1.0 (`PlayerState::recompute_stats`).
     pub max_hp_mult: f32,
+    // ---- tome lines (see StatKind) ----
+    pub orbit: f32, // multiplier, base 1.0
+    pub crowd_damage: f32,
+    pub night_damage: f32,
+    pub flashlight: f32, // multiplier, base 1.0
+    pub fall_speed: f32, // gravity multiplier while falling, base 1.0
+    pub proc_rate: f32,  // multiplier, base 1.0
+    pub ricochet: f32,   // 0..1
+    pub momentum_damage: f32,
+    pub visor_boost: f32,
+    pub elite_loot: f32,         // multiplier, base 1.0
+    pub elite_damage_taken: f32, // multiplier, base 1.0
+    pub extra_banishes: i32,
+    pub extra_refreshes: i32,
+    pub refresh_discount: f32, // 0..0.9
+    pub free_microwave: i32,
+    pub dupe_keep_grade: f32, // 0..1
+    pub horizon_collect: f32, // 1/s; 0 = off
+    pub static_silver: f32,      // multiplier, base 1.0
+    pub static_damage_taken: f32, // multiplier, base 1.0
+    pub evo_slots: i32,
+    pub evo_damage: f32, // multiplier, base 1.0
 }
 
 impl Default for Stats {
@@ -106,6 +170,27 @@ impl Default for Stats {
             chest_discount: 0.0,
             damage_taken: 1.0,
             max_hp_mult: 1.0,
+            orbit: 1.0,
+            crowd_damage: 0.0,
+            night_damage: 0.0,
+            flashlight: 1.0,
+            fall_speed: 1.0,
+            proc_rate: 1.0,
+            ricochet: 0.0,
+            momentum_damage: 0.0,
+            visor_boost: 0.0,
+            elite_loot: 1.0,
+            elite_damage_taken: 1.0,
+            extra_banishes: 0,
+            extra_refreshes: 0,
+            refresh_discount: 0.0,
+            free_microwave: 0,
+            dupe_keep_grade: 0.0,
+            horizon_collect: 0.0,
+            static_silver: 1.0,
+            static_damage_taken: 1.0,
+            evo_slots: 0,
+            evo_damage: 1.0,
         }
     }
 }
@@ -143,6 +228,27 @@ impl Stats {
             ChestDiscount => self.chest_discount = (self.chest_discount + v).min(0.6),
             DamageTaken => self.damage_taken += v,
             MaxHpMult => self.max_hp_mult += v,
+            Orbit => self.orbit += v,
+            CrowdDamage => self.crowd_damage += v,
+            NightDamage => self.night_damage += v,
+            Flashlight => self.flashlight += v,
+            FallSpeed => self.fall_speed += v,
+            ProcRate => self.proc_rate += v,
+            Ricochet => self.ricochet = (self.ricochet + v).min(1.0),
+            MomentumDamage => self.momentum_damage += v,
+            VisorBoost => self.visor_boost += v,
+            EliteLoot => self.elite_loot += v,
+            EliteDamageTaken => self.elite_damage_taken += v,
+            ExtraBanishes => self.extra_banishes += v as i32,
+            ExtraRefreshes => self.extra_refreshes += v as i32,
+            RefreshDiscount => self.refresh_discount = (self.refresh_discount + v).min(0.9),
+            FreeMicrowave => self.free_microwave += v as i32,
+            DupeKeepGrade => self.dupe_keep_grade = (self.dupe_keep_grade + v).min(1.0),
+            HorizonCollect => self.horizon_collect += v,
+            StaticSilver => self.static_silver += v,
+            StaticDamageTaken => self.static_damage_taken += v,
+            EvoSlots => self.evo_slots += v as i32,
+            EvoDamage => self.evo_damage += v,
         }
     }
 }
@@ -156,30 +262,69 @@ impl StatKind {
             Shield => format!("+{v:.0} Shield"),
             Armor => format!("+{v:.0} Armor"),
             Evasion => format!("+{v:.0} Evasion"),
-            Lifesteal => format!("+{:.0}% Lifesteal", v * 100.0),
+            Lifesteal => format!("+{}% Lifesteal", pct(v)),
             Thorns => format!("+{v:.0} Thorns"),
-            Damage => format!("+{:.0}% Damage", v * 100.0),
-            CritChance => format!("+{:.0}% Crit Chance", v * 100.0),
+            Damage => format!("+{}% Damage", pct(v)),
+            CritChance => format!("+{}% Crit Chance", pct(v)),
             CritDamage => format!("+{:.1}x Crit Damage", v),
-            AttackSpeed => format!("+{:.0}% Attack Speed", v * 100.0),
+            AttackSpeed => format!("+{}% Attack Speed", pct(v)),
             Projectiles => format!("+{v:.0} Projectile"),
-            ProjSpeed => format!("+{:.0}% Projectile Speed", v * 100.0),
-            Size => format!("+{:.0}% Size", v * 100.0),
-            Duration => format!("+{:.0}% Duration", v * 100.0),
-            EliteDamage => format!("+{:.0}% Damage to Elites", v * 100.0),
-            Knockback => format!("+{:.0}% Knockback", v * 100.0),
-            MoveSpeed => format!("+{:.0}% Move Speed", v * 100.0),
+            ProjSpeed => format!("+{}% Projectile Speed", pct(v)),
+            Size => format!("+{}% Size", pct(v)),
+            Duration => format!("+{}% Duration", pct(v)),
+            EliteDamage => format!("+{}% Damage to Elites", pct(v)),
+            Knockback => format!("+{}% Knockback", pct(v)),
+            MoveSpeed => format!("+{}% Move Speed", pct(v)),
             ExtraJumps => format!("+{v:.0} Jump"),
-            JumpHeight => format!("+{:.0}% Jump Height", v * 100.0),
-            Luck => format!("+{:.0}% Luck", v * 100.0),
-            Difficulty => format!("+{:.0}% Difficulty", v * 100.0),
-            PickupRange => format!("+{:.0}% Pickup Range", v * 100.0),
-            XpGain => format!("+{:.0}% XP Gain", v * 100.0),
-            GoldGain => format!("+{:.0}% Gold Gain", v * 100.0),
-            SilverGain => format!("+{:.0}% Silver Gain", v * 100.0),
-            ChestDiscount => format!("-{:.0}% Chest Cost", v * 100.0),
-            DamageTaken => format!("+{:.0}% Damage Taken", v * 100.0),
+            JumpHeight => format!("+{}% Jump Height", pct(v)),
+            Luck => format!("+{}% Luck", pct(v)),
+            Difficulty => format!("+{}% Difficulty", pct(v)),
+            PickupRange => format!("+{}% Pickup Range", pct(v)),
+            XpGain => format!("+{}% XP Gain", pct(v)),
+            GoldGain => format!("+{}% Gold Gain", pct(v)),
+            SilverGain => format!("+{}% Silver Gain", pct(v)),
+            ChestDiscount => format!("-{}% Chest Cost", pct(v)),
+            DamageTaken => format!("+{}% Damage Taken", pct(v)),
             MaxHpMult => format!("{:+.0}% Max HP", v * 100.0),
+            Orbit => format!("+{}% Orbit & Return Size/Speed", pct(v)),
+            CrowdDamage => format!(
+                "+{}% Damage per foe within {:.0}m (max {})",
+                pct(v),
+                crate::config::TOME_CROWD_RADIUS,
+                crate::config::TOME_CROWD_CAP
+            ),
+            NightDamage => format!("+{}% Damage on the night side", pct(v)),
+            Flashlight => format!("+{}% Flashlight", pct(v)),
+            FallSpeed => format!("+{}% Fall Speed", pct(v)),
+            ProcRate => format!("+{}% Proc Frequency", pct(v)),
+            Ricochet => format!("{}% of shots skip off the ground", pct(v)),
+            MomentumDamage => {
+                format!("Up to +{}% Damage after {:.0}s on the move", pct(v), crate::config::MOMENTUM_RAMP_SECS)
+            }
+            VisorBoost => format!("+{}% Vampire Visor", pct(v)),
+            EliteLoot => format!("+{}% Elite Loot", pct(v)),
+            EliteDamageTaken => format!("+{}% Damage from Elites", pct(v)),
+            ExtraBanishes => format!("+{v:.0} Banish per run"),
+            ExtraRefreshes => format!("+{v:.0} free Refresh per run"),
+            RefreshDiscount => format!("-{}% paid Refresh price", pct(v)),
+            FreeMicrowave => format!("+{v:.0} free Microwave use per stage"),
+            DupeKeepGrade => format!("{}% of duplicates keep their grade", pct(v)),
+            HorizonCollect => format!("XP over the horizon flies home after {:.0}s", 1.0 / v.max(1e-3)),
+            StaticSilver => format!("+{}% Silver from The Static", pct(v)),
+            StaticDamageTaken => format!("+{}% Damage from The Static", pct(v)),
+            EvoSlots => format!("+{v:.0} Evolution slot"),
+            EvoDamage => format!("+{}% Evolved weapon Damage", pct(v)),
         }
+    }
+}
+
+/// A fraction as a percentage for card text: whole when it is whole ("+4%"), one decimal
+/// when it is not ("+2.4%", "+0.4%") — tome ranks move some lines by fractions of a percent.
+fn pct(v: f32) -> String {
+    let p = v * 100.0;
+    if (p - p.round()).abs() < 0.05 {
+        format!("{:.0}", p)
+    } else {
+        format!("{:.1}", p)
     }
 }

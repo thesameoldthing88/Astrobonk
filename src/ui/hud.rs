@@ -567,8 +567,8 @@ pub fn update_weapon_row(
     });
 }
 
-/// One line of what the local astronaut's conditional items are doing — the numbers the
-/// §7 items deal damage from, so "+12% from the descent" is something you can read.
+/// One line of what the local astronaut's conditional items and tomes are doing — the
+/// numbers they deal damage from, so "+12% from the descent" is something you can read.
 pub fn update_item_status(
     run: Res<RunState>,
     q_ps: Query<(&PlayerState, &crate::items::ItemProcs), With<crate::player::LocalPlayer>>,
@@ -607,6 +607,16 @@ pub fn update_item_status(
     }
     if run.sun_shrink > 0.0 {
         parts.push(format!("SUN -{:.0}%", run.sun_shrink * 100.0));
+    }
+    // the tomes' conditions (Encirclement, Nightfall, Momentum)
+    if ps.crowd_bonus() >= 0.005 {
+        parts.push(format!("CROWD {} +{:.0}%", ps.crowd, ps.crowd_bonus() * 100.0));
+    }
+    if ps.night_bonus() > 0.0 {
+        parts.push(format!("NIGHT +{:.0}%", ps.night_bonus() * 100.0));
+    }
+    if ps.momentum_bonus() >= 0.005 {
+        parts.push(format!("MOMENTUM +{:.0}%", ps.momentum_bonus() * 100.0));
     }
     let line = parts.join("  ");
     if text.0 != line {

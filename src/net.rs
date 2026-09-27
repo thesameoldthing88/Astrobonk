@@ -44,7 +44,9 @@ use std::time::{Duration, SystemTime};
 // Bumped for wave 2: P03 (items in the build sync, NetItemVis, item hazard events, jump_held,
 // sun/radio in RunSnapMsg) and P04 (§13 assists in RunSnapMsg, revives in PlayerVitals, burrow
 // cracks on the hazard lane) each took 0xA570B0_5 on their own branch; the merged wire is _6.
-pub const PROTOCOL_ID: u64 = 0xA570B0_6;
+// Bumped for wave 3 / P05: the tome lines in `Stats` (PlayerBuildMsg), NetItemVis.lamp and
+// PickupEvent::Horizon.
+pub const PROTOCOL_ID: u64 = 0xA570B0_7;
 pub const DEFAULT_PORT: u16 = 5011;
 pub const MAX_PLAYERS: usize = 4;
 
@@ -118,6 +120,22 @@ pub struct NetItemVis {
     /// Widow's Ring's death-save recharge, whole seconds left (0 = ready) — the host ticks
     /// it, and a joiner's HUD shows it.
     pub widow_cd: u8,
+    /// Flashlight strength (Tome of Nightfall) as `lamp_code`, so every machine lights each
+    /// astronaut's beam as its owner does. 0 = never written (drawn at the base 1.0).
+    pub lamp: u8,
+}
+
+/// Flashlight multiplier on the wire: tenths, so the tome's +10% per rank is exact.
+pub fn lamp_code(flashlight: f32) -> u8 {
+    (flashlight * 10.0).round().clamp(1.0, 255.0) as u8
+}
+
+pub fn lamp_from_code(c: u8) -> f32 {
+    if c == 0 {
+        1.0
+    } else {
+        c as f32 / 10.0
+    }
 }
 
 /// Laying a Comet Tail right now (carrying it and moving).
@@ -341,6 +359,11 @@ pub enum GrantOut {
 pub enum PickupEvent {
     Spawn { id: u16, kind: u8, value: u32, dir: [f32; 3], bob: f32 },
     Despawn { id: u16 },
+    // appended (P05): never reorder
+    /// Tome of the Horizon called this gem home to player `owner` from over the horizon —
+    /// the one fly-home a client cannot derive (it is decided by the owner's tome and the
+    /// gem's age on the host), so it is announced; the flight itself is drawn locally.
+    Horizon { id: u16, owner: u8 },
 }
 
 #[derive(Message, Serialize, Deserialize, Clone, Debug)]
@@ -673,6 +696,12 @@ impl Plugin for NetPlugin {
             .add_systems(
                 Update,
                 crate::items::log_item_fx
+                    .run_if(in_state(crate::AppState::InRun))
+                    .run_if(|d: Res<NetDebug>| d.log),
+            )
+            .add_systems(
+                Update,
+                crate::tomes::log_tomes
                     .run_if(in_state(crate::AppState::InRun))
                     .run_if(|d: Res<NetDebug>| d.log),
             )
@@ -1123,6 +1152,9 @@ fn apply_player_build(
                 ps.hp += d;
             }
             ps.hp = ps.hp.min(ps.stats.max_hp);
+            // The one per-run allowance a peer's tomes set that the host's copy reads back
+            // (Tome of Ascension, through `evo_cap`), so both copies agree on it.
+            ps.evo_slots_bonus = message.stats.evo_slots.max(0) as u32;
             // Items too: the host simulates what they DO (procs, death-saves) for this peer.
             // Their STAT effect is already in `stats`, and recompute_stats stays CLIENT-ONLY
             // for a peer sheet (it would fold in the HOST's meta tomes and save, producing
@@ -1399,6 +1431,11 @@ fn seat_joining_players(
     // vanishes for good after the first planet — and on the client their rig disappears
     // with the replicated entity, which looks exactly like a netcode fault.
     let alive: Vec<u8> = existing.iter().map(|pid| pid.0).collect();
+    // A peer's sheet is THEIR build: the host must not fold its own meta tomes into it,
+    // even for the moment before their first PlayerBuildMsg lands (with a maxed Tome of
+    // Health the placeholder would stand 120 HP taller than the peer really is).
+    // A closure, not a value: this runs every frame and almost every frame seats nobody.
+    let peer_save = || crate::save::MetaSave { tome_loadout: Vec::new(), ..(*save).clone() };
 
     for (client, network_id) in &joined {
         if let Some(id) = slots.player_id(client) {
@@ -1428,7 +1465,7 @@ fn seat_joining_players(
             &mut materials,
             &planet,
             &run,
-            &save,
+            &peer_save(),
             id,
             hero,
             false, // remote: no LocalPlayer marker, no camera, driven by their input
@@ -1449,7 +1486,7 @@ fn seat_joining_players(
             &mut materials,
             &planet,
             &run,
-            &save,
+            &peer_save(),
             id,
             hero,
             false,
@@ -2113,6 +2150,17 @@ fn reset_after_session(
 //        headless: --items new [--coop2] | --deathsave [--coop2]
 //        windowed: coop.sh … --dev --items orbitalyoyo,comettail,secondastronaut,littleblackhole
 //                  and compare the two sides' ITEMFX lines (a joiner's `wire=` counts events).
+//
+// 2g. TOMES (P05) — no tome-specific wire for the simulation: each machine folds its OWN
+//    save's tomes into its own sheet, and a joiner's derived `Stats` (every tome line is a
+//    stat) reach the host in PlayerBuildMsg, so the host simulates a peer's orbit, crowd,
+//    night, fall, procs, skips, momentum, lifesteal, elite/Static hits and horizon calls
+//    from the peer's own numbers. The host seats a peer on a TOME-FREE placeholder sheet
+//    until that first build lands. What a client must see: Tome of the Horizon's call rides
+//    the pickup lane (PickupEvent::Horizon; the flight is drawn locally), Nightfall's beam
+//    rides NetItemVis.lamp. Repro: headless --tomes all [--coop2]; windowed coop.sh …
+//    --dev --tomes all and compare the two sides' TOMES[...] lines (a joiner's host copy
+//    shows the joiner's lines; `flights_seen` counts horizon calls that arrived).
 //
 // 3. ENEMY STREAMING — the real performance problem. With a 1200-enemy cap, per-entity
 //    replication is not viable. Plan (per the GDD): send compact quantized batches with

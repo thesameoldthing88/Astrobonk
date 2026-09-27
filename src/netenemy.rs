@@ -747,9 +747,14 @@ fn stream_pickups(
     fresh: Query<(Entity, &Pickup), Without<PickupNetId>>,
     mut known: Local<HashMap<Entity, u16>>,
     live: Query<(Entity, &PickupNetId)>,
+    called: Query<(&PickupNetId, &crate::pickups::HorizonBound), Added<crate::pickups::HorizonBound>>,
     mut out: MessageWriter<ToClients<PickupEventMsg>>,
 ) {
     let mut events: Vec<PickupEvent> = Vec::new();
+    // Tome of the Horizon's calls: the one flight a client cannot work out for itself
+    for (id, hb) in &called {
+        events.push(PickupEvent::Horizon { id: id.0, owner: hb.0 });
+    }
 
     for (e, p) in &fresh {
         ids.next = ids.next.wrapping_add(1).max(1);
@@ -833,7 +838,7 @@ fn receive_pickups(
                     };
                     let e = commands
                         .spawn((
-                            Pickup { kind: k, dir, flying: false, speed: 0.0, bob, target: None },
+                            Pickup::new(k, dir, bob),
                             PickupNetId(id),
                             Mesh3d(mesh),
                             MeshMaterial3d(mat),
@@ -852,6 +857,14 @@ fn receive_pickups(
                         }
                     }
                 }
+                PickupEvent::Horizon { id, owner } => {
+                    // `animate_net_pickups` flies it home to that astronaut from here on
+                    if let Some(&e) = index.0.get(&id) {
+                        if let Ok(mut ec) = commands.get_entity(e) {
+                            ec.try_insert(crate::pickups::HorizonBound(owner));
+                        }
+                    }
+                }
             }
         }
     }
@@ -862,11 +875,13 @@ fn receive_pickups(
 /// Purely cosmetic — collection and the XP grant belong to the host, and `pickup_update` is
 /// gated off here. Without this a joiner's gems would hang motionless in the air and then
 /// blink out when the host collected them.
+#[allow(clippy::type_complexity)]
 fn animate_net_pickups(
     time: Res<Time>,
     planet: Option<Res<CurrentPlanet>>,
     q_players: Query<(&Player, &crate::run::PlayerState, &Transform), Without<Pickup>>,
-    mut q: Query<(&mut Pickup, &mut Transform), Without<Player>>,
+    bodies: Query<(&PlayerId, &Transform), (Or<(With<Player>, With<crate::remote::RemoteAstronaut>)>, Without<Pickup>)>,
+    mut q: Query<(&mut Pickup, &mut Transform, Option<&crate::pickups::HorizonBound>), Without<Player>>,
 ) {
     let Some(planet) = planet else { return };
     let dt = time.delta_secs();
@@ -880,7 +895,31 @@ fn animate_net_pickups(
         .map(|(_, ps, tf)| (tf.translation, ps.pickup_range()))
         .collect();
 
-    for (mut p, mut tf) in &mut q {
+    for (mut p, mut tf, called) in &mut q {
+        // Called home over the horizon (the host announced it): the same surface flight
+        // `pickups::pickup_update` flies, to whichever astronaut called it — ours or a
+        // teammate's — then the last metres straight in. The host's despawn ends it.
+        if let Some(body) = called.and_then(|hb| bodies.iter().find(|(id, _)| id.0 == hb.0)).map(|(_, t)| t.translation) {
+            if !p.flying {
+                p.flying = true;
+                p.arc = true;
+                p.speed = 8.0;
+            }
+            let to = body.normalize_or_zero();
+            if p.arc {
+                p.speed = (p.speed + 40.0 * dt).min(crate::config::HORIZON_FLY_SPEED);
+                let mut dir = p.dir;
+                tf.translation = crate::pickups::horizon_flight(&mut dir, to, p.speed * dt, planet.radius, &planet);
+                p.dir = dir;
+                if crate::sphere::arc_dist(p.dir, to, planet.radius) < 2.5 {
+                    p.arc = false;
+                }
+            } else {
+                let v = (body - tf.translation).normalize_or_zero();
+                tf.translation += v * p.speed.max(crate::config::PICKUP_FLY_SPEED) * dt;
+            }
+            continue;
+        }
         let near = attractors
             .iter()
             .filter(|(pos, range)| tf.translation.distance(*pos) < *range)

@@ -24,6 +24,7 @@ mod run;
 mod save;
 mod sphere;
 mod stats;
+mod tomes;
 mod tutorial;
 mod ui;
 
@@ -40,6 +41,8 @@ pub enum AppState {
     MainMenu,
     CharSelect,
     PlanetSelect,
+    /// The tome library (§7 loadout), reached from the main menu.
+    Tomes,
     InRun,
     Results,
 }
@@ -123,6 +126,7 @@ fn main() {
         .init_resource::<ui::hud::BannerQueue>()
         .init_resource::<audio::SfxThrottle>()
         .init_resource::<items::ItemTelemetry>()
+        .init_resource::<tomes::TomeTelemetry>()
         .add_message::<items::ItemFxMsg>()
         .add_message::<messages::HitMsg>()
         .add_message::<messages::PlayerHitMsg>()
@@ -149,6 +153,8 @@ fn main() {
         // ------------- state flow
         .add_systems(OnEnter(AppState::MainMenu), ui::menus::spawn_main_menu)
         .add_systems(OnExit(AppState::MainMenu), ui::menus::despawn_menu)
+        .add_systems(OnEnter(AppState::Tomes), ui::menus::spawn_tome_library)
+        .add_systems(OnExit(AppState::Tomes), ui::menus::despawn_menu)
         .add_systems(OnEnter(AppState::CharSelect), ui::menus::spawn_char_select)
         .add_systems(OnExit(AppState::CharSelect), ui::menus::despawn_menu)
         .add_systems(OnEnter(AppState::PlanetSelect), ui::menus::spawn_planet_select)
@@ -218,6 +224,12 @@ fn main() {
             Update,
             (ui::menus::join_panel_sync, ui::menus::join_addr_input)
                 .run_if(in_state(AppState::MainMenu)),
+        )
+        .add_systems(
+            Update,
+            (ui::menus::tome_library_input, ui::menus::refresh_tome_library)
+                .chain()
+                .run_if(in_state(AppState::Tomes)),
         )
         .add_systems(Update, ui::menus::char_select_input.run_if(in_state(AppState::CharSelect)))
         .add_systems(Update, ui::menus::planet_select_input.run_if(in_state(AppState::PlanetSelect)))
@@ -418,6 +430,8 @@ fn main() {
             )
                 .run_if(in_state(AppState::InRun)),
         )
+        // Tome of Nightfall's beam on every astronaut drawn (presentation: not in headless)
+        .add_systems(Update, tomes::apply_flashlights.run_if(in_state(AppState::InRun)))
         .add_systems(
             Update,
             (ui::numbers::claim_numbers, ui::numbers::update_numbers).chain(),
@@ -552,10 +566,21 @@ fn boot(mut commands: Commands, mut next: ResMut<NextState<AppState>>) {
 ///   `--dev --assist`       density 50%, damage 50%, one more chance
 ///   `--dev --a11y LIST`    comma list of deut|prot|trit, outline, flash, photo, ui=PCT,
 ///                          numbers=full|merged|crits|off, numsize=X
-/// In memory only; the save on disk changes only if the settings panel saves over it.
+///   `--dev --tomes LIST [--tome-rank N]`  slot these tomes (or `all`) at rank N (default
+///                          max), as the headless `--tomes` probe does
+/// In memory only; the save on disk changes only if the settings panel saves over it (or,
+/// for the dev tomes, a finished run banks its Silver).
 fn dev_settings(save: &mut save::MetaSave, args: &[String]) {
     if dev_flag("--assist") {
         save.assist = save::AssistOptions { enemy_density: 0.5, enemy_damage: 0.5, revive_token: true };
+    }
+    if dev_flag("--tomes") {
+        let (tomes, rank) = tomes::tomes_from_args();
+        let slotted = tomes::save_with(&tomes, rank);
+        save.tome_levels.extend(slotted.tome_levels);
+        save.tome_loadout = slotted.tome_loadout;
+        save.tome_slots = save.tome_slots.max(slotted.tome_slots);
+        info!("DEV tomes: {:?} at rank {rank}", save.tome_loadout);
     }
     if !dev_flag("--a11y") {
         return;

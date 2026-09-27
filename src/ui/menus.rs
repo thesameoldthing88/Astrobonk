@@ -1,4 +1,4 @@
-//! Out-of-run screens: main menu (with tome shop + quest log), astronaut select,
+//! Out-of-run screens: main menu (with the quest log), the tome library, astronaut select,
 //! planet/tier select, and the results screen.
 
 use super::*;
@@ -95,16 +95,11 @@ impl Default for JoinAddr {
 }
 #[derive(Component)]
 pub struct SidePanel;
-#[derive(Component)]
-pub struct TomePlus(pub TomeKind);
-#[derive(Component)]
-pub struct TomeToggle(pub TomeKind);
 
 #[derive(Resource, Default, Clone, Copy, PartialEq)]
 pub enum MenuTab {
     #[default]
     None,
-    Tomes,
     Quests,
 }
 
@@ -232,10 +227,8 @@ pub fn despawn_menu(mut commands: Commands, q: Query<Entity, With<MenuRoot>>) {
 pub fn main_menu_input(
     mut commands: Commands,
     menu_btns: Query<(&Interaction, &MenuBtn), Changed<Interaction>>,
-    plus: Query<(&Interaction, &TomePlus), Changed<Interaction>>,
-    toggles: Query<(&Interaction, &TomeToggle), Changed<Interaction>>,
     mut tab: ResMut<MenuTab>,
-    mut save: ResMut<MetaSave>,
+    save: Res<MetaSave>,
     mut selected: ResMut<Selected>,
     mut settings_open: ResMut<crate::ui::settings::SettingsOpen>,
     mut next: ResMut<NextState<AppState>>,
@@ -345,38 +338,15 @@ pub fn main_menu_input(
                 exit.write(AppExit::Success);
             }
             MenuBtn::Tomes => {
-                *tab = if *tab == MenuTab::Tomes { MenuTab::None } else { MenuTab::Tomes };
-                changed = true;
+                // 23 tomes want a screen of their own, not a side list
+                next.set(AppState::Tomes);
+                sfx.write(SfxMsg(Sfx::Click));
+                return;
             }
             MenuBtn::Quests => {
                 *tab = if *tab == MenuTab::Quests { MenuTab::None } else { MenuTab::Quests };
                 changed = true;
             }
-        }
-    }
-    for (i, p) in &plus {
-        if *i == Interaction::Pressed && !settings_open.0 {
-            let lvl = save.tome_level(p.0);
-            let cost = p.0.cost(lvl);
-            if lvl < p.0.def().max_level && save.silver >= cost {
-                save.silver -= cost;
-                *save.tome_levels.entry(p.0).or_insert(0) += 1;
-                save.save();
-                sfx.write(SfxMsg(Sfx::Coin));
-                changed = true;
-            }
-        }
-    }
-    for (i, t) in &toggles {
-        if *i == Interaction::Pressed && !settings_open.0 {
-            if let Some(idx) = save.tome_loadout.iter().position(|x| *x == t.0) {
-                save.tome_loadout.remove(idx);
-            } else if (save.tome_loadout.len() as u32) < save.tome_slots {
-                save.tome_loadout.push(t.0);
-            }
-            save.save();
-            sfx.write(SfxMsg(Sfx::Click));
-            changed = true;
         }
     }
 
@@ -393,48 +363,6 @@ pub fn main_menu_input(
     commands.entity(panel_e).despawn_related::<Children>();
     match *tab {
         MenuTab::None => {}
-        MenuTab::Tomes => {
-            commands.entity(panel_e).with_children(|c| {
-                c.spawn(txt(
-                    format!("TOMES — loadout {}/{} (click name to equip)", save.tome_loadout.len(), save.tome_slots),
-                    FONT_MED,
-                    Color::srgb(0.7, 0.7, 1.0),
-                ));
-                for t in TomeKind::ALL {
-                    let d = t.def();
-                    let lvl = save.tome_level(t);
-                    let equipped = save.tome_loadout.contains(&t);
-                    c.spawn((Node { column_gap: Val::Px(8.0), align_items: AlignItems::Center, ..default() },))
-                        .with_children(|row| {
-                            row.spawn((
-                                TomeToggle(t),
-                                Button,
-                                Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)), ..default() },
-                                BackgroundColor(if equipped { Color::srgba(0.2, 0.5, 0.3, 1.0) } else { BTN_BG }),
-                            ))
-                            .with_children(|b| {
-                                b.spawn(txt(
-                                    format!("{} {} Lv{}", if equipped { "[x]" } else { "[ ]" }, d.name, lvl),
-                                    FONT_SMALL,
-                                    Color::WHITE,
-                                ));
-                            });
-                            row.spawn(txt(d.desc, FONT_SMALL, Color::srgb(0.6, 0.65, 0.8)));
-                            if lvl < d.max_level {
-                                row.spawn((
-                                    TomePlus(t),
-                                    Button,
-                                    Node { padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)), ..default() },
-                                    BackgroundColor(BTN_BG),
-                                ))
-                                .with_children(|b| {
-                                    b.spawn(txt(format!("+1 ({}s)", t.cost(lvl)), FONT_SMALL, Color::srgb(0.75, 0.85, 1.0)));
-                                });
-                            }
-                        });
-                }
-            });
-        }
         MenuTab::Quests => {
             commands.entity(panel_e).with_children(|c| {
                 c.spawn(txt("QUESTS", FONT_MED, Color::srgb(1.0, 0.85, 0.4)));
@@ -452,6 +380,314 @@ pub fn main_menu_input(
                     ));
                 }
             });
+        }
+    }
+}
+
+// ------------------------------------------------------------- tome library
+
+/// A live part of the TOME LIBRARY, re-read from the save whenever it changes
+/// (`refresh_tome_library`). The grid itself is built once, so buying a rank halfway down
+/// the list never scrolls it back to the top.
+#[derive(Component, Clone, Copy, PartialEq)]
+pub enum TomeUi {
+    /// "SILVER … · LOADOUT n/m"
+    Header,
+    /// The label on loadout slot chip `i`.
+    Slot(usize),
+    /// A tome's card (its border says owned / equipped).
+    Card(TomeKind),
+    Rank(TomeKind),
+    /// What it does at its current rank.
+    Now(TomeKind),
+    /// What the next rank adds.
+    Next(TomeKind),
+    BuyLabel(TomeKind),
+    EquipLabel(TomeKind),
+}
+
+#[derive(Component, Clone, Copy, PartialEq)]
+pub enum TomeBtn {
+    Buy(TomeKind),
+    Equip(TomeKind),
+    /// A loadout slot: clicking a filled one empties it.
+    Slot(usize),
+    Back,
+}
+
+const TOME_CARD_W: f32 = 238.0;
+const TOME_GOLD: Color = Color::srgb(1.0, 0.82, 0.35);
+const TOME_EQUIPPED: Color = Color::srgb(0.4, 1.0, 0.6);
+const TOME_OWNED: Color = Color::srgb(0.45, 0.55, 0.95);
+const TOME_UNOWNED: Color = Color::srgb(0.25, 0.26, 0.32);
+const TOME_DIM: Color = Color::srgb(0.6, 0.65, 0.8);
+
+/// The text a live part shows for this save.
+fn tome_text(ui: TomeUi, save: &MetaSave) -> String {
+    let max = crate::config::TOME_MAX_RANK;
+    match ui {
+        TomeUi::Header => format!(
+            "SILVER {}     LOADOUT {}/{}     each tome has {max} ranks: slot the ones you want this run",
+            save.silver,
+            save.tome_loadout.len(),
+            save.tome_slots
+        ),
+        TomeUi::Slot(i) => match save.tome_loadout.get(i) {
+            Some(t) => format!("{}  R{}", t.def().name.trim_start_matches("Tome of ").trim_start_matches("the "), save.tome_level(*t)),
+            None => "EMPTY SLOT".into(),
+        },
+        TomeUi::Card(_) => String::new(),
+        TomeUi::Rank(t) => {
+            let r = save.tome_level(t);
+            format!("RANK {r}/{max}  {}{}", "#".repeat(r as usize), "-".repeat((max - r) as usize))
+        }
+        TomeUi::Now(t) => {
+            let lines = t.lines(save.tome_level(t));
+            if lines.is_empty() { "Not owned yet".into() } else { lines.join("\n") }
+        }
+        TomeUi::Next(t) => {
+            let r = save.tome_level(t);
+            if r >= max {
+                "MAXED".into()
+            } else {
+                // what the next rank reads as, in full — the line a player is buying
+                format!("rank {}: {}", r + 1, t.lines(r + 1).join(", "))
+            }
+        }
+        TomeUi::BuyLabel(t) => {
+            let r = save.tome_level(t);
+            if r >= max { "MAXED".into() } else { format!("BUY {} S", t.cost(r)) }
+        }
+        TomeUi::EquipLabel(t) => {
+            if save.tome_loadout.contains(&t) {
+                "UNEQUIP".into()
+            } else if save.tome_level(t) == 0 {
+                "BUY FIRST".into()
+            } else if save.tome_loadout.len() as u32 >= save.tome_slots {
+                "SLOTS FULL".into()
+            } else {
+                "EQUIP".into()
+            }
+        }
+    }
+}
+
+/// The border a card or button wears for this save: the card says equipped / owned /
+/// not yet; BUY glows gold when affordable; EQUIP green when it would do something.
+fn tome_border(ui: Option<&TomeUi>, btn: Option<&TomeBtn>, save: &MetaSave) -> Option<Color> {
+    let max = crate::config::TOME_MAX_RANK;
+    if let Some(TomeUi::Card(t)) = ui {
+        return Some(if save.tome_loadout.contains(t) {
+            TOME_EQUIPPED
+        } else if save.tome_level(*t) > 0 {
+            TOME_OWNED
+        } else {
+            TOME_UNOWNED
+        });
+    }
+    match btn? {
+        TomeBtn::Buy(t) => {
+            let r = save.tome_level(*t);
+            Some(if r < max && save.silver >= t.cost(r) { TOME_GOLD } else { TOME_UNOWNED })
+        }
+        TomeBtn::Equip(t) => {
+            let can = save.tome_loadout.contains(t)
+                || (save.tome_level(*t) > 0 && (save.tome_loadout.len() as u32) < save.tome_slots);
+            Some(if can { TOME_EQUIPPED } else { TOME_UNOWNED })
+        }
+        TomeBtn::Slot(i) => Some(if *i < save.tome_loadout.len() { TOME_EQUIPPED } else { TOME_UNOWNED }),
+        TomeBtn::Back => None,
+    }
+}
+
+fn small_button(parent: &mut ChildSpawnerCommands, btn: TomeBtn, label: TomeUi, save: &MetaSave) {
+    parent
+        .spawn((
+            btn,
+            Button,
+            Node {
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
+                justify_content: JustifyContent::Center,
+                border: UiRect::all(Val::Px(2.0)),
+                border_radius: BorderRadius::all(Val::Px(5.0)),
+                flex_grow: 1.0,
+                ..default()
+            },
+            BackgroundColor(BTN_BG),
+            BorderColor::all(tome_border(None, Some(&btn), save).unwrap_or(TOME_UNOWNED)),
+        ))
+        .with_children(|b| {
+            b.spawn((label, txt(tome_text(label, save), FONT_SMALL, Color::WHITE)));
+        });
+}
+
+/// TOME LIBRARY (GDD §7): all 23 tomes as a scrolling grid of cards — rank, what it does
+/// now, what the next rank adds and costs, equipped or not — under the loadout's slots.
+pub fn spawn_tome_library(mut commands: Commands, save: Res<MetaSave>) {
+    commands
+        .spawn((MenuRoot, overlay_root(), BackgroundColor(Color::srgb(0.02, 0.02, 0.05))))
+        .with_children(|overlay| {
+            overlay.spawn(menu_column()).with_children(|root| {
+                root.spawn(txt("TOME LIBRARY", FONT_BIG, Color::srgb(0.7, 0.7, 1.0)));
+                root.spawn((TomeUi::Header, txt(tome_text(TomeUi::Header, &save), FONT_SMALL, Color::srgb(0.75, 0.85, 1.0))));
+                // the loadout: one chip per slot, the slotted tome and its rank
+                root.spawn((Node { column_gap: Val::Px(8.0), flex_wrap: FlexWrap::Wrap, justify_content: JustifyContent::Center, ..default() },))
+                    .with_children(|row| {
+                        for i in 0..save.tome_slots as usize {
+                            row.spawn((
+                                TomeBtn::Slot(i),
+                                Button,
+                                Node {
+                                    width: Val::Px(150.0),
+                                    padding: UiRect::axes(Val::Px(6.0), Val::Px(6.0)),
+                                    justify_content: JustifyContent::Center,
+                                    border: UiRect::all(Val::Px(2.0)),
+                                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(BTN_BG),
+                                BorderColor::all(tome_border(None, Some(&TomeBtn::Slot(i)), &save).unwrap_or(TOME_UNOWNED)),
+                            ))
+                            .with_children(|b| {
+                                b.spawn((TomeUi::Slot(i), txt(tome_text(TomeUi::Slot(i), &save), FONT_SMALL, Color::WHITE)));
+                            });
+                        }
+                    });
+                // The grid scrolls under the wheel; the title, loadout and BACK stay put (the
+                // char-select layout: the list asks for the whole height and shrinks).
+                let list = root
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            flex_basis: Val::Vh(100.0),
+                            min_height: Val::Px(150.0),
+                            flex_shrink: 1.0,
+                            flex_direction: FlexDirection::Column,
+                            overflow: Overflow::scroll_y(),
+                            ..default()
+                        },
+                        wheel_scroll_list(),
+                    ))
+                    .with_children(|list| {
+                        list.spawn((Node {
+                            width: Val::Percent(100.0),
+                            column_gap: Val::Px(10.0),
+                            row_gap: Val::Px(10.0),
+                            flex_wrap: FlexWrap::Wrap,
+                            justify_content: JustifyContent::Center,
+                            flex_shrink: 0.0,
+                            ..default()
+                        },))
+                            .with_children(|grid| {
+                                for t in TomeKind::ALL {
+                                    tome_card(grid, t, &save);
+                                }
+                            });
+                    })
+                    .id();
+                root.spawn((ScrollHint(list), txt("scroll for more tomes", FONT_SMALL, TOME_DIM), Visibility::Hidden));
+                root.spawn((TomeBtn::Back, Button, button_node(), BackgroundColor(BTN_BG), BorderColor::all(Color::srgb(0.6, 0.6, 0.7))))
+                    .with_children(|b| {
+                        b.spawn(txt("[ESC] BACK", FONT_MED, Color::WHITE));
+                    });
+            });
+        });
+}
+
+fn tome_card(grid: &mut ChildSpawnerCommands, t: TomeKind, save: &MetaSave) {
+    let d = t.def();
+    grid.spawn((
+        TomeUi::Card(t),
+        Node {
+            width: Val::Px(TOME_CARD_W),
+            padding: UiRect::all(Val::Px(10.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(4.0),
+            border: UiRect::all(Val::Px(3.0)),
+            border_radius: BorderRadius::all(Val::Px(8.0)),
+            ..default()
+        },
+        BackgroundColor(CARD_BG),
+        BorderColor::all(tome_border(Some(&TomeUi::Card(t)), None, save).unwrap_or(TOME_UNOWNED)),
+    ))
+    .with_children(|c| {
+        c.spawn(txt(d.name, FONT_MED, Color::WHITE));
+        c.spawn((TomeUi::Rank(t), txt(tome_text(TomeUi::Rank(t), save), FONT_SMALL, TOME_GOLD)));
+        c.spawn(txt(d.desc, FONT_SMALL, TOME_DIM));
+        c.spawn((TomeUi::Now(t), txt(tome_text(TomeUi::Now(t), save), FONT_SMALL, Color::srgb(0.55, 1.0, 0.7))));
+        c.spawn((TomeUi::Next(t), txt(tome_text(TomeUi::Next(t), save), FONT_SMALL, Color::srgb(0.55, 0.8, 1.0))));
+        // pins the buttons to the card's foot when a taller neighbour stretches the row
+        c.spawn(Node { flex_grow: 1.0, ..default() });
+        c.spawn((Node { column_gap: Val::Px(6.0), ..default() },)).with_children(|row| {
+            small_button(row, TomeBtn::Buy(t), TomeUi::BuyLabel(t), save);
+            small_button(row, TomeBtn::Equip(t), TomeUi::EquipLabel(t), save);
+        });
+    });
+}
+
+pub fn tome_library_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    btns: Query<(&Interaction, &TomeBtn), Changed<Interaction>>,
+    settings_open: Res<crate::ui::settings::SettingsOpen>,
+    mut save: ResMut<MetaSave>,
+    mut next: ResMut<NextState<AppState>>,
+    mut sfx: MessageWriter<SfxMsg>,
+) {
+    if keys.just_pressed(KeyCode::Escape) && !settings_open.0 {
+        next.set(AppState::MainMenu);
+        return;
+    }
+    for (i, btn) in &btns {
+        if *i != Interaction::Pressed {
+            continue;
+        }
+        let changed = match *btn {
+            TomeBtn::Back => {
+                next.set(AppState::MainMenu);
+                sfx.write(SfxMsg(Sfx::Click));
+                return;
+            }
+            TomeBtn::Buy(t) => {
+                let bought = save.buy_tome(t);
+                if bought {
+                    sfx.write(SfxMsg(Sfx::Coin));
+                }
+                bought
+            }
+            // an unowned tome would sit in a slot doing nothing
+            TomeBtn::Equip(t) => (save.tome_level(t) > 0 || save.tome_loadout.contains(&t)) && save.toggle_tome(t),
+            TomeBtn::Slot(i) => match save.tome_loadout.get(i).copied() {
+                Some(t) => save.toggle_tome(t),
+                None => false,
+            },
+        };
+        if changed {
+            save.save();
+            if !matches!(btn, TomeBtn::Buy(_)) {
+                sfx.write(SfxMsg(Sfx::Click));
+            }
+        }
+    }
+}
+
+/// Keep every live part of the library in step with the save.
+pub fn refresh_tome_library(
+    save: Res<MetaSave>,
+    mut texts: Query<(&TomeUi, &mut Text)>,
+    mut borders: Query<(AnyOf<(&TomeUi, &TomeBtn)>, &mut BorderColor)>,
+) {
+    if !save.is_changed() {
+        return;
+    }
+    for (ui, mut text) in &mut texts {
+        let want = tome_text(*ui, &save);
+        if text.0 != want {
+            text.0 = want;
+        }
+    }
+    for ((ui, btn), mut border) in &mut borders {
+        if let Some(c) = tome_border(ui, btn, &save) {
+            *border = BorderColor::all(c);
         }
     }
 }

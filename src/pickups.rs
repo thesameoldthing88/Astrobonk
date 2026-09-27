@@ -29,6 +29,39 @@ pub struct Pickup {
     /// Who this pickup is flying to. LATCHED: with two attractors a gem released between
     /// them would re-pick the nearest every frame and stall in the middle.
     pub target: Option<Entity>,
+    /// Seconds it has lain untouched (Tome of the Horizon waits this out). HOST only.
+    pub idle: f32,
+    /// Flying home from over the horizon (Tome of the Horizon): it travels ALONG the
+    /// surface — `dir` moves with it — since a straight line would cut through the planet.
+    pub arc: bool,
+}
+
+impl Pickup {
+    pub fn new(kind: PickupKind, dir: Vec3, bob: f32) -> Self {
+        Self { kind, dir, flying: false, speed: 0.0, bob, target: None, idle: 0.0, arc: false }
+    }
+}
+
+/// HOST: this gem was called home from over the horizon by player `.0` (Tome of the
+/// Horizon). `netenemy::stream_pickups` announces it, so a client draws the same flight.
+#[derive(Component, Clone, Copy)]
+pub struct HorizonBound(pub u8);
+
+/// One frame of a horizon flight: move `dir` along the surface toward `to` by `step` metres
+/// on a planet of `radius`, and return where the gem is drawn — lifted off the ground in the
+/// middle of a long flight, settling as it arrives. An exact antipode has no unique great
+/// circle, so that one sets off along any tangent.
+pub fn horizon_flight(dir: &mut Vec3, to: Vec3, step: f32, radius: f32, planet: &CurrentPlanet) -> Vec3 {
+    let angle = step / radius.max(1.0);
+    let next = crate::sphere::step_toward(*dir, to, angle);
+    *dir = if next == *dir && dir.dot(to) < 0.0 {
+        crate::sphere::offset_dir(*dir, crate::sphere::tangent_frame(*dir).0, step, radius)
+    } else {
+        next
+    };
+    let left = crate::sphere::arc_dist(*dir, to, radius);
+    let lift = (left * 0.15).min(HORIZON_FLY_LIFT);
+    planet.surface_point(*dir) + *dir * (0.35 + lift)
 }
 
 #[derive(Resource)]
@@ -97,7 +130,7 @@ pub fn spawn_pickup(
     };
     let pos = planet.surface_point(dir) + dir * 0.35;
     commands.spawn((
-        Pickup { kind, dir, flying: false, speed: 0.0, bob: rng.gen_range(0.0..6.28), target: None },
+        Pickup::new(kind, dir, rng.gen_range(0.0..6.28)),
         Mesh3d(mesh),
         MeshMaterial3d(mat),
         Transform::from_translation(pos).with_scale(Vec3::splat(scale)),
@@ -105,7 +138,8 @@ pub fn spawn_pickup(
     ));
 }
 
-/// Attraction + collection.
+/// Attraction + collection — and Tome of the Horizon, which calls XP that has lain over its
+/// holder's horizon long enough home across the planet.
 #[allow(clippy::too_many_arguments)]
 pub fn pickup_update(
     mut commands: Commands,
@@ -120,6 +154,7 @@ pub fn pickup_update(
     mut banners: MessageWriter<BannerMsg>,
     mut grants: MessageWriter<crate::net::GrantOut>,
     q_ids: Query<&crate::player::PlayerId>,
+    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
 ) {
     let dt = time.delta_secs();
     if dt <= 0.0 {
@@ -132,9 +167,13 @@ pub fn pickup_update(
     // let one player's powerup vacuum the planet into someone else's pocket.
     struct Attractor {
         entity: Entity,
+        pid: u8,
         pos: Vec3,
         dir: Vec3,
         range: f32,
+        /// Tome of the Horizon: seconds XP must lie over this astronaut's horizon before it
+        /// flies home. None without the tome.
+        horizon_wait: Option<f32>,
         is_local: bool,
     }
     let attractors: Vec<Attractor> = q_player
@@ -142,13 +181,15 @@ pub fn pickup_update(
         .filter(|(_, _, ps, _, _)| !ps.dead)
         .map(|(e, pl, ps, tf, is_local)| Attractor {
             entity: e,
+            pid: q_ids.get(e).map(|id| id.0).unwrap_or(0),
             pos: tf.translation,
             dir: pl.dir,
             range: ps.pickup_range(),
+            horizon_wait: (ps.stats.horizon_collect > 0.0).then(|| 1.0 / ps.stats.horizon_collect),
             is_local,
         })
         .collect();
-    let _ = &attractors;
+    let horizon = attractors.iter().any(|a| a.horizon_wait.is_some());
 
     // (2) Move pickups and record what got collected — resolve ownership PER PICKUP so a
     // gem inside 0.8m of two astronauts is granted (and despawned) exactly once.
@@ -158,7 +199,12 @@ pub fn pickup_update(
         let cur = p
             .target
             .and_then(|t| attractors.iter().find(|a| a.entity == t));
-        let target = match cur {
+        if cur.is_none() && p.arc {
+            // its caller went down or left: it settles where it got to
+            p.arc = false;
+            p.idle = 0.0;
+        }
+        let mut target = match cur {
             Some(a) => Some(a),
             None => attractors
                 .iter()
@@ -169,12 +215,44 @@ pub fn pickup_update(
                         .total_cmp(&tf.translation.distance(b.pos))
                 }),
         };
+        // Tome of the Horizon: XP nobody is reaching for, lying over the horizon of a holder
+        // for long enough, is called home to the nearest such holder.
+        if target.is_none() && horizon && matches!(p.kind, PickupKind::Xp(_)) {
+            p.idle += dt;
+            let called = attractors
+                .iter()
+                .filter(|a| a.horizon_wait.is_some_and(|w| p.idle >= w))
+                .map(|a| (a, crate::sphere::arc_dist(p.dir, a.dir, planet.radius)))
+                .filter(|(_, arc)| *arc > HORIZON_ARC)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(a, _)| a);
+            if let Some(a) = called {
+                p.arc = true;
+                p.flying = true;
+                p.speed = 8.0;
+                commands.entity(e).try_insert(HorizonBound(a.pid));
+                tome_tel.horizon_calls += 1;
+                target = Some(a);
+            }
+        }
         if let Some(a) = target {
             if !p.flying {
                 p.flying = true;
                 p.speed = 6.0;
             }
             p.target = Some(a.entity);
+            if p.arc {
+                // home along the surface; the last stretch is the ordinary magnet flight
+                p.speed = (p.speed + 40.0 * dt).min(HORIZON_FLY_SPEED);
+                let mut dir = p.dir;
+                tf.translation = horizon_flight(&mut dir, a.dir, p.speed * dt, planet.radius, &planet);
+                p.dir = dir;
+                if crate::sphere::arc_dist(p.dir, a.dir, planet.radius) < a.range.max(2.5) {
+                    p.arc = false;
+                    tome_tel.horizon_arrivals += 1;
+                }
+                continue;
+            }
             p.speed = (p.speed + 60.0 * dt).min(PICKUP_FLY_SPEED * 1.8);
             let to = (a.pos - tf.translation).normalize_or_zero();
             tf.translation += to * p.speed * dt;
@@ -264,7 +342,9 @@ fn collect(
             }
         }
         PickupKind::Silver(s) => {
-            let s = (s as f32 * ps.stats.silver_gain).round() as u64;
+            // Tome of Static: what The Static's ghosts pay, the collector's tome multiplies
+            let static_pay = if run.static_active { ps.stats.static_silver.max(0.0) } else { 1.0 };
+            let s = (s as f32 * ps.stats.silver_gain * static_pay).round() as u64;
             run.silver_run += s;
             if is_local {
                 sfx.write(SfxMsg(Sfx::Coin));
@@ -306,6 +386,7 @@ pub fn kill_drops(
     particles: Option<Res<ParticleAssets>>,
     mut sfx: MessageWriter<SfxMsg>,
     (save, mut flash_gate, time): (Res<crate::save::MetaSave>, ResMut<fx::FlashGate>, Res<Time>),
+    mut tome_tel: ResMut<crate::tomes::TomeTelemetry>,
 ) {
     let mut rng = rand::thread_rng();
     for msg in reader.read() {
@@ -340,10 +421,17 @@ pub fn kill_drops(
         }
 
         if msg.elite {
-            for _ in 0..rng.gen_range(4..8) {
+            // Tome of the Elite: more coins, better odds on the powerup
+            let more = run.elite_loot.max(1.0);
+            let coins = (rng.gen_range(4..8) as f32 * more).round() as u32;
+            for _ in 0..coins {
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Gold(rng.gen_range(4..10)));
             }
-            if rng.gen_bool(0.35) {
+            tome_tel.elite_kills += 1;
+            if more > 1.0 {
+                tome_tel.elite_bonus_drops += 1;
+            }
+            if rng.gen_bool((0.35 * more).min(0.95) as f64) {
                 let kinds = [PowerupKind::Damage2x, PowerupKind::Magnet, PowerupKind::Speed];
                 spawn_pickup(&mut commands, &assets, &planet, msg.dir, PickupKind::Powerup(kinds[rng.gen_range(0..3)]));
             }

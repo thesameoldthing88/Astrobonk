@@ -569,10 +569,12 @@ pub fn interact_system(
         InteractKind::MagnetShrine => "[E] Magnet Shrine (vacuum the planet)".into(),
         InteractKind::Moai => "[E] Consult the Moai".into(),
         InteractKind::Microwave => {
-            if run.microwave_used {
-                "The microwave hums, spent".into()
-            } else {
+            if ps.free_microwave > 0 {
+                "[E] Microwave (duplicate an item: FREE, Tome of Duplication)".into()
+            } else if !run.microwave_used {
                 "[E] Microwave (duplicate an item)".into()
+            } else {
+                "The microwave hums, spent".into()
             }
         }
         InteractKind::Cage => "[E] Open the cage".into(),
@@ -636,24 +638,38 @@ pub fn interact_system(
             sfx.write(SfxMsg(Sfx::Shrine));
         }
         InteractKind::Microwave => {
-            if run.microwave_used || ps.items.is_empty() {
+            // The stage's own use, or a free one from Tome of Duplication (§7 "one free use
+            // per stage"). The free one goes first: P16 puts a Gold price (Salvage-discounted
+            // like chests) on the stage's own, and a free use is the one worth spending.
+            let free = ps.free_microwave > 0;
+            if (run.microwave_used && !free) || ps.items.is_empty() {
                 return;
             }
-            run.microwave_used = true;
             // §7: a duplicate comes out one grade below the best copy held (never under the
-            // item's native grade). P16 adds the gamble, the Gold price and Tome of Duplication.
+            // item's native grade) — unless Tome of Duplication's later ranks keep it whole.
+            // P16 adds the gamble and the Gold price.
+            let keep = ps.stats.dupe_keep_grade.clamp(0.0, 1.0) as f64;
             let mut owned: Vec<(ItemKind, Rarity)> = ps
                 .items
                 .iter()
                 .filter(|s| crate::run::item_available(&ps, s.kind))
-                .map(|s| (s.kind, s.best().step_down(1, s.kind.def().rarity)))
+                .map(|s| {
+                    let steps = u32::from(!rng.gen_bool(keep));
+                    (s.kind, s.best().step_down(steps, s.kind.def().rarity))
+                })
                 .collect();
             owned.shuffle(&mut rng);
             let opts: Vec<UpgradeOption> =
                 owned.into_iter().take(3).map(|(k, g)| UpgradeOption::ItemUp(k, g)).collect();
             if opts.is_empty() {
+                // nothing to put in: the use is not spent
                 banners.write(BannerMsg("NOTHING FITS IN THE MICROWAVE".into()));
                 return;
+            }
+            if free {
+                ps.free_microwave -= 1;
+            } else {
+                run.microwave_used = true;
             }
             *panel = ChoicePanel { title: "MICROWAVE: DUPLICATE".into(), options: opts, banishing: false, is_levelup: false };
             *phase = RunPhase::Modal;

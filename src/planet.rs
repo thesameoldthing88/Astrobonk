@@ -474,8 +474,8 @@ pub fn spawn_stage(
         ));
     }
 
-    // Sun: directional light + visible disc.
-    let sun_dir = Vec3::new(-0.55, 0.35, -0.75).normalize();
+    // Sun: directional light + visible disc. `sun_dir` is the way the light TRAVELS.
+    let sun_dir = -sunward();
     commands.spawn((
         DirectionalLight {
             color: def.sun,
@@ -503,6 +503,20 @@ pub fn spawn_stage(
     ));
 
     PropColliders(colliders)
+}
+
+/// Unit direction from the planet's core toward the sun — the lit hemisphere faces it.
+/// Fixed for now; P07's day/night cycle turns it, and `is_night` turns with it.
+pub fn sunward() -> Vec3 {
+    Vec3::new(0.55, -0.35, 0.75).normalize()
+}
+
+/// Is the surface point `dir` on the night side? Gameplay's one test (Tome of Nightfall),
+/// against the same sun the lighting uses. `sun_shrink` (Devoured Sun Shard, §3 diegetic
+/// difficulty) eats the day side from its rim: at 0 the terminator is the great circle, at
+/// 1 the whole world is night.
+pub fn is_night(dir: Vec3, sun_shrink: f32) -> bool {
+    sun_shrink >= 1.0 || dir.dot(sunward()) < sun_shrink.max(0.0)
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {
