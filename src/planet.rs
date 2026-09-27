@@ -257,6 +257,9 @@ pub fn spawn_stage(
         );
         let dir = (dir + jitter).normalize();
         let scale = rng.gen_range(0.4..2.4) * Vec3::new(rng.gen_range(0.8..1.3), rng.gen_range(0.6..1.1), rng.gen_range(0.8..1.3));
+        if !clear_of_start(dir, planet) {
+            continue; // after the draws, so the rest of the layout is unchanged by the skip
+        }
         let pos = planet.surface_point(dir) - dir * scale.y * 0.25;
         let fwd = sphere::tangent_frame(dir).0;
         commands.spawn((
@@ -278,7 +281,7 @@ pub fn spawn_stage(
         .map(|i| make_rock(meshes, 400 + i * 17 + planet.terrain.seed, 0.6, 1))
         .collect();
     for _ in 0..(def.rocks / 20).max(4) {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let scale = rng.gen_range(3.0..6.0);
         let pos = planet.surface_point(dir) - dir * scale * 0.3;
         let fwd = sphere::tangent_frame(dir).0;
@@ -303,7 +306,7 @@ pub fn spawn_stage(
     });
     let crystal_mesh = meshes.add(Mesh::from(Cone::new(0.35, 1.6)));
     for _ in 0..def.crystals {
-        let dir = random_dir(&mut rng);
+        let dir = prop_dir(&mut rng, planet);
         let pos = planet.surface_point(dir);
         let fwd = sphere::tangent_frame(dir).0;
         let scale = rng.gen_range(0.6..1.5);
@@ -336,7 +339,7 @@ pub fn spawn_stage(
         w.add_box(Vec3::new(0.9, 0.05, 0.7), at(Vec3::new(0.3, 0.75, -0.2)), Color::srgb(0.4, 0.4, 0.45)); // torn panel
         let wreck_mesh = meshes.add(w.build());
         for _ in 0..def.rocks / 45 + 3 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let scale = rng.gen_range(1.4..2.4);
             let pos = planet.surface_point(dir) - dir * scale * 0.4; // half-sunk
             let fwd = sphere::tangent_frame(dir).0;
@@ -374,7 +377,7 @@ pub fn spawn_stage(
         let beacon_mesh = meshes.add(b.build());
         let light_mesh = meshes.add(Mesh::from(Sphere::new(0.09)));
         for _ in 0..def.crystals / 8 + 4 {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let rot = sphere::frame_quat(dir, fwd);
@@ -444,7 +447,7 @@ pub fn spawn_stage(
                 ),
             };
         for _ in 0..def.flora {
-            let dir = random_dir(&mut rng);
+            let dir = prop_dir(&mut rng, planet);
             let pos = planet.surface_point(dir);
             let fwd = sphere::tangent_frame(dir).0;
             let scale = rng.gen_range(0.7..1.6);
@@ -666,6 +669,22 @@ pub fn sunward() -> Vec3 {
 /// 1 the whole world is night.
 pub fn is_night(dir: Vec3, sun_shrink: f32) -> bool {
     sun_shrink >= 1.0 || dir.dot(sunward()) < sun_shrink.max(0.0)
+}
+
+/// Outside the drop zone every stage starts in (see `START_CLEAR_ARC`). A pure function of
+/// the direction, so it never makes two machines' layouts diverge.
+fn clear_of_start(dir: Vec3, planet: &CurrentPlanet) -> bool {
+    sphere::arc_dist(dir, Vec3::Y, planet.radius) > crate::config::START_CLEAR_ARC
+}
+
+/// A random placement for a prop: uniform over the sphere, re-drawn inside the drop zone.
+fn prop_dir(rng: &mut impl Rng, planet: &CurrentPlanet) -> Vec3 {
+    loop {
+        let d = random_dir(rng);
+        if clear_of_start(d, planet) {
+            return d;
+        }
+    }
 }
 
 pub fn random_dir(rng: &mut impl Rng) -> Vec3 {

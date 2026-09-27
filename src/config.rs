@@ -98,6 +98,10 @@ pub const GRIND_PROP_CLEARANCE: f32 = 0.6;
 pub const GRIND_INTERACT_CLEARANCE: f32 = 2.5;
 /// Metres an interactable (pot, chest, shrine…) keeps clear of a solid prop's rim (L7).
 pub const INTERACT_PROP_CLEARANCE: f32 = 1.0;
+/// Great-circle metres around the drop point (`Vec3::Y`, where every stage starts) kept free
+/// of props, so the first view of a planet is never from inside a boulder (the chase camera
+/// sits 7.5 m back and avoids terrain, not props).
+pub const START_CLEAR_ARC: f32 = 12.0;
 /// Within this arc of a spine (it must be inside the rail lookup's reach, ~4 m), a player
 /// who has not ridden one yet this run is told how.
 pub const GRIND_HINT_ARC: f32 = 4.0;

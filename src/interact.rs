@@ -425,7 +425,10 @@ pub fn spawn_interactables(
         spawn_simple(commands, InteractKind::Cage, cage_dir, Vec::new(), None);
     }
 
-    // Charge shrines (stand in the ring)
+    // Charge shrines (stand in the ring). Bevy's Torus lies in its local XZ plane and
+    // frame_quat maps local Y to the surface normal, so the ring lies flat on the ground and
+    // outlines the 4.2 m charge zone. (It used to take an extra quarter-turn about X, which
+    // stood it on its edge like an arch — the zone you stand in was never drawn.)
     let ring_mesh = meshes.add(Mesh::from(Torus::new(3.6, 3.9)));
     let ring_mat = materials.add(StandardMaterial {
         base_color: Color::srgb(0.4, 1.0, 0.9),
@@ -443,7 +446,7 @@ pub fn spawn_interactables(
             Mesh3d(ring_mesh.clone()),
             MeshMaterial3d(ring_mat.clone()),
             Transform::from_translation(pos + dir * 0.2)
-                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0) * Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+                .with_rotation(sphere::frame_quat(dir, sphere::tangent_frame(dir).0)),
             StageScoped,
         ));
     }
