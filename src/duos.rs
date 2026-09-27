@@ -347,11 +347,12 @@ pub fn spawn_cascade_belt(commands: &mut Commands, assets: &CoopAssets, planet: 
     }
 }
 
-/// A point on the belt's circle `ang` radians round, at ground level plus the lift.
-fn belt_point(planet: &CurrentPlanet, axis: Vec3, ang: f32, jitter: f32) -> Vec3 {
+/// A point on the belt's circle `ang` radians round, at ground level plus the lift, knocked
+/// `jitter` off it (up/down, and sideways across the ground) — the lightning's zigzag.
+fn belt_point(planet: &CurrentPlanet, axis: Vec3, ang: f32, jitter: Vec2) -> Vec3 {
     let (t, _) = sphere::tangent_frame(axis);
     let dir = (Quat::from_axis_angle(axis, ang) * t).normalize();
-    planet.surface_point(dir) + dir * (CASCADE_VIS_LIFT + jitter)
+    planet.surface_point(dir) + dir * (CASCADE_VIS_LIFT + jitter.y) + axis * jitter.x
 }
 
 /// EVERY machine: crackle the belt (each segment's ends jump a little every frame — the
@@ -371,13 +372,21 @@ pub fn animate_cascade_belts(
             continue;
         }
         let fade = (belt.life / CASCADE_VIS_SECS).clamp(0.0, 1.0);
-        let crackle = |ang: f32| if belt.calm { 0.0 } else { ((ang * 37.0 + t * 23.0).sin() * 0.7).clamp(-0.6, 0.6) };
+        // each joint of the belt jumps about ~12 times a second (a crackle, not a strobe:
+        // the light never goes out) — held still in photosensitivity mode
+        let crackle = |ang: f32| {
+            if belt.calm {
+                return Vec2::ZERO;
+            }
+            let k = (t * 12.0).floor();
+            Vec2::new((ang * 53.0 + k * 1.7).sin() * 0.9, (ang * 37.0 + k * 2.3).sin() * 0.6)
+        };
         let a = belt_point(&planet, belt.axis, belt.from, crackle(belt.from));
         let b = belt_point(&planet, belt.axis, belt.to, crackle(belt.to));
         let len = a.distance(b);
         tf.translation = (a + b) * 0.5;
         tf.rotation = Quat::from_rotation_arc(Vec3::Z, (b - a).normalize_or_zero());
-        let w = 0.35 * fade.sqrt();
+        let w = 0.5 * fade.sqrt();
         tf.scale = Vec3::new(w, w, len);
     }
 }

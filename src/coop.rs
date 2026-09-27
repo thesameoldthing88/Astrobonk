@@ -673,8 +673,9 @@ pub fn orbital_drops(
 }
 
 /// CLIENT: we dropped in (the host's copy of us carries the level it seated us at): level
-/// our own sheet up to it — the cards are ours to pick, one panel at a time — and, if the
-/// host's copy is still falling from orbit, fall with it. Once per run.
+/// our own sheet up to it — the cards are ours to pick, one panel at a time — once per run.
+/// And while the host's copy of us is still falling from orbit (the first seconds of the
+/// grace), our predicted body falls with it instead of standing on the ground below.
 pub fn adopt_drop_in(
     mine: Res<crate::net::MyPlayerId>,
     run: Res<RunState>,
@@ -683,9 +684,6 @@ pub fn adopt_drop_in(
     mut done: Local<Option<u64>>,
 ) {
     let Some(my_id) = mine.0 else { return };
-    if *done == Some(run.run_seed) {
-        return;
-    }
     let Some((_, v, nt)) = server.iter().find(|(pid, ..)| pid.0 == my_id) else { return };
     // 0: there from the start (checked every frame, it costs a lookup — a drop-in's level is
     // on its body from the first copy the host sends)
@@ -693,6 +691,15 @@ pub fn adopt_drop_in(
         return;
     }
     let Ok((mut p, mut ps)) = q.single_mut() else { return };
+    let falling = nt.height > DROPIN_HEIGHT * 0.15 && v.grace as f32 > DROPIN_GRACE_SECS - 8.0;
+    if falling && p.grounded && p.height < 0.5 {
+        p.height = nt.height;
+        p.vel_r = 0.0;
+        p.grounded = false;
+    }
+    if *done == Some(run.run_seed) {
+        return;
+    }
     *done = Some(run.run_seed);
     let target = v.drop_level as u32;
     while ps.level < target {
@@ -701,11 +708,6 @@ pub fn adopt_drop_in(
         ps.gain_xp(0.0);
     }
     ps.drop_level = target;
-    if nt.height > 2.0 {
-        p.height = nt.height;
-        p.vel_r = 0.0;
-        p.grounded = false;
-    }
     info!("COOP dropped in: level {} ({} cards to pick)", ps.level, ps.pending_levelups);
 }
 
@@ -964,4 +966,87 @@ pub fn dev_split_squad(
         p.height = 0.0;
     }
     info!("DEV --splitsquad: joiners moved 150 degrees round the planet");
+}
+
+/// Headless self-check of the §11 rules that are pure data: the down / revive / rejoin
+/// transitions, Hero's Adrenaline and a friendly chill on the move speed, the drop-in
+/// level, the autopilot's kiting, and the duo ledger's rules (a teammate's mark, inside
+/// the window, finished by the right family — never your own).
+pub fn self_check(save: &MetaSave) -> Result<(), String> {
+    use crate::content::characters::AstronautKind;
+    use crate::content::weapons::WeaponKind as W;
+    use crate::messages::HitBy;
+    let mut ps = PlayerState::new(AstronautKind::Buzz, save);
+    let base = ps.move_speed_mult();
+    ps.go_down();
+    if !ps.dead || ps.hp != 0.0 || ps.claimed {
+        return Err("going down left the sheet standing".into());
+    }
+    ps.claimed = true;
+    if !ps.rejoin() || ps.dead || ps.claimed || (ps.hp - ps.stats.max_hp * REJOIN_HP_FRAC).abs() > 1e-3 {
+        return Err("a teleporter did not bring a claimed astronaut back at REJOIN_HP_FRAC".into());
+    }
+    ps.go_down();
+    ps.revive_up();
+    if ps.dead || (ps.hp - ps.stats.max_hp * REVIVE_HP_FRAC).abs() > 1e-3 || ps.iframes < REVIVE_IFRAMES {
+        return Err("a revive did not stand the astronaut up at REVIVE_HP_FRAC with its grace".into());
+    }
+    if ps.rejoin() {
+        return Err("a teleporter 'rejoined' an astronaut who was standing".into());
+    }
+    ps.adrenaline = 1.0;
+    if (ps.move_speed_mult() / base - (1.0 + ADRENALINE_SPEED)).abs() > 1e-4 {
+        return Err("Hero's Adrenaline is not +20% move speed".into());
+    }
+    ps.adrenaline = 0.0;
+    ps.chill = 1.0;
+    if (ps.move_speed_mult() / base - (1.0 - FRIENDLY_CHILL_SLOW)).abs() > 1e-4 {
+        return Err("a friendly chill does not slow".into());
+    }
+
+    let mut run = RunState::new(AstronautKind::Buzz, crate::content::planets::PlanetKind::Moon, 1, save);
+    if drop_in_level(&run, &[10]).is_some() {
+        return Err("a seat at the start of a run counted as a drop-in".into());
+    }
+    run.total_elapsed = DROPIN_MIN_ELAPSED + 1.0;
+    if drop_in_level(&run, &[10, 6]) != Some(4) || drop_in_level(&run, &[1]) != Some(1) {
+        return Err("a drop-in does not land at half the squad's average level".into());
+    }
+    run.total_elapsed = 0.0;
+    run.stage = 1;
+    if drop_in_level(&run, &[8]) != Some(4) {
+        return Err("a seat on the second world is a drop-in".into());
+    }
+
+    // the autopilot kites: with one foe dead ahead it goes the other way
+    let (t, _) = sphere::tangent_frame(Vec3::Y);
+    let me = Vec3::Y * 140.0;
+    let wish = autopilot_wish(Vec3::Y, me, &[me + t * 4.0], &[], 0.0, 140.0);
+    if wish.dot(t) > -0.3 {
+        return Err(format!("the autopilot walked into a foe (wish {wish:?})"));
+    }
+
+    // duo ledger
+    let e = Entity::PLACEHOLDER;
+    let mut ledger = crate::duos::DuoLedger::default();
+    if ledger.hit(e, 0, HitBy::Weapon(W::CryoVent), 0.0).is_some() || ledger.hit(e, 0, HitBy::Weapon(W::DeathRay), 0.1).is_some() {
+        return Err("a solo setup and finish counted as a duo".into());
+    }
+    if ledger.hit(e, 1, HitBy::Weapon(W::DeathRay), 0.2) != Some((CoopFeat::DeepFreeze, 0)) {
+        return Err("a teammate's beam on a chilled foe is not Deep Freeze Protocol".into());
+    }
+    if ledger.hit(e, 1, HitBy::Weapon(W::LaserPistol), 0.3).is_some() {
+        return Err("a finisher without its setup counted".into());
+    }
+    ledger.hit(e, 0, HitBy::Weapon(W::RivetGun), 1.0);
+    if ledger.hit(e, 1, HitBy::Thorns, 1.0 + DUO_WINDOW + 0.1).is_some() {
+        return Err("a finisher after the window counted".into());
+    }
+    let mut feats = Vec::new();
+    let first = crate::duos::tally(&mut feats, CoopFeat::StaticCascade, (0, AstronautKind::Buzz), (1, AstronautKind::Yuki));
+    let again = crate::duos::tally(&mut feats, CoopFeat::StaticCascade, (1, AstronautKind::Yuki), (0, AstronautKind::Buzz));
+    if !first || again || feats.len() != 1 || feats[0].count != 2 {
+        return Err("STATIC CASCADE's pair is not tallied as one unordered pair".into());
+    }
+    Ok(())
 }
