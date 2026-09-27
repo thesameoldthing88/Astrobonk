@@ -56,14 +56,14 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P04 Accessibility & display settings | ✅ wave 2. Gaps: §13 'minimum enemy-outline thickness' and 'reduce clutter' silhouette merge not built (proposed for P24); co-op clients get no damage numbers and no results screen (pre-existing), so number settings and the ASSISTED results line are host/solo only; settings panel is mouse + TAB/ESC only until P27 |
 | P05 Tomes 8 → 23 + loadout | ✅ wave 3. Gaps: Nightfall reads a fixed sun (`planet::sunward`/`is_night`) until P07 turns it; Duplication's free Microwave use and Salvage's Microwave discount wait for P16's Gold price; Duplication/Salvage do nothing for joiners until P14 (host-only interactables); Golden Tome max is ×1.5 per the GDD formula (old saves were ×2.0 at L20) — design call; per-rank numbers not playtested |
 | P06 Movement techs + Antipode Blink | ✅ wave 3. Gaps: Antipode Blink mastery/quest ladder is P21/P26 (MoveTech counts slams/grinds/blinks for them); antipode tell is a HUD dial until P24's threat ring; no gamepad binds (P27); §4 jump hang ~0.73 s vs GDD ~1.2 s left for a playtest; slam/rail/blink numbers not playtested; `CLAUDE.md` module map lacks `techs` and `tomes` |
-| P07 Day/night cycle, world gimmicks, diegetic difficulty | 🔨 building (track C, then P09 on top) |
-| P08 New enemies batch 1 | 🔀 built + reviewed; staging into main via `stage/B` |
-| P09 Planetary events (2 per world) | 🔨 building (track C, on P07) |
-| P10 Glitched elite affixes | 🔀 built + reviewed; staging into main via `stage/B` |
-| P11 New enemies batch 2 | 🔨 building (track C) |
-| P12 Weapon depth, evolution fanfare, hitstop canon | 🔀 built + reviewed; staging into main via `stage/B` |
-| P13 Bosses: Hollow Cosmonaut + canon phases | 🔨 building (track C) |
-| P14 Co-op peer interactables + loot split | 🔨 building (track C) |
+| P07 Day/night cycle, world gimmicks, diegetic difficulty | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P08 New enemies batch 1 | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P09 Planetary events (2 per world) | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P10 Glitched elite affixes | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P11 New enemies batch 2 | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P12 Weapon depth, evolution fanfare, hitstop canon | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P13 Bosses: Hollow Cosmonaut + canon phases | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
+| P14 Co-op peer interactables + loot split | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P15 World 4: PEBBLE + THE HAND | ☐ |
 | P16 Interactables & lore objects | ☐ |
 | P17 World 5: BRRRR-9 + THE ZAMBONI | ☐ |
@@ -71,7 +71,7 @@ into `claude/pensive-keller-0cood4` by an integrator), so they are listed by ID,
 | P19 Branching campaign & tiers | ↪ superseded by P33 (planets are the levels) |
 | P20 Bespoke minibosses (2 per world) | ☐ |
 | P21 Quests ~50 + mission wall + unlock gating | ☐ |
-| P22 Audio: per-world music + meme SFX | 🔀 built + reviewed; staging into main via `stage/B` |
+| P22 Audio: per-world music + meme SFX | ☐ rebuilding — the first build was lost when the container was wiped before it was pushed |
 | P23 Ascension Depth I–X, weekly mutator, endless | ☐ |
 | P24 VFX & HUD pass | ☐ |
 | P25 NG+ "The Copy" + the Static as your dead runs | ☐ |

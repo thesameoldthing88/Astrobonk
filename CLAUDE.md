@@ -18,6 +18,12 @@ to the crash site with Hades-style persistence; cartoon-spooky tone (E10+); toon
   `--headless 1200 --fast-boss --planet mars|darkmoon`, `--headless 1200 --fast-boss --coop2`.
   Useful flags: `--hero <name>`, `--seed N`, `--planet <name>`. Add a flag when a new feature
   needs a smoke path (e.g. `--event <name>`, `--ascension N`).
+- **Linux/cloud test harness (`tools/dev/`):** `setup.sh` installs the system libraries plus a virtual
+  display and software Vulkan (re-run it after a container is re-provisioned); `build.sh` builds
+  the current checkout (worktrees share one target dir) and puts a stripped binary at
+  `./.astrobonk-bin`; `smoke.sh` runs the smoke matrix; `win.sh <secs> <prefix> [args]` runs the
+  REAL windowed game on a virtual display with screenshots every 8 s; `coop.sh <secs> <prefix>`
+  runs a host and a client over loopback. Look at the screenshots — they are the only visual check.
 - The smoke is NOT deterministic even with `--seed`; never use it as a before/after oracle.
 - Set `APPDATA` to a temp dir when running tests, or logs/saves land in `./astrobonk/`.
 - Two-instance co-op (needs a display): `--host --autodrop --botinput --netlog` and
