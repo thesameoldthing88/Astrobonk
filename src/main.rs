@@ -389,6 +389,7 @@ fn main() {
                 daynight::apply_sky,
                 daynight::sky_notices,
                 daynight::farside_gems,
+                daynight::night_static.after(enemies::enemy_flash),
                 gimmicks::spore_visuals.after(gimmicks::spore_clock),
                 gimmicks::crawl_visuals,
             )
