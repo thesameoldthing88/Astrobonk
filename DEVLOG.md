@@ -1,5 +1,23 @@
 # ASTROBONK DEVLOG
 
+## 2026-09-27 — P07 lands: the turning sun, night rules and the world gimmicks
+- **P07:** `daynight.rs` — ONE sun (`Sun::of`) replacing the fixed `sunward`/`is_night`; the host
+  turns it and eats it (Devoured Sun Shard + Cursed Δ every 60 s toward night-lock), both on
+  `RunSnapMsg`, clients dead-reckon; lighting follows it everywhere (a lit crash site at the
+  start); night = +15% horde pace, spawns 20% closer, +25% kill Gold, the Static fading at
+  night; the Moon's Earthside/Farside (Earthlight, brighter gems, +20% elites). `gimmicks.rs` —
+  Mars thorn flora snags, Dark Moon spore caps (telegraphed, hazard lane), The Crawl (Static
+  massing seen through the crust via an x-ray material, then erupting as The Static rises).
+  Headless `--daynight` / `--hazards` probes assert the numbers.
+- **Reconciled on landing:** the toon rim now follows `daynight::SunLight` (P03's stand-in sun
+  is gone); `daynight::apply_sky` is the one ambient writer and its night end is P36's toon
+  night fill (P07's own night ambient fields removed); `--warp` uses the live sun.
+- **Fixed on landing:** the Crawl's sites lagged the clock by a frame per level-up (a level-up
+  opening mid-frame stops the `playing` systems after `run_clock`), so after a few level-ups
+  they were not erupting when The Static rose — pre-Static mass is now derived from the clock.
+- **Verified:** smoke 6/6; `--daynight` solo/co-op, `--hazards` on Moon/Mars/Dark Moon solo and
+  co-op, `--overflow`; windowed Moon (lit start) and Dark Moon; co-op 60 s, identical layouts.
+
 ## 2026-09-27 — P36 lands: the toon art style
 - **P36:** `toon.rs` patches bevy_pbr's own lighting module once it loads (3 cel steps, a hard
   specular, a two-step flashlight cone) — every material in every lane gets the look with no
