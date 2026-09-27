@@ -18,6 +18,8 @@ use bevy::time::TimeUpdateStrategy;
 use std::collections::HashMap;
 use std::time::Duration;
 
+mod world_probe;
+
 /// `--choices`: what the bot's scripted level-up economy has exercised so far.
 #[derive(Default)]
 struct ChoiceScript {
@@ -1738,6 +1740,7 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         .init_resource::<AssistProbe>()
         .insert_resource(TomeProbe { tomes: probe_tomes.clone(), rank: probe_rank, ..default() })
         .insert_resource(TechProbe { on: args.iter().any(|a| a == "--techs"), ..default() })
+        .insert_resource(world_probe::WorldProbe::from_args(&args))
         .init_resource::<crate::techs::GrindLines>()
         .init_resource::<crate::techs::TechTelemetry>()
         .init_resource::<crate::gimmicks::WorldFlora>()
@@ -1833,8 +1836,24 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
                 crate::gimmicks::spore_clock,
                 crate::gimmicks::spore_sim.after(crate::enemies::rebuild_hash),
                 crate::daynight::farside_gems,
+                crate::daynight::night_static,
             )
                 .chain()
+                .run_if(crate::playing),
+        )
+        // --daynight / --hazards (P07)
+        .add_systems(
+            Update,
+            (
+                world_probe::world_probe_stage
+                    .after(bot_drive)
+                    .before(crate::player::player_physics)
+                    .before(crate::pickups::kill_drops),
+                world_probe::world_probe_watch
+                    .after(crate::enemies::enemy_move)
+                    .after(crate::gimmicks::crawl_sim),
+            )
+                .run_if(world_probe::WorldProbe::on)
                 .run_if(crate::playing),
         )
         // §4 movement techs — the host's half as main.rs runs it (headless IS the host);
@@ -2424,6 +2443,9 @@ pub fn run_headless(ticks: u64, fast_boss: bool, hero: AstronautKind, planet_kin
         if ok {
             println!("ASSIST OK: density, damage, one more chance, run flagged");
         }
+    }
+    if !world_probe::report(world) {
+        ok = false;
     }
     if enemies == 0 && !run.boss_dead {
         println!("FAIL: spawner produced no live enemies");

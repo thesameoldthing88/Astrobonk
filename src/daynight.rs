@@ -363,6 +363,37 @@ pub fn farside_gems(
     }
 }
 
+/// Every machine: §4 "The Static is near-invisible at night — you hear it before you see
+/// it". A ghost of The Static on the night side wears the faint material, by day the usual
+/// one. Two shared materials swapped by handle (`BaseMat` too, so the hit-flash restores the
+/// right one); a client's proxies have no `BaseMat` and just wear it.
+pub fn night_static(
+    run: Res<RunState>,
+    assets: Res<crate::enemies::EnemyAssets>,
+    mut q: Query<(&crate::enemies::Enemy, &Transform, &mut MeshMaterial3d<StandardMaterial>, Option<&mut crate::enemies::BaseMat>)>,
+) {
+    if !run.static_active {
+        return;
+    }
+    let sun = Sun::of(&run);
+    let day_mat = &assets.mats[&crate::content::enemies::EnemyKind::Ghost];
+    for (e, tf, mut mat, base) in &mut q {
+        if e.kind != crate::content::enemies::EnemyKind::Ghost || e.elite {
+            continue;
+        }
+        let want = if sun.is_night(tf.translation.normalize_or_zero()) { &assets.ghost_night_mat } else { day_mat };
+        if let Some(mut base) = base {
+            if base.0 != *want {
+                base.0 = want.clone();
+            }
+        }
+        // never over the hit-flash: it hands back to `BaseMat` when it ends
+        if mat.0 != *want && (mat.0 == *day_mat || mat.0 == assets.ghost_night_mat) {
+            mat.0 = want.clone();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 
 /// Headless self-check: the sun turns once a stage and opens every stage on a lit crash

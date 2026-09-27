@@ -419,6 +419,9 @@ pub const NIGHT_ENEMY_SPEED: f32 = 0.15;
 /// ...and a wave aimed at an astronaut standing in the night lands this much closer (it
 /// crests the horizon INSIDE your vision).
 pub const NIGHT_SPAWN_ARC_MULT: f32 = 0.8;
+/// §4 night risk: "The Static is near-invisible — you hear it before you see it". A ghost on
+/// the night side fades to this opacity (by day it is 0.55).
+pub const GHOST_NIGHT_ALPHA: f32 = 0.12;
 /// §4 night reward: gold from kills on the night side.
 pub const NIGHT_GOLD_MULT: f32 = 1.25;
 /// Diegetic difficulty (§3): every SUN_EAT_SECS the day side shrinks toward night-lock
