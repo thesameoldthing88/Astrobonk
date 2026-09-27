@@ -475,9 +475,10 @@ pub fn beacon_flares(
 /// What a teammate's weapon does to YOU (§11: friendly fire off for damage, ON for physics).
 #[derive(Clone, Copy, Debug)]
 pub enum ForceKind {
-    /// Knocked along the ground at up to this speed (m/s, fading to half at the edge), with a
-    /// hop — a Wrench arc, a rocket's blast, a Slam, a drop-in's landing.
-    Shove(f32),
+    /// Knocked along the ground at up to this speed (m/s, fading to half at the edge) and
+    /// popped up at the second (a blast's hop; a swing's is 0) — a Wrench arc, a rocket's
+    /// blast, a Slam, a drop-in's landing.
+    Shove(f32, f32),
     /// A cryo field: slowed for this long (refreshed while you stand in it).
     Chill(f32),
     /// A Tesla arc passing close: a jolt into a hop.
@@ -541,14 +542,14 @@ pub fn friendly_physics(
             }
             let away = away.unwrap_or_else(|| sphere::tangent_frame(p.dir).0);
             match f.kind {
-                ForceKind::Shove(speed) => {
+                ForceKind::Shove(speed, pop) => {
                     if cooldown.contains_key(&e) {
                         continue;
                     }
                     let falloff = 1.0 - 0.5 * (arc / f.radius.max(0.1)).min(1.0);
                     let dv = away * (speed * falloff).min(FRIENDLY_SHOVE_MAX);
                     p.vel_t += dv;
-                    let pop = if p.grounded && !ps.dead { FRIENDLY_POP } else { 0.0 };
+                    let pop = if p.grounded && !ps.dead { pop } else { 0.0 };
                     if pop > 0.0 {
                         p.vel_r = p.vel_r.max(pop);
                         p.grounded = false;
@@ -655,7 +656,7 @@ pub fn orbital_drops(
             let away = (en.dir - p.dir * en.dir.dot(p.dir)).try_normalize().unwrap_or_else(|| sphere::tangent_frame(p.dir).0);
             en.knock += away * DROPIN_LAND_KNOCK * (1.0 - arc / DROPIN_LAND_RADIUS).max(0.3);
         }
-        forces.write(FriendlyForce { from: e, at: tf.translation, radius: DROPIN_LAND_RADIUS, cone: None, kind: ForceKind::Shove(FRIENDLY_BLAST_SHOVE) });
+        forces.write(FriendlyForce { from: e, at: tf.translation, radius: DROPIN_LAND_RADIUS, cone: None, kind: ForceKind::Shove(FRIENDLY_BLAST_SHOVE, FRIENDLY_POP) });
         let level = ps.drop_level.clamp(1, u8::MAX as u32) as u8;
         fx.write(CoopFxMsg { fx: CoopFx::DropIn { owner: pid.0, level, dir: p.dir }, from_wire: false });
         info!("COOP player {} dropped in at level {}", pid.0, level);

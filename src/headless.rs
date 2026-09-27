@@ -2788,7 +2788,6 @@ fn revive_probe(
                 return;
             }
             probe.notes.push(format!("revived in {secs:.2} s at {:.0}% HP, rescuer x{boost:.2} for {:.1} s", frac * 100.0, host.adrenaline));
-            hits.write(crate::messages::PlayerHitMsg { victim: peer_e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
             probe.next();
         }
         // down again, nobody coming: shots pass over it, a ring ignores it (L18, L19)
@@ -2798,7 +2797,10 @@ fn revive_probe(
                 pin(&mut p, far);
             }
             if !peer_dead {
-                return; // the hit lands next frame
+                // down again, as soon as the revive's grace (iframes) runs out
+                hits.write(crate::messages::PlayerHitMsg { victim: peer_e, amount: 1.0e6, from: Vec3::ZERO, attacker: None });
+                probe.t0 = probe.ticks;
+                return;
             }
             if probe.shrine.is_none() {
                 // the nearest unfinished ring, under the Beacon, half charged
@@ -2896,6 +2898,7 @@ fn cascade_probe(
     telemetry: Res<crate::coop::CoopTelemetry>,
     belts: Query<(), With<crate::duos::CascadeBelt>>,
     mut q: Query<(&crate::player::PlayerId, &mut Player, &mut PlayerState)>,
+    mut crowd: Query<(Entity, &mut Enemy, &mut Transform), (Without<crate::enemies::Boss>, Without<crate::interact::Pot>, Without<Player>)>,
 ) {
     use crate::content::weapons::WeaponKind;
     if probe.done {
@@ -2935,6 +2938,26 @@ fn cascade_probe(
                 probe.fail(format!("storm-callers 60 degrees apart charged a link ({c:.2})"));
                 return;
             }
+            // five foes parked on the belt's line, halfway round from either owner (and one
+            // well off it) — the cascade must reach them, and only them
+            let axis = host_dir.cross(peer_at).normalize();
+            let mid = (host_dir + peer_at).normalize_or_zero();
+            let picked: Vec<Entity> = crowd.iter().filter(|(_, en, _)| en.speed > 0.0).map(|(e, ..)| e).take(6).collect();
+            for (k, e) in picked.iter().enumerate() {
+                let d = if k < 5 {
+                    (Quat::from_axis_angle(axis, (k as f32 - 2.0) * 0.05) * mid).normalize()
+                } else {
+                    (mid + axis * 0.3).normalize()
+                };
+                if let Ok((_, mut en, mut tf)) = crowd.get_mut(*e) {
+                    en.dir = d;
+                    en.speed = 0.0;
+                    en.hp = 1.0e5;
+                    en.max_hp = 1.0e5;
+                    tf.translation = planet.surface_point(d);
+                }
+            }
+            probe.staged = picked;
             probe.next();
         }
         // opposite hemispheres: charge, fire
@@ -2962,15 +2985,18 @@ fn cascade_probe(
             if probe.secs_in_stage() < 0.25 {
                 let n_belt = belts.iter().count();
                 let tallied = run.feats.iter().any(|f| f.feat == crate::content::duos::CoopFeat::StaticCascade && f.count == 1);
-                if telemetry.cascade_hits == 0 || n_belt == 0 || !tallied || probe.fx[2] != 1 {
+                let struck = |e: &Entity| crowd.get(*e).map(|(_, en, _)| en.hp < en.max_hp).unwrap_or(true);
+                let on_line = probe.staged.iter().take(5).filter(|e| struck(e)).count();
+                let off_line = probe.staged.get(5).is_some_and(struck);
+                if on_line < 5 || off_line || n_belt == 0 || !tallied || probe.fx[2] != 1 {
                     let why = format!(
-                        "cascade: {} hits, {n_belt} belt segments, tallied {tallied}, fx {}",
+                        "cascade: {on_line}/5 foes on the line struck, off-line struck {off_line}, {} hits, {n_belt} belt segments, tallied {tallied}, fx {}",
                         telemetry.cascade_hits, probe.fx[2]
                     );
                     probe.fail(why);
                     return;
                 }
-                probe.notes.push(format!("{} foes in the belt, {n_belt} belt segments", telemetry.cascade_hits));
+                probe.notes.push(format!("{} foes in the belt (all 5 staged on its line, not the one beside it), {n_belt} belt segments", telemetry.cascade_hits));
             }
             if telemetry.cascades > 1 {
                 probe.fail("a second cascade inside the cooldown");

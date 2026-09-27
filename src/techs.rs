@@ -500,7 +500,7 @@ pub fn slam_shockwave(
             at: tf.translation,
             radius: reach.radius,
             cone: None,
-            kind: crate::coop::ForceKind::Shove(SLAM_KNOCK * reach.t * 0.3),
+            kind: crate::coop::ForceKind::Shove(SLAM_KNOCK * reach.t * 0.3, FRIENDLY_POP),
         });
         for (te, _) in hash.near(tf.translation, reach.radius + 1.5) {
             let Ok(en) = enemies.get(te) else { continue };
