@@ -446,6 +446,17 @@ pub fn crawl_sim(
         return;
     }
     crawl.tick(dt);
+    if !run.static_active {
+        // Before The Static every site masses toward the same moment — the clock running out —
+        // so slave them to the clock instead of integrating on their own: a frame where the
+        // clock ticked and this system did not (a level-up panel opening mid-frame stops the
+        // `playing` systems after run_clock) used to leave them ~0.03 s short per level-up,
+        // not yet erupting when The Static rose.
+        let m = (1.0 - until_static / CRAWL_MASS_SECS).clamp(0.0, 1.0);
+        for site in &mut crawl.sites {
+            site.mass = m;
+        }
+    }
     let anchors: Vec<Vec3> = astronauts.iter().filter(|(_, ps)| !ps.dead).map(|(p, _)| p.dir).collect();
     if anchors.is_empty() {
         return;
